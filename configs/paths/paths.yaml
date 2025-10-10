@@ -1,0 +1,23 @@
+test_dataset_types: 
+  - pdbbind_conf
+  - dockgen_full_conf
+  - astex_conf
+  - posebusters_conf
+  - any_conf
+
+use_all_chains: true
+
+cache_path: <path_to_cache>
+data_folder: <path_to_data>
+checkpoints_folder: <path_to_checkpoints>
+inference_results_folder: <path_to_inference_results>
+
+pdbbind_data_dir: <path_to_PDBBind_processed>
+dockgen_data_dir: <path_to_DockGen/processed_files>
+posebusters_data_dir: <path_to_posebusters_benchmark>
+astex_data_dir: <path_to_astex_diverse>
+any_data_dir: <path_to_any_new_dataset>
+
+llm_emb_dim: 480
+pdbbind_split_test: data/pdbbind_test.txt
+posebusters_split_test: data/posebusters_v2.txt

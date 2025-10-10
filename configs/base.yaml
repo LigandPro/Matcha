@@ -1,0 +1,10 @@
+seed: 777
+
+# Dataset settings
+tr_std: 5.
+
+# Model settings
+use_time: true
+dropout_rate: 0.
+num_kernel_pos_encoder: 128
+objective: ranking
