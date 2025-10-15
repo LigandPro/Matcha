@@ -67,7 +67,7 @@ If you do not need all datasets, comment unnecessary datasets in the config's `t
 - `data_folder`: path where intermediate files will be stored (eg. ESM embeddings)
 - `inference_results_folder`: <path_to_inference_results>
 
-3. Download checkpoints for Matcha for [here](https://huggingface.co/DFrolova/Matcha). You need to download the `pipeline` folder. Provide the path to the folder where you store them (folder that contains `pipeline`) in the `checkpoints_folder` in paths.yaml.
+3. Download checkpoints for Matcha for [here](https://huggingface.co/LigandPro/Matcha). You need to download the `pipeline` folder. Provide the path to the folder where you store them (folder that contains `pipeline`) in the `checkpoints_folder` in paths.yaml.
 
 
 ## Running inference with one script <a name="inference"></a>
