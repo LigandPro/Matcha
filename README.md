@@ -29,6 +29,7 @@ co-folding models.
   - [Preprocessing](#preproc)
   - [Inference](#inf)
   - [Metrics computation](#metrics)
+- [License](#license)
 
 
 ## Installation <a name="install"></a>
@@ -110,9 +111,22 @@ python scripts/save_preds_for_npbench.py -p configs/paths/paths.yaml -n inferenc
 
 Optionally, you can compute sample-level and dataset-level metrics (such as symmetry-corrected RMSD and passing PoseBusters filters) having your predictions.
 Individual metrics for each sample are stored in the folder with inference results in file `f'{dataset_name}_final_preds_all_metrics.npy'`.
+
 Dataset-level statistics are stored in the folder with inference results in file `f'{dataset_name}_final_metrics.csv'`.
 This can be done with the command:
 
 ```bash
 python scripts/compute_metrics.py -p configs/paths/paths.yaml -n inference_folder_name
 ```
+
+## License <a name="license"></a>
+Shield: [![CC BY 4.0][cc-by-shield]][cc-by]
+
+This work is licensed under a
+[Creative Commons Attribution 4.0 International License][cc-by].
+
+[![CC BY 4.0][cc-by-image]][cc-by]
+
+[cc-by]: http://creativecommons.org/licenses/by/4.0/
+[cc-by-image]: https://i.creativecommons.org/l/by/4.0/88x31.png
+[cc-by-shield]: https://img.shields.io/badge/License-CC%20BY%204.0-lightgrey.svg
