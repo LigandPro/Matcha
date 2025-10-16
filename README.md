@@ -49,6 +49,7 @@ DockGen can be downloaded from [here](https://zenodo.org/records/10656052).
 
 ### Adding new dataset <a name="new_datasets"></a>
 If you need to predict some new data, you need to construct a dataset folder with the following structure:
+```
 - dataset_path
     - uid1
         - f'{uid1}_protein.pdb' - protein structure file
@@ -57,7 +58,7 @@ If you need to predict some new data, you need to construct a dataset folder wit
         - f'{uid2}_protein.pdb'
         - f'{uid2}_ligand.sdf' 
     - ...
-
+```
 ## Preparing the config file <a name="config"></a>
 1. You need to provide paths to the required datasets. Edit the `configs/paths/paths.yaml` file: add `posebusters_data_dir`, `astex_data_dir`, `pdbbind_data_dir`, `dockgen_data_dir`. For a new dataset provide its path in `any_data_dir`. 
 
