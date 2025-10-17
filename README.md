@@ -1,6 +1,6 @@
 # Matcha: Multi-Stage Riemannian Flow Matching for Accurate and Physically Valid Molecular Docking
 
-This is an official implementation of the paper [Matcha: Multi-Stage Riemannian Flow Matching for Accurate and Physically Valid Molecular Docking]().
+This is an official implementation of the paper [Matcha: Multi-Stage Riemannian Flow Matching for Accurate and Physically Valid Molecular Docking](https://arxiv.org/abs/2510.14586).
 
 ## Overview
 
@@ -30,6 +30,7 @@ co-folding models.
   - [Inference](#inf)
   - [Metrics computation](#metrics)
 - [License](#license)
+- [Citation](#citation)
 
 
 ## Installation <a name="install"></a>
@@ -131,3 +132,19 @@ This work is licensed under a
 [cc-by]: http://creativecommons.org/licenses/by/4.0/
 [cc-by-image]: https://i.creativecommons.org/l/by/4.0/88x31.png
 [cc-by-shield]: https://img.shields.io/badge/License-CC%20BY%204.0-lightgrey.svg
+
+## Citation <a name="citation"></a>
+
+If you use Matcha in your work, please cite our paper:
+
+```
+@misc{frolova2025matchamultistageriemannianflow,
+      title={Matcha: Multi-Stage Riemannian Flow Matching for Accurate and Physically Valid Molecular Docking}, 
+      author={Daria Frolova and Talgat Daulbaev and Egor Sevryugov and Sergei A. Nikolenko and Dmitry N. Ivankov and Ivan Oseledets and Marina A. Pak},
+      year={2025},
+      eprint={2510.14586},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2510.14586}, 
+}
+```
