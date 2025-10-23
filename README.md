@@ -29,6 +29,7 @@ co-folding models.
   - [Preprocessing](#preproc)
   - [Inference](#inf)
   - [Metrics computation](#metrics)
+- [Benchmarking and pocket-aligned RMSD computation](#benchmarking)
 - [License](#license)
 - [Citation](#citation)
 
@@ -120,6 +121,36 @@ This can be done with the command:
 ```bash
 python scripts/compute_metrics.py -p configs/paths/paths.yaml -n inference_folder_name
 ```
+
+## Benchmarking and pocket-aligned RMSD computation <a name="benchmarking"></a>
+If you need to compute metrics for other docking tool predictions, you firtsly need to construct a folder with method predictions with a certain structure. Docking methods can be divided into those that modify the protein structure (eg. co-folding methods, FlowDock, NeuralPlexer) and those that use the reference protein structure (eg. Matcha, DiffDock, SMINA). We have a separate flag `has_pred_proteins` to differentiate these cases. When `has_pred_proteins=False`, the folder needs to contain only ligands, while when `has_pred_proteins=True`, you need to store both proteins and ligands.
+
+The structure of the folder with predictions:
+
+```
+- method_name
+  - dataset_name
+    - uid1
+      - conf_0
+        - 'prot.pdb' - protein structure file (optional, needed when has_pred_proteins=True)
+        - 'lig_0.sdf' - ligand sdf file
+    - uid2
+      - conf_0
+        - 'prot.pdb' - protein structure file (optional, needed when has_pred_proteins=True)
+        - 'lig_0.sdf' - ligand sdf file
+    - ...
+```
+
+Then, you need to run the script `compute_aligned_rmsd.py` to align protein pockets and to compute RMSD and posebusters metrics.
+It has two types of alignment ('base' and 'pocket'), among which we prefer 'base' option because it does not produce overoptimistic results (see Appendix D in the original paper for the discussion on this topic).
+You need to set `methods_data` dict inside the script, providing method names and their `has_pred_proteins` flags.
+Also, you need to provide the path where you store initial method predictions (`--init-preds-path`) as well as dataset_names you need to evaluate (`dataset_names`).
+Then, run the script:
+
+```bash
+python scripts/compute_aligned_rmsd.py -p configs/paths/paths.yaml -a base --init-preds-path <path_to_initial_preds>
+```
+
 
 ## License <a name="license"></a>
 Shield: [![CC BY-NC 4.0][cc-by-nc-shield]][cc-by-nc]

@@ -15,3 +15,6 @@ tensorboard
 omegaconf
 spyrmsd
 prody
+# posebusters
+# pymol-open-source
+# numpy==1.23.5

@@ -121,7 +121,7 @@ def compute_metrics_all(conf, inference_run_name):
         results_df, _, updated_metrics = get_simple_metrics_df(
             data_for_buster, compute_symm_rmsd=True,
             mol2isomorphisms=mol2isomorphisms, score_names=score_names_for_metrics)
-        print('RMSD metrics for', dataset_name)
+        print('RMSD metrics for', dataset_name, inference_run_name)
         results_df.set_index('ranking', inplace=True)
         print(results_df.loc['error_estimate_0', [
               'SymRMSD < 2A', 'SymRMSD < 5A', 'tr_err < 1A', 'median SymRMSD', 'median tr_err']])
@@ -136,7 +136,7 @@ def compute_metrics_all(conf, inference_run_name):
         results_df = pd.DataFrame(rows_list)
         results_df.to_csv(os.path.join(
             preds_path, f'{dataset_name}_final_metrics.csv'), index=False)
-        print('All metrics for', dataset_name)
+        print('All metrics for', dataset_name, inference_run_name)
         results_df.set_index('ranking', inplace=True)
         print(results_df.loc['error_estimate_0_fast', ['SymRMSD < 2A', 'SymRMSD < 2A & PB valid',
               'SymRMSD < 5A', 'tr_err < 1A', 'median SymRMSD', 'median tr_err']])
