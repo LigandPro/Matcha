@@ -65,6 +65,7 @@ def get_datasets(conf, splits, return_separately=False,
                     data_dir_conf=data_dir_conf,
                     n_preds_to_use=n_preds_to_use,
                     use_all_chains=use_all_chains,
+                    n_confs_override=conf.get('n_confs_override', None),
                 )
             if use_sorted_batching:
                 split_dataset = PDBBindWithSortedBatching(dataset=split_dataset, batch_limit=conf.batch_limit,
