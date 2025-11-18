@@ -42,6 +42,23 @@ cd matcha
 pip install -e .
 ```
 
+### UV-friendly install and smina/gnina-like CLI
+
+```bash
+# create environment and install dependencies
+uv sync
+
+# run Matcha like smina/gnina
+uv run match \
+  -r path/to/protein.pdb \
+  -l path/to/ligand.sdf \
+  -o path/to/out_pose.sdf \
+  --checkpoints /path/to/pipeline \
+  --run-name my_run \
+  --n-samples 40 \
+  --gpu 0
+```
+
 ## Datasets <a name="datasets"></a>
 ### Existing datasets <a name="exist_datasets"></a>
 If you want to make predictions for existing test datasets, you need to download them first.
