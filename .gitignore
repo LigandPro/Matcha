@@ -5,7 +5,8 @@ __pycache__/
 
 # C extensions
 *.so
-
+uv.lock
+checkpoints/
 # Distribution / packaging
 .Python
 build/

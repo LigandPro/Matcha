@@ -1,0 +1,42 @@
+[project]
+name = "matcha"
+version = "1.0.2"
+description = "Matcha: Multi-Stage Riemannian Flow Matching for Molecular Docking"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+  { name = "Matcha authors" }
+]
+dependencies = [
+  "tqdm",
+  "numpy",
+  "scipy",
+  "torch",
+  "deli",
+  "transformers",
+  "pyyaml",
+  "biopython",
+  "accelerate",
+  "timm",
+  "rdkit",
+  "tensorboard",
+  "omegaconf",
+  "spyrmsd",
+  "prody",
+  "typer>=0.20.0",
+  "rich",
+  "huggingface-hub>=0.23",
+  "pandas>=2.3.3",
+  "posebusters>=0.6.0",
+]
+
+[project.scripts]
+matcha = "matcha.cli:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["matcha*"]
