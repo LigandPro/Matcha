@@ -45,19 +45,47 @@ pip install -e .
 ### UV-friendly install and smina/gnina-like CLI
 
 ```bash
-# create environment and install dependencies
+# Install with uv
 uv sync
 
-# run Matcha like smina/gnina
-uv run match \
-  -r path/to/protein.pdb \
-  -l path/to/ligand.sdf \
-  -o path/to/out_pose.sdf \
-  --checkpoints /path/to/pipeline \
-  --run-name my_run \
-  --n-samples 40 \
+# Basic usage - blind docking on entire protein (recommended)
+uv run matcha \
+  -r protein.pdb \
+  -l ligand.sdf \
+  -o results/ \
+  --run-name my_docking \
+  --n-samples 20 \
+  --gpu 0
+
+# With autobox - focus search around reference ligand (experimental)
+# Note: This crops the protein and may not work as well as blind docking
+uv run matcha \
+  -r protein.pdb \
+  -l ligand.sdf \
+  -o results/ \
+  --autobox-ligand reference_ligand.sdf \
+  --autobox-add 4 \
+  --run-name focused_docking \
+  --n-samples 20 \
+  --gpu 0
+
+# Manual box specification (experimental)
+uv run matcha \
+  -r protein.pdb \
+  -l ligand.sdf \
+  -o results/ \
+  --center-x 10 --center-y 20 --center-z 30 \
+  --size-x 20 --size-y 20 --size-z 20 \
+  --run-name manual_box \
   --gpu 0
 ```
+
+**Important notes:**
+- **Blind docking (no box)** is the native Matcha workflow and recommended for best results
+- **Autobox/manual box** features are experimental extensions, not part of original Matcha
+- Checkpoints auto-download from HuggingFace if not specified
+- Default `n_samples=20`, seed=42
+- Workdir is preserved by default (use `--no-keep-workdir` to clean up)
 
 ## Datasets <a name="datasets"></a>
 ### Existing datasets <a name="exist_datasets"></a>
