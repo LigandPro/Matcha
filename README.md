@@ -42,7 +42,7 @@ cd matcha
 pip install -e .
 ```
 
-### UV-friendly install and smina/gnina-like CLI
+### uv install and cli
 
 ```bash
 # Install with uv
@@ -59,6 +59,7 @@ uv run matcha \
 
 # With autobox - focus search around reference ligand (experimental)
 # Note: This crops the protein and may not work as well as blind docking
+# TODO: NOT WORK
 uv run matcha \
   -r protein.pdb \
   -l ligand.sdf \
@@ -69,7 +70,8 @@ uv run matcha \
   --n-samples 20 \
   --gpu 0
 
-# Manual box specification (experimental)
+# Manual box specification
+# TODO: NOT WORK
 uv run matcha \
   -r protein.pdb \
   -l ligand.sdf \
