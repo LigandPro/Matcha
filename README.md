@@ -35,12 +35,6 @@ co-folding models.
 
 
 ## Installation <a name="install"></a>
-To install the `matcha` package, do the following:
-
-```bash
-cd matcha
-pip install -e .
-```
 
 ### uv install and cli
 
