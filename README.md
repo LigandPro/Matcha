@@ -48,45 +48,41 @@ pip install -e .
 # Install with uv
 uv sync
 
-# Basic usage - blind docking on entire protein (recommended)
+# Basic usage for single complex - blind docking on entire protein (recommended)
 uv run matcha \
   -r protein.pdb \
   -l ligand.sdf \
   -o results/ \
   --run-name my_docking \
-  --n-samples 20 \
+  --n-samples 40 \
   --gpu 0
 
-# With autobox - focus search around reference ligand (experimental)
-# Note: This crops the protein and may not work as well as blind docking
-# TODO: NOT WORK
+# With autobox - focus search around reference ligand center
 uv run matcha \
   -r protein.pdb \
   -l ligand.sdf \
   -o results/ \
   --autobox-ligand reference_ligand.sdf \
-  --autobox-add 4 \
   --run-name focused_docking \
-  --n-samples 20 \
+  --n-samples 40 \
   --gpu 0
 
-# Manual box specification
-# TODO: NOT WORK
+# Manual ligand center specification
 uv run matcha \
   -r protein.pdb \
   -l ligand.sdf \
   -o results/ \
   --center-x 10 --center-y 20 --center-z 30 \
-  --size-x 20 --size-y 20 --size-z 20 \
   --run-name manual_box \
+  --n-samples 40 \
   --gpu 0
 ```
 
 **Important notes:**
-- **Blind docking (no box)** is the native Matcha workflow and recommended for best results
-- **Autobox/manual box** features are experimental extensions, not part of original Matcha
+- **Blind docking (no box)** is the native Matcha workflow
+- **Autobox/manual ligand center** is the pocket-aware docking mode
 - Checkpoints auto-download from HuggingFace if not specified
-- Default `n_samples=20`, seed=42
+- Default `n_samples=40`, seed=42
 - Workdir is preserved by default (use `--no-keep-workdir` to clean up)
 
 ## Datasets <a name="datasets"></a>
@@ -122,7 +118,9 @@ If you do not need all datasets, comment unnecessary datasets in the config's `t
 
 
 ## Running inference with one script <a name="inference"></a>
-The script to compute all preprocessing and inference scripts in one. 
+If you need to compute inference for a dataset at once, you can use the script `full_inference.py`. It would be more computationally efficient than using the cli for each complex separately.
+
+The script `full_inference.py` is to compute all preprocessing and inference scripts in one. 
 Provide `--compute_final_metrics` if your dataset has true ligand positions in f'{uid_i}_ligand.sdf', so we can compute RMSD metrics and PoseBusters filters.
 Argument `-n inference_folder_name` is a name of a folder where to store inference results for dataset.
 

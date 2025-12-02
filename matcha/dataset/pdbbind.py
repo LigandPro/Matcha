@@ -289,10 +289,11 @@ class PDBBind(Dataset):
                 extended_complex.ligand.pred_tr = pred_data['tr_pred_init'] + \
                     pred_data['full_protein_center'] - \
                     extended_complex.protein.full_protein_center
+                extended_complex.ligand.pred_tr = extended_complex.ligand.pred_tr.astype(np.float32)
 
-                pred_pos = pred_data['transformed_orig'] + pred_data['full_protein_center'] - \
-                    extended_complex.protein.full_protein_center
                 if not self.use_predicted_tr_only:
+                    pred_pos = pred_data['transformed_orig'] + pred_data['full_protein_center'] - \
+                               extended_complex.protein.full_protein_center
                     extended_complex.ligand.predicted_pos = pred_pos
 
                 extended_complexes.append(extended_complex)
