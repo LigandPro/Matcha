@@ -10,7 +10,7 @@ import os
 import shutil
 import socket
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Tuple, List
 
@@ -156,18 +156,7 @@ def _ensure_checkpoints(path: Path) -> Path:
     return path
 
 
-def _parse_csv_floats(val: str, expected_len: int, name: str) -> Tuple[float, ...]:
-    parts = [p.strip() for p in val.split(",") if p.strip() != ""]
-    if len(parts) != expected_len:
-        raise typer.BadParameter(f"{name} must have {expected_len} comma-separated values")
-    try:
-        floats = tuple(float(p) for p in parts)
-    except ValueError as exc:
-        raise typer.BadParameter(f"{name} must contain numeric values") from exc
-    return floats
-
-
-def _autobox_from_ligand(ligand: Path, padding: float) -> Tuple[Tuple[float, float, float], Tuple[float, float, float]]:
+def _autobox_from_ligand(ligand: Path) -> Tuple[float, float, float]:
     mol = Chem.MolFromMolFile(str(ligand), removeHs=False, sanitize=False) if ligand.suffix.lower() in {".mol", ".mol2"} else None
     if mol is None and ligand.suffix.lower() == ".pdb":
         mol = Chem.MolFromPDBFile(str(ligand), removeHs=False, sanitize=False)
@@ -176,63 +165,9 @@ def _autobox_from_ligand(ligand: Path, padding: float) -> Tuple[Tuple[float, flo
         mol = suppl[0] if suppl and len(suppl) > 0 else None
     if mol is None or mol.GetNumConformers() == 0:
         raise typer.BadParameter(f"Failed to read ligand for autobox: {ligand}")
-    coords = mol.GetConformer().GetPositions()
-    mins = coords.min(axis=0)
-    maxs = coords.max(axis=0)
-    center = (mins + maxs) / 2.0
-    size = (maxs - mins) + 2 * float(padding)
-    return tuple(center.tolist()), tuple(size.tolist())
+    mol = Chem.RemoveAllHs(mol, sanitize=False)
+    return tuple(mol.GetConformer().GetPositions().mean(axis=0).tolist())
 
-
-def _autobox_from_protein(protein: Path, padding: float) -> Tuple[Tuple[float, float, float], Tuple[float, float, float]]:
-    coords = []
-    with protein.open() as fin:
-        for line in fin:
-            if line.startswith(("ATOM", "HETATM")) and len(line) >= 54:
-                try:
-                    x = float(line[30:38])
-                    y = float(line[38:46])
-                    z = float(line[46:54])
-                    coords.append((x, y, z))
-                except ValueError:
-                    continue
-    if not coords:
-        raise typer.BadParameter(f"No atom coordinates found in protein {protein}")
-    arr = np.array(coords, dtype=float)
-    mins = arr.min(axis=0)
-    maxs = arr.max(axis=0)
-    center = (mins + maxs) / 2.0
-    size = (maxs - mins) + 2 * float(padding)
-    return tuple(center.tolist()), tuple(size.tolist())
-
-
-def _crop_protein_to_box(protein: Path, dest: Path, center: Tuple[float, float, float], size: Tuple[float, float, float]) -> None:
-    cx, cy, cz = center
-    sx, sy, sz = size
-    half = (sx / 2.0, sy / 2.0, sz / 2.0)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    kept = 0
-    with protein.open() as fin, dest.open("w") as fout:
-        for line in fin:
-            if line.startswith(("ATOM", "HETATM")) and len(line) >= 54:
-                try:
-                    x = float(line[30:38])
-                    y = float(line[38:46])
-                    z = float(line[46:54])
-                except ValueError:
-                    continue
-                if (
-                    abs(x - cx) <= half[0]
-                    and abs(y - cy) <= half[1]
-                    and abs(z - cz) <= half[2]
-                ):
-                    fout.write(line)
-                    kept += 1
-            elif line.startswith("END"):
-                continue
-        fout.write("END\n")
-    if kept == 0:
-        raise typer.BadParameter("Cropping box removed all protein atoms; adjust box center/size or padding.")
 
 def _print_usage_and_exit() -> None:
     usage = """
@@ -246,11 +181,9 @@ Required:
 Search Space (optional - for focused docking):
   Manual box:
       --center-x, --center-y, --center-z FLOAT  Box center coordinates (Å)
-      --size-x, --size-y, --size-z FLOAT        Box size in each dimension (Å)
   OR
-  Autobox from reference ligand:
-      --autobox-ligand PATH   Reference ligand for autobox (extracts box from its coords)
-      --autobox-add FLOAT     Padding around reference ligand (Å, default: 4)
+  Autobox from reference ligand center:
+      --autobox-ligand PATH   Reference ligand for autobox (starts pocket-aware docking from its center coordinates)
 
   If no box specified: blind docking on entire protein
 
@@ -264,32 +197,29 @@ Common:
       --keep-workdir         Keep intermediates instead of cleaning up
 
 Optional:
-      --workdir PATH         Working directory (default: next to output)
-      --log PATH             Log file path (default: <out>/<run-name>.log)
-      --config PATH          Custom config to merge with defaults
+      --docking-batch-limit INT Number of tokens per batch for docking models (default: 15000).
+      --scoring-batch-size INT  Batch size for scoring (default: 4).
+      --workdir PATH            Working directory (default: next to output)
+      --log PATH                Log file path (default: <out>/<run-name>.log)
+      --config PATH             Custom config to merge with defaults
 
 Examples:
   # Blind docking on entire protein
   uv run matcha -r prot.pdb -l lig.sdf -o results/ --gpu 0
 
-  # Autobox from reference ligand (default padding 4 Å)
+  # Autobox from reference ligand
   uv run matcha -r prot.pdb -l lig.sdf -o results/ \
     --autobox-ligand ref_ligand.sdf --gpu 0
 
-  # Autobox with custom padding
-  uv run matcha -r prot.pdb -l lig.sdf -o results/ \
-    --autobox-ligand ref_ligand.sdf --autobox-add 6 --gpu 0
-
-  # Manual box specification
+  # Manual ligand center specification
   uv run matcha -r prot.pdb -l lig.sdf -o out.sdf \
-    --center-x 10 --center-y 20 --center-z 30 \
-    --size-x 20 --size-y 20 --size-z 20 --gpu 0
+    --center-x 10 --center-y 20 --center-z 30 --gpu 0
 """
     console.print(usage.rstrip())
     sys.exit(1)
 
 
-def run_match(
+def run_matcha(
     receptor: Optional[Path] = typer.Option(None, "-r", "--receptor", help="Protein structure (.pdb)."),
     ligand: Optional[Path] = typer.Option(None, "-l", "--ligand", help="Ligand with 3D coords (.sdf/.mol/.mol2/.pdb)."),
     out: Optional[Path] = typer.Option(
@@ -308,30 +238,23 @@ def run_match(
     center_x: Optional[float] = typer.Option(None, "--center-x", "--center_x", help="X coordinate of box center (Å)"),
     center_y: Optional[float] = typer.Option(None, "--center-y", "--center_y", help="Y coordinate of box center (Å)"),
     center_z: Optional[float] = typer.Option(None, "--center-z", "--center_z", help="Z coordinate of box center (Å)"),
-    size_x: Optional[float] = typer.Option(None, "--size-x", "--size_x", help="Box size in X dimension (Å)"),
-    size_y: Optional[float] = typer.Option(None, "--size-y", "--size_y", help="Box size in Y dimension (Å)"),
-    size_z: Optional[float] = typer.Option(None, "--size-z", "--size_z", help="Box size in Z dimension (Å)"),
     autobox_ligand: Optional[Path] = typer.Option(
         None,
         "--autobox-ligand",
         "--autobox_ligand",
         help="Reference ligand file for autobox (.sdf/.mol/.pdb)",
     ),
-    autobox_add: Optional[float] = typer.Option(
-        None,
-        "--autobox-add",
-        "--autobox_add",
-        help="Padding to add around autobox ligand (Å, default: 4)",
-    ),
     run_name: str = typer.Option("matcha_cli_run", "--run-name", help="Name for this docking run."),
-    n_samples: int = typer.Option(20, "--n-samples", help="Number of samples to generate per ligand."),
-    n_confs: Optional[int] = typer.Option(None, "--n-confs", help="Number of ligand conformers to generate (default min(10, n-samples))."),
+    n_samples: int = typer.Option(40, "--n-samples", help="Number of samples (poses) to generate per ligand."),
+    n_confs: Optional[int] = typer.Option(None, "--n-confs", help="Number of ligand conformers to generate with RDKit (default min(10, n-samples))."),
     gpu: Optional[int] = typer.Option(
         None, "--gpu", "-g", "-gpu", help="CUDA device index (sets CUDA_VISIBLE_DEVICES)."
     ),
     overwrite: bool = typer.Option(False, "--overwrite", help="Remove existing run folder if present."),
     keep_workdir: bool = typer.Option(True, "--keep-workdir/--no-keep-workdir", help="Keep working data (default: True)."),
     log: Optional[Path] = typer.Option(None, "--log", help="Path to log file (defaults to <out>/<run-name>.log)."),
+    docking_batch_limit: int = typer.Option(15000, "--docking-batch-limit", help="Number of tokens per batch for docking models (default: 15000)."),
+    scoring_batch_size: int = typer.Option(4, "--scoring-batch-size", help="Batch size for scoring (default: 4)."),
 ) -> None:
     if receptor is None or ligand is None or out is None:
         _print_usage_and_exit()
@@ -353,7 +276,7 @@ def run_match(
         """Print only to console"""
         console.print(msg)
 
-    start_time = datetime.utcnow()
+    start_time = datetime.now(timezone.utc)
     base_workdir = workdir or output_dir
     run_workdir = base_workdir / run_name if base_workdir != resolved_out else base_workdir
     if run_workdir.exists():
@@ -381,10 +304,9 @@ def run_match(
     # Search space (box) configuration - OPTIONAL
     # If not specified, will run on entire protein (blind docking)
     box_center_val: Optional[Tuple[float, float, float]] = None
-    box_size_val: Optional[Tuple[float, float, float]] = None
 
     # Check which method was specified
-    manual_box_specified = any([center_x, center_y, center_z, size_x, size_y, size_z])
+    manual_box_specified = any([center_x, center_y, center_z])
     autobox_specified = autobox_ligand is not None
 
     if manual_box_specified and autobox_specified:
@@ -392,28 +314,21 @@ def run_match(
 
     # Manual box
     if manual_box_specified:
-        if not all([center_x is not None, center_y is not None, center_z is not None,
-                   size_x is not None, size_y is not None, size_z is not None]):
+        if not all([center_x is not None, center_y is not None, center_z is not None]):
             raise typer.BadParameter(
-                "Manual box requires ALL six parameters:\n"
-                "  --center-x, --center-y, --center-z, --size-x, --size-y, --size-z"
+                "Manual box requires ALL three parameters:\n"
+                "  --center-x, --center-y, --center-z"
             )
         box_center_val = (center_x, center_y, center_z)
-        box_size_val = (size_x, size_y, size_z)
-        if any(v <= 0 for v in box_size_val):
-            raise typer.BadParameter("Box size values must be > 0")
-        _print_console(f"[bold green][matcha][/bold green] manual box -> center {box_center_val}, size {box_size_val}")
+        _print_console(f"[bold green][matcha][/bold green] manual center: {box_center_val}")
 
     # Autobox from reference ligand
     elif autobox_specified:
         if not autobox_ligand.exists():
             raise typer.BadParameter(f"Autobox ligand file not found: {autobox_ligand}")
-        padding = autobox_add if autobox_add is not None else 4.0
-        if padding <= 0:
-            raise typer.BadParameter("--autobox-add padding must be > 0")
-        box_center_val, box_size_val = _autobox_from_ligand(autobox_ligand, padding)
-        _print_console(f"[bold green][matcha][/bold green] autobox from reference ligand {autobox_ligand.name} with padding {padding:.1f} Å")
-        _print_console(f"[bold green][matcha][/bold green] box -> center {box_center_val}, size {box_size_val}")
+        box_center_val = _autobox_from_ligand(autobox_ligand)
+        _print_console(f"[bold green][matcha][/bold green] autobox from reference ligand {autobox_ligand.name}")
+        _print_console(f"[bold green][matcha][/bold green] center: {box_center_val}")
 
     # No box specified - blind docking on entire protein
     else:
@@ -422,11 +337,19 @@ def run_match(
 
     receptor_for_run = receptor
     original_receptor = receptor
-    if box_center_val is not None and box_size_val is not None:
-        boxed_receptor = run_workdir / f"{run_name}_boxed_receptor.pdb"
-        _crop_protein_to_box(receptor, boxed_receptor, box_center_val, box_size_val)
-        receptor_for_run = boxed_receptor
-        _print_console(f"[bold green][matcha][/bold green] cropped receptor saved to {boxed_receptor}")
+    pocket_centers_filename = None
+    if box_center_val is not None:
+        def _create_pocket_centers_file(box_center_val: Tuple[float, float, float], n_samples: int, complex_name: str, pocket_centers_filename: Path) -> None:
+            pocket_centers = {}
+            ligand_center = np.array(box_center_val)
+            protein_center = np.zeros(3)
+            for i in range(n_samples):
+                pocket_centers[f'{complex_name}_mol0_conf{i}'] = [{'tr_pred_init': ligand_center, 'full_protein_center': protein_center}]
+            np.save(pocket_centers_filename, [pocket_centers])
+
+        pocket_centers_filename = run_workdir / 'stage1_any_conf.npy'
+        _create_pocket_centers_file(box_center_val, n_samples, complex_name=run_name, pocket_centers_filename=pocket_centers_filename)
+
 
     dataset_dir = run_workdir / "datasets" / "any_conf"
     _prepare_singleton_dataset(receptor_for_run, ligand, dataset_dir, run_name, original_receptor=original_receptor)
@@ -436,8 +359,6 @@ def run_match(
 
     if n_confs is not None and n_confs < 1:
         raise typer.BadParameter("--n-confs must be >= 1")
-    if n_confs is not None and n_samples > n_confs:
-        n_samples = n_confs
 
     _print_console(f"[bold green][matcha][/bold green] workdir: {run_workdir}")
     _print_console(f"[bold green][matcha][/bold green] checkpoints: {checkpoints}")
@@ -450,7 +371,8 @@ def run_match(
 
     compute_sequences(conf)
     compute_esm_embeddings(conf)
-    run_inference_pipeline(copy.deepcopy(conf), run_name, n_samples)
+    run_inference_pipeline(copy.deepcopy(conf), run_name, n_samples, pocket_centers_filename, 
+                           docking_batch_limit=docking_batch_limit, scoring_batch_size=scoring_batch_size)
     compute_fast_filters(conf, run_name, n_samples)
     save_best_pred_to_sdf(conf, run_name)
 
@@ -464,8 +386,8 @@ def run_match(
         ranked_indices = sorted(
             range(len(sample_metrics)),
             key=lambda i: (
-                float(sample_metrics[i].get("error_estimate_0", float("inf"))),
                 -int(sample_metrics[i].get("posebusters_filters_passed_count_fast", 0)),
+                float(sample_metrics[i].get("error_estimate_0", float("inf"))),
             ),
         )
         return [(rank, sample_metrics[i]) for rank, i in enumerate(ranked_indices, start=1)]
@@ -513,14 +435,21 @@ def run_match(
         _print_console(f"[bold yellow][matcha][/bold yellow] failed to save all poses: {exc}")
         ranked_samples = []
 
-# Summaries
+    def _get_best_sample_idx(errs, pb_counts):
+        best_pb_count = max(pb_counts)
+        pb_count_indices = np.arange(len(pb_counts))[pb_counts == best_pb_count]
+        scores = errs[pb_count_indices]
+        best_score_idx = np.argmin(scores)
+        return pb_count_indices[best_score_idx]
+
+    # Summaries
     metrics = np.load(fast_metrics_path, allow_pickle=True).item()
     uid, mdata = next(iter(metrics.items()))
-    errs = [float(s.get("error_estimate_0", float("inf"))) for s in mdata["sample_metrics"]]
-    pb_counts = [int(s.get("posebusters_filters_passed_count_fast", 0)) for s in mdata["sample_metrics"]]
-    best_idx = int(np.argmin(errs))
+    errs = np.array([float(s.get("error_estimate_0", float("inf"))) for s in mdata["sample_metrics"]])
+    pb_counts = np.array([int(s.get("posebusters_filters_passed_count_fast", 0)) for s in mdata["sample_metrics"]])
+    best_idx = _get_best_sample_idx(errs, pb_counts)
 
-    end_time = datetime.utcnow()
+    end_time = datetime.now(timezone.utc)
     runtime = (end_time - start_time).total_seconds()
     # Simplify command line display
     if sys.argv[0].endswith('/.venv/bin/matcha'):
@@ -537,17 +466,11 @@ def run_match(
 
     # Determine box mode for logging
     if autobox_ligand is not None:
-        padding = autobox_add if autobox_add is not None else 4.0
-        box_mode = f"autobox from reference ligand ({autobox_ligand.name}), padding {padding:.1f} Å"
+        box_mode = f"start from reference ligand center ({autobox_ligand.name})"
     elif manual_box_specified:
         box_mode = "manual"
     else:
         box_mode = "blind docking (entire protein)"
-
-    # Calculate box volume
-    box_volume = None
-    if box_size_val is not None:
-        box_volume = box_size_val[0] * box_size_val[1] * box_size_val[2]
 
     log_lines = [
         banner.rstrip("\n"),
@@ -567,13 +490,11 @@ def run_match(
     ]
 
     # Only show AUTODOCKING BOX section if box is specified
-    if box_center_val is not None and box_size_val is not None:
+    if box_center_val is not None:
         log_lines.extend([
             "[ AUTODOCKING BOX ]",
             f"  Mode             : {box_mode}",
             f"  Center (Å)       : ({box_center_val[0]:.3f}, {box_center_val[1]:.3f}, {box_center_val[2]:.3f})",
-            f"  Size (Å)         : ({box_size_val[0]:.3f}, {box_size_val[1]:.3f}, {box_size_val[2]:.3f})",
-            f"  Volume (Å^3)     : {box_volume:.1f}",
             "",
             "",
         ])
@@ -687,7 +608,7 @@ def run_match(
 def main() -> None:
     if len(sys.argv) == 1:
         _print_usage_and_exit()
-    typer.run(run_match)
+    typer.run(run_matcha)
 
 
 if __name__ == "__main__":
