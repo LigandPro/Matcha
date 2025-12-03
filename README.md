@@ -20,6 +20,7 @@ co-folding models.
 
 ## Content
 - [Installation](#install)
+- [CLI usage](#cli)
 - [Datasets](#datasets)
   - [Existing datasets](#exist_datasets)
   - [Adding new dataset](#new_datasets)
@@ -33,7 +34,14 @@ co-folding models.
 - [License](#license)
 - [Citation](#citation)
 
-## CLI usage (Matcha docking)
+## Installation <a name="install"></a>
+
+```bash
+# Install with uv
+uv sync
+```
+
+## CLI usage <a name="cli"></a>
 
 Run single ligand:
 
@@ -68,51 +76,6 @@ Examples:
 - Autobox single: `uv run matcha -r prot.pdb -l lig.sdf --autobox-ligand ref.sdf -o results/`
 - Batch 40 samples, physical-only: `uv run matcha -r prot.pdb --ligand-dir ligs.sdf --autobox-ligand ref.sdf -o results/ --n-samples 40 --physical-only`
 
-
-## Installation <a name="install"></a>
-
-### uv install and cli
-
-```bash
-# Install with uv
-uv sync
-
-# Basic usage for single complex - blind docking on entire protein (recommended)
-uv run matcha \
-  -r protein.pdb \
-  -l ligand.sdf \
-  -o results/ \
-  --run-name my_docking \
-  --n-samples 40 \
-  --gpu 0
-
-# With autobox - focus search around reference ligand center
-uv run matcha \
-  -r protein.pdb \
-  -l ligand.sdf \
-  -o results/ \
-  --autobox-ligand reference_ligand.sdf \
-  --run-name focused_docking \
-  --n-samples 40 \
-  --gpu 0
-
-# Manual ligand center specification
-uv run matcha \
-  -r protein.pdb \
-  -l ligand.sdf \
-  -o results/ \
-  --center-x 10 --center-y 20 --center-z 30 \
-  --run-name manual_box \
-  --n-samples 40 \
-  --gpu 0
-```
-
-**Important notes:**
-- **Blind docking (no box)** is the native Matcha workflow
-- **Autobox/manual ligand center** is the pocket-aware docking mode
-- Checkpoints auto-download from HuggingFace if not specified
-- Default `n_samples=40`, seed=42
-- Workdir is preserved by default (use `--no-keep-workdir` to clean up)
 
 ## Datasets <a name="datasets"></a>
 ### Existing datasets <a name="exist_datasets"></a>
