@@ -33,14 +33,86 @@ co-folding models.
 - [License](#license)
 - [Citation](#citation)
 
+## CLI usage (Matcha docking)
+
+Run single ligand:
+
+```
+uv run matcha -r protein.pdb -l ligand.sdf -o results/ --gpu 0 [--run-name name]
+```
+
+Run batch (multi-ligand file or directory):
+
+```
+uv run matcha -r protein.pdb --ligand-dir ligands.sdf -o results/ --run-name batch --gpu 0
+```
+
+Search space options:
+- Manual box: `--center-x/--center-y/--center-z FLOAT` (Å)
+- Autobox: `--autobox-ligand ref.sdf` (center from reference ligand)
+- If none provided: blind docking on the whole protein
+
+Key flags:
+- `--n-samples N` – poses per ligand (default: 20)
+- `--physical-only/--keep-all-poses` – keep only PoseBusters-passing poses (pb_4/4) or all (default keep all)
+- `--overwrite` – replace existing run folder `<out>/<run-name>`
+- `--keep-workdir` – keep intermediates (`work/`); otherwise cleaned
+- `--workdir PATH` – place intermediates/logs here (default `<out>`)
+- `--run-name` – names the run; outputs go under `<out>/<run-name>`
+
+Outputs layout:
+- Single: `<out>/<run-name>_best.sdf`, `<run-name>_poses.sdf`, `<run-name>.log`
+- Batch: `<out>/<run-name>/best_poses/*.sdf`, `all_poses/*_poses.sdf`, per-ligand logs in `logs/`, overall log `<run-name>.log`
+
+Examples:
+- Autobox single: `uv run matcha -r prot.pdb -l lig.sdf --autobox-ligand ref.sdf -o results/`
+- Batch 40 samples, physical-only: `uv run matcha -r prot.pdb --ligand-dir ligs.sdf --autobox-ligand ref.sdf -o results/ --n-samples 40 --physical-only`
+
 
 ## Installation <a name="install"></a>
-To install the `matcha` package, do the following:
+
+### uv install and cli
 
 ```bash
-cd matcha
-pip install -e .
+# Install with uv
+uv sync
+
+# Basic usage for single complex - blind docking on entire protein (recommended)
+uv run matcha \
+  -r protein.pdb \
+  -l ligand.sdf \
+  -o results/ \
+  --run-name my_docking \
+  --n-samples 40 \
+  --gpu 0
+
+# With autobox - focus search around reference ligand center
+uv run matcha \
+  -r protein.pdb \
+  -l ligand.sdf \
+  -o results/ \
+  --autobox-ligand reference_ligand.sdf \
+  --run-name focused_docking \
+  --n-samples 40 \
+  --gpu 0
+
+# Manual ligand center specification
+uv run matcha \
+  -r protein.pdb \
+  -l ligand.sdf \
+  -o results/ \
+  --center-x 10 --center-y 20 --center-z 30 \
+  --run-name manual_box \
+  --n-samples 40 \
+  --gpu 0
 ```
+
+**Important notes:**
+- **Blind docking (no box)** is the native Matcha workflow
+- **Autobox/manual ligand center** is the pocket-aware docking mode
+- Checkpoints auto-download from HuggingFace if not specified
+- Default `n_samples=40`, seed=42
+- Workdir is preserved by default (use `--no-keep-workdir` to clean up)
 
 ## Datasets <a name="datasets"></a>
 ### Existing datasets <a name="exist_datasets"></a>
@@ -75,7 +147,9 @@ If you do not need all datasets, comment unnecessary datasets in the config's `t
 
 
 ## Running inference with one script <a name="inference"></a>
-The script to compute all preprocessing and inference scripts in one. 
+If you need to compute inference for a dataset at once, you can use the script `full_inference.py`. It would be more computationally efficient than using the cli for each complex separately.
+
+The script `full_inference.py` is to compute all preprocessing and inference scripts in one. 
 Provide `--compute_final_metrics` if your dataset has true ligand positions in f'{uid_i}_ligand.sdf', so we can compute RMSD metrics and PoseBusters filters.
 Argument `-n inference_folder_name` is a name of a folder where to store inference results for dataset.
 
