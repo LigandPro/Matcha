@@ -206,7 +206,7 @@ Required (choose single or batch):
   SINGLE: -r, --receptor PATH         Protein (.pdb)
           -l, --ligand PATH          Ligand (.sdf/.mol/.mol2/.pdb)
   BATCH : -r, --receptor PATH         Protein (.pdb)
-          --ligand-dir PATH          File/dir with multiple ligands (.sdf/.mol)
+          --ligand-dir PATH          File/dir with multiple ligands (.sdf)
   Output: -o, --out PATH              Output directory (root for runs)
 
 Search Space (optional):
@@ -243,7 +243,7 @@ Examples:
 def run_matcha(
     receptor: Optional[Path] = typer.Option(None, "-r", "--receptor", help="Protein structure (.pdb)."),
     ligand: Optional[Path] = typer.Option(None, "-l", "--ligand", help="Ligand with 3D coords (.sdf/.mol/.mol2/.pdb)."),
-    ligand_dir: Optional[Path] = typer.Option(None, "--ligand-dir", help="File/dir with multiple ligands (.sdf/.mol)."),
+    ligand_dir: Optional[Path] = typer.Option(None, "--ligand-dir", help="File/dir with multiple ligands (.sdf)."),
     out: Optional[Path] = typer.Option(None, "-o", "--out", help="Output directory."),
     checkpoints: Optional[Path] = typer.Option(None, "--checkpoints", help="Folder containing Matcha checkpoints (optional)."),
     config: Optional[Path] = typer.Option(None, "--config", help="Optional base config to merge with defaults."),
@@ -253,7 +253,7 @@ def run_matcha(
     center_z: Optional[float] = typer.Option(None, "--center-z", "--center_z", help="Z coordinate of box center (Å)"),
     autobox_ligand: Optional[Path] = typer.Option(None, "--autobox-ligand", "--autobox_ligand", help="Reference ligand file for autobox (.sdf/.mol/.pdb)"),
     run_name: str = typer.Option("matcha_cli_run", "--run-name", help="Name for this docking run."),
-    n_samples: int = typer.Option(20, "--n-samples", help="Number of samples (poses) to generate per ligand."),
+    n_samples: int = typer.Option(40, "--n-samples", help="Number of samples (poses) to generate per ligand."),
     n_confs: Optional[int] = typer.Option(None, "--n-confs", help="Number of ligand conformers to generate with RDKit (default min(10, n-samples))."),
     gpu: Optional[int] = typer.Option(None, "--gpu", "-g", "-gpu", help="CUDA device index."),
     overwrite: bool = typer.Option(False, "--overwrite", help="Remove existing run folder if present."),
@@ -385,7 +385,7 @@ def run_matcha(
     save_best_pred_to_sdf(conf, run_name)
 
     preds_root = Path(conf.inference_results_folder) / run_name
-    dataset_name = conf.test_dataset_types[0]
+    dataset_name = 'any_conf'
     fast_metrics_path = preds_root / f"{dataset_name}_final_preds_fast_metrics.npy"
     metrics = np.load(fast_metrics_path, allow_pickle=True).item()
 
@@ -399,24 +399,16 @@ def run_matcha(
         )
         return [(rank, sample_metrics[i]) for rank, i in enumerate(ranked_indices, start=1)]
 
-    def _pose_is_physical(sample: dict) -> bool:
-        pb_flags = sample.get("posebusters_filters_fast")
-        if pb_flags is not None and len(pb_flags) >= 4:
-            return all(bool(pb_flags[i]) for i in range(4))
-        pb_count = sample.get("posebusters_filters_passed_count_fast")
-        if pb_count is not None:
-            return int(pb_count) == 4
-        return True
-
     def _save_all_poses_for_uid(metrics_data, uid, out_path, filter_non_physical: bool = True):
         if uid not in metrics_data:
             return [], 0, 0
         sample_data = metrics_data[uid]
         orig_mol = sample_data["orig_mol"]
         ranked = _rank_samples(sample_data["sample_metrics"])
+        best_pb_count = max([int(s.get("posebusters_filters_passed_count_fast", 0)) for s in sample_data["sample_metrics"]])
 
         # Optionally filter out poses failing PoseBusters fast checks
-        ranked_filtered = [(r, s) for r, s in ranked if not filter_non_physical or _pose_is_physical(s)]
+        ranked_filtered = [(r, s) for r, s in ranked if not filter_non_physical or int(s.get("posebusters_filters_passed_count_fast", 0)) == best_pb_count]
         ranked_to_use = ranked_filtered if ranked_filtered else ranked
 
         writer = Chem.SDWriter(str(out_path))
@@ -431,6 +423,13 @@ def run_matcha(
             writer.write(mol)
         writer.close()
         return ranked_to_use, len(ranked_filtered), len(ranked)
+
+    def _get_best_sample_idx(errs, pb_counts):
+        best_pb_count = max(pb_counts)
+        pb_count_indices = np.arange(len(pb_counts))[pb_counts == best_pb_count]
+        scores = errs[pb_count_indices]
+        best_score_idx = np.argmin(scores)
+        return pb_count_indices[best_score_idx]
     
     # single mode output
     if not batch_mode:
@@ -440,12 +439,6 @@ def run_matcha(
         uid, mdata = next(iter(metrics.items()))
         errs = np.array([float(s.get("error_estimate_0", float("inf"))) for s in mdata["sample_metrics"]])
         pb_counts = np.array([int(s.get("posebusters_filters_passed_count_fast", 0)) for s in mdata["sample_metrics"]])
-        def _get_best_sample_idx(errs, pb_counts):
-            best_pb_count = max(pb_counts)
-            pb_count_indices = np.arange(len(pb_counts))[pb_counts == best_pb_count]
-            scores = errs[pb_count_indices]
-            best_score_idx = np.argmin(scores)
-            return pb_count_indices[best_score_idx]
         best_idx = _get_best_sample_idx(errs, pb_counts)
 
         pred_sdf_src = preds_root / dataset_name / "sdf_predictions" / f"{run_name}.sdf"
@@ -596,12 +589,6 @@ def run_matcha(
         mdata = metrics[metrics_key]
         errs = np.array([float(s.get("error_estimate_0", float("inf"))) for s in mdata["sample_metrics"]])
         pb_counts = np.array([int(s.get("posebusters_filters_passed_count_fast", 0)) for s in mdata["sample_metrics"]])
-        def _get_best_sample_idx(errs, pb_counts):
-            best_pb_count = max(pb_counts)
-            pb_count_indices = np.arange(len(pb_counts))[pb_counts == best_pb_count]
-            scores = errs[pb_count_indices]
-            best_score_idx = np.argmin(scores)
-            return pb_count_indices[best_score_idx]
         best_idx = _get_best_sample_idx(errs, pb_counts)
 
         pred_sdf_src = sdf_preds_dir / f"{mol_uid}.sdf"
