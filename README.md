@@ -33,6 +33,41 @@ co-folding models.
 - [License](#license)
 - [Citation](#citation)
 
+## CLI usage (Matcha docking)
+
+Run single ligand:
+
+```
+uv run matcha -r protein.pdb -l ligand.sdf -o results/ --gpu 0 [--run-name name]
+```
+
+Run batch (multi-ligand file or directory):
+
+```
+uv run matcha -r protein.pdb --ligand-dir ligands.sdf -o results/ --run-name batch --gpu 0
+```
+
+Search space options:
+- Manual box: `--center-x/--center-y/--center-z FLOAT` (Å)
+- Autobox: `--autobox-ligand ref.sdf` (center from reference ligand)
+- If none provided: blind docking on the whole protein
+
+Key flags:
+- `--n-samples N` – poses per ligand (default: 20)
+- `--physical-only/--keep-all-poses` – keep only PoseBusters-passing poses (pb_4/4) or all (default keep all)
+- `--overwrite` – replace existing run folder `<out>/<run-name>`
+- `--keep-workdir` – keep intermediates (`work/`); otherwise cleaned
+- `--workdir PATH` – place intermediates/logs here (default `<out>`)
+- `--run-name` – names the run; outputs go under `<out>/<run-name>`
+
+Outputs layout:
+- Single: `<out>/<run-name>_best.sdf`, `<run-name>_poses.sdf`, `<run-name>.log`
+- Batch: `<out>/<run-name>/best_poses/*.sdf`, `all_poses/*_poses.sdf`, per-ligand logs in `logs/`, overall log `<run-name>.log`
+
+Examples:
+- Autobox single: `uv run matcha -r prot.pdb -l lig.sdf --autobox-ligand ref.sdf -o results/`
+- Batch 40 samples, physical-only: `uv run matcha -r prot.pdb --ligand-dir ligs.sdf --autobox-ligand ref.sdf -o results/ --n-samples 40 --physical-only`
+
 
 ## Installation <a name="install"></a>
 

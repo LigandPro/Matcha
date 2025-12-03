@@ -1,8 +1,6 @@
 """
-
-
 Example:
-    uv run match -r receptor.pdb -l ligand.sdf -o out.sdf --gpu 0
+    uv run matcha -r receptor.pdb -l ligand.sdf -o out.sdf --gpu 0
 """
 
 import copy
@@ -45,6 +43,22 @@ DEFAULT_CONF = {
 }
 
 
+def _format_runtime(seconds: float) -> str:
+    secs = int(round(seconds))
+    days, rem = divmod(secs, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, rem = divmod(rem, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes:
+        parts.append(f"{minutes}m")
+    parts.append(f"{rem}s")
+    return " ".join(parts)
+
+
 def _normalize_ligand(src: Path, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     suffix = src.suffix.lower()
@@ -70,7 +84,6 @@ def _prepare_singleton_dataset(
     sample_dir = dataset_dir / uid
     sample_dir.mkdir(parents=True, exist_ok=True)
 
-    # Keep original filenames alongside uid-based ones for Matcha pipeline
     receptor_dest = sample_dir / f"{uid}_protein.pdb"
     ligand_dest = sample_dir / f"{uid}_ligand.sdf"
 
@@ -79,7 +92,6 @@ def _prepare_singleton_dataset(
     shutil.copyfile(receptor, receptor_dest)
     _normalize_ligand(ligand, ligand_dest)
 
-    # Also save original files with original names
     if original_receptor is not None and original_receptor != receptor:
         receptor_orig = sample_dir / original_receptor.name
         if receptor_orig != receptor_dest:
@@ -88,6 +100,46 @@ def _prepare_singleton_dataset(
     ligand_orig = sample_dir / ligand.name
     if ligand_orig != ligand_dest:
         _normalize_ligand(ligand, ligand_orig)
+
+
+def _split_multi_sdf(sdf_path: Path) -> List[Tuple[str, Chem.Mol]]:
+    molecules = []
+    suppl = Chem.SDMolSupplier(str(sdf_path), removeHs=False, sanitize=False)
+    for idx, mol in enumerate(suppl):
+        if mol is None:
+            console.print(f"[yellow]Warning: Failed to read molecule {idx} from {sdf_path.name}[/yellow]")
+            continue
+        name = mol.GetProp("_Name") if mol.HasProp("_Name") else f"mol_{idx}"
+        name = name.strip().replace(" ", "_").replace("/", "_").replace("\\", "_")
+        if not name:
+            name = f"mol_{idx}"
+        molecules.append((name, mol))
+    return molecules
+
+
+def _prepare_batch_dataset(protein: Path, molecules: List[Tuple[str, Chem.Mol]], dataset_dir: Path) -> List[str]:
+    dataset_dir.mkdir(parents=True, exist_ok=True)
+    uids = []
+    for name, mol in molecules:
+        uid = name
+        sample_dir = dataset_dir / uid
+        sample_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(protein, sample_dir / f"{uid}_protein.pdb")
+        writer = Chem.SDWriter(str(sample_dir / f"{uid}_ligand.sdf"))
+        writer.write(mol)
+        writer.close()
+        uids.append(uid)
+    return uids
+
+
+def _create_batch_pocket_centers(pocket_center: Tuple[float, float, float], molecule_uids: List[str], n_samples: int, output_path: Path) -> None:
+    pocket_centers = {}
+    ligand_center = np.array(pocket_center)
+    protein_center = np.zeros(3)
+    for uid in molecule_uids:
+        for conf_idx in range(n_samples):
+            pocket_centers[f"{uid}_mol0_conf{conf_idx}"] = [{"tr_pred_init": ligand_center, "full_protein_center": protein_center}]
+    np.save(output_path, [pocket_centers])
 
 
 def _load_base_conf(user_config: Optional[Path]) -> OmegaConf:
@@ -119,37 +171,14 @@ def _build_conf(base_conf: OmegaConf, workdir: Path, checkpoints: Path) -> Omega
     return conf
 
 
-def _resolve_output_path(out: Path, run_name: str) -> Path:
-    """
-    Allow passing a directory (or '.') as output; if so, drop the pose as <run_name>.sdf inside it.
-    If no extension is provided, treat it as a directory when it doesn't exist yet; otherwise default to .sdf.
-    """
-    out = out.expanduser()
-    if out.exists() and out.is_dir():
-        return out / f"{run_name}.sdf"
-    # If path has no suffix and doesn't exist yet, treat it as a folder
-    if out.suffix == "":
-        return out / f"{run_name}.sdf"
-    return out
-
-
 def _ensure_checkpoints(path: Path) -> Path:
-    """
-    Make sure checkpoints exist locally; if missing, download from HuggingFace.
-    """
     path = path.expanduser()
     stage1 = path / "pipeline" / "stage1" / "model.safetensors"
     if stage1.exists():
         return path
-
     console.print(f"[bold yellow][matcha][/bold yellow] checkpoints not found, downloading to {path} ...")
     path.mkdir(parents=True, exist_ok=True)
-    snapshot_download(
-        repo_id="LigandPro/Matcha",
-        allow_patterns=["pipeline/**"],
-        local_dir=str(path),
-        local_dir_use_symlinks=False,
-    )
+    snapshot_download(repo_id="LigandPro/Matcha", local_dir=str(path), local_dir_use_symlinks=False)
     if not stage1.exists():
         raise typer.BadParameter(f"Failed to download checkpoints into {path}")
     console.print(f"[bold green][matcha][/bold green] checkpoints ready at {path}")
@@ -173,47 +202,39 @@ def _print_usage_and_exit() -> None:
     usage = """
 Matcha docking - AI-powered molecular docking
 
-Required:
-  -r, --receptor PATH        Protein structure (.pdb)
-  -l, --ligand PATH          Ligand (.sdf/.mol/.mol2/.pdb)
-  -o, --out PATH             Output SDF path or directory
+Required (choose single or batch):
+  SINGLE: -r, --receptor PATH         Protein (.pdb)
+          -l, --ligand PATH          Ligand (.sdf/.mol/.mol2/.pdb)
+  BATCH : -r, --receptor PATH         Protein (.pdb)
+          --ligand-dir PATH          File/dir with multiple ligands (.sdf/.mol)
+  Output: -o, --out PATH              Output directory (root for runs)
 
-Search Space (optional - for focused docking):
-  Manual box:
-      --center-x, --center-y, --center-z FLOAT  Box center coordinates (Å)
-  OR
-  Autobox from reference ligand center:
-      --autobox-ligand PATH   Reference ligand for autobox (starts pocket-aware docking from its center coordinates)
-
-  If no box specified: blind docking on entire protein
+Search Space (optional):
+  Manual box:   --center-x/--center-y/--center-z FLOAT  (Å)
+  Autobox:      --autobox-ligand PATH   Reference ligand; box center taken from its coords
+  If nothing specified: blind docking on whole protein
 
 Common:
-      --checkpoints PATH     Folder for pipeline checkpoints (auto-download if missing)
-      --run-name TEXT        Run name (default: matcha_cli_run)
-      --n-samples INT        Samples per ligand (default: 20)
-      --n-confs INT          Ligand conformers to generate (default: min(10, n-samples))
-  -g, --gpu INT              CUDA device index
-      --overwrite            Overwrite existing run folder
-      --keep-workdir         Keep intermediates instead of cleaning up
+  --checkpoints PATH      Checkpoints folder (auto-download if missing)
+  --run-name TEXT         Run name (default: matcha_cli_run)
+  --n-samples INT         Poses per ligand (default: 20)
+  --n-confs INT           Ligand conformers (default: min(10, n-samples))
+  -g, --gpu INT           CUDA device index
+  --overwrite             Remove existing run folder if present
+  --keep-workdir          Keep intermediates (work/) instead of cleaning
+  --physical-only         Save only PoseBusters-passing poses (pb_4/4); default off
 
-Optional:
-      --docking-batch-limit INT Number of tokens per batch for docking models (default: 15000).
-      --scoring-batch-size INT  Batch size for scoring (default: 4).
-      --workdir PATH            Working directory (default: next to output)
-      --log PATH                Log file path (default: <out>/<run-name>.log)
-      --config PATH             Custom config to merge with defaults
+Performance / paths:
+  --docking-batch-limit INT   Tokens per docking batch (default: 15000)
+  --scoring-batch-size INT    Batch size for scoring (default: 4)
+  --workdir PATH              Working dir (defaults to <out>); intermediates live here
+  --log PATH                  Log path (default: <out>/<run-name>.log)
+  --config PATH               Extra config merged with defaults
 
 Examples:
-  # Blind docking on entire protein
   uv run matcha -r prot.pdb -l lig.sdf -o results/ --gpu 0
-
-  # Autobox from reference ligand
-  uv run matcha -r prot.pdb -l lig.sdf -o results/ \
-    --autobox-ligand ref_ligand.sdf --gpu 0
-
-  # Manual ligand center specification
-  uv run matcha -r prot.pdb -l lig.sdf -o out.sdf \
-    --center-x 10 --center-y 20 --center-z 30 --gpu 0
+  uv run matcha -r prot.pdb --ligand-dir ligs.sdf -o results/ --run-name batch --gpu 0
+  uv run matcha -r prot.pdb -l lig.sdf --autobox-ligand ref.sdf -o results/
 """
     console.print(usage.rstrip())
     sys.exit(1)
@@ -222,63 +243,40 @@ Examples:
 def run_matcha(
     receptor: Optional[Path] = typer.Option(None, "-r", "--receptor", help="Protein structure (.pdb)."),
     ligand: Optional[Path] = typer.Option(None, "-l", "--ligand", help="Ligand with 3D coords (.sdf/.mol/.mol2/.pdb)."),
-    out: Optional[Path] = typer.Option(
-        None,
-        "-o",
-        "--out",
-        help="Output path (SDF file or directory). All run artifacts will be stored alongside this location.",
-    ),
-    checkpoints: Optional[Path] = typer.Option(None, "--checkpoints", help="Folder containing the Matcha 'pipeline' checkpoints (optional)."),
+    ligand_dir: Optional[Path] = typer.Option(None, "--ligand-dir", help="File/dir with multiple ligands (.sdf/.mol)."),
+    out: Optional[Path] = typer.Option(None, "-o", "--out", help="Output directory."),
+    checkpoints: Optional[Path] = typer.Option(None, "--checkpoints", help="Folder containing Matcha checkpoints (optional)."),
     config: Optional[Path] = typer.Option(None, "--config", help="Optional base config to merge with defaults."),
-    workdir: Optional[Path] = typer.Option(
-        None,
-        "--workdir",
-        help="Working dir (defaults to the folder of --out). Intermediates/logs stay here.",
-    ),
+    workdir: Optional[Path] = typer.Option(None, "--workdir", help="Working dir (defaults to --out)."),
     center_x: Optional[float] = typer.Option(None, "--center-x", "--center_x", help="X coordinate of box center (Å)"),
     center_y: Optional[float] = typer.Option(None, "--center-y", "--center_y", help="Y coordinate of box center (Å)"),
     center_z: Optional[float] = typer.Option(None, "--center-z", "--center_z", help="Z coordinate of box center (Å)"),
-    autobox_ligand: Optional[Path] = typer.Option(
-        None,
-        "--autobox-ligand",
-        "--autobox_ligand",
-        help="Reference ligand file for autobox (.sdf/.mol/.pdb)",
-    ),
+    autobox_ligand: Optional[Path] = typer.Option(None, "--autobox-ligand", "--autobox_ligand", help="Reference ligand file for autobox (.sdf/.mol/.pdb)"),
     run_name: str = typer.Option("matcha_cli_run", "--run-name", help="Name for this docking run."),
-    n_samples: int = typer.Option(40, "--n-samples", help="Number of samples (poses) to generate per ligand."),
+    n_samples: int = typer.Option(20, "--n-samples", help="Number of samples (poses) to generate per ligand."),
     n_confs: Optional[int] = typer.Option(None, "--n-confs", help="Number of ligand conformers to generate with RDKit (default min(10, n-samples))."),
-    gpu: Optional[int] = typer.Option(
-        None, "--gpu", "-g", "-gpu", help="CUDA device index (sets CUDA_VISIBLE_DEVICES)."
-    ),
+    gpu: Optional[int] = typer.Option(None, "--gpu", "-g", "-gpu", help="CUDA device index."),
     overwrite: bool = typer.Option(False, "--overwrite", help="Remove existing run folder if present."),
-    keep_workdir: bool = typer.Option(True, "--keep-workdir/--no-keep-workdir", help="Keep working data (default: True)."),
+    keep_workdir: bool = typer.Option(False, "--keep-workdir/--no-keep-workdir", help="Keep working data (default: False)."),
     log: Optional[Path] = typer.Option(None, "--log", help="Path to log file (defaults to <out>/<run-name>.log)."),
-    docking_batch_limit: int = typer.Option(15000, "--docking-batch-limit", help="Number of tokens per batch for docking models (default: 15000)."),
-    scoring_batch_size: int = typer.Option(4, "--scoring-batch-size", help="Batch size for scoring (default: 4)."),
+    docking_batch_limit: int = typer.Option(15000, "--docking-batch-limit", help="Number of tokens per batch for docking models."),
+    scoring_batch_size: int = typer.Option(4, "--scoring-batch-size", help="Batch size for scoring."),
+    physical_only: bool = typer.Option(False, "--physical-only/--keep-all-poses", help="Keep only PoseBusters-passing poses in outputs (default: False)."),
 ) -> None:
-    if receptor is None or ligand is None or out is None:
+    if out is None:
+        _print_usage_and_exit()
+    batch_mode = ligand_dir is not None
+    if (ligand is None) == (ligand_dir is None):
         _print_usage_and_exit()
 
     if gpu is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
 
-    checkpoints = checkpoints or Path("checkpoints")
-    checkpoints = _ensure_checkpoints(checkpoints)
-
-    resolved_out = _resolve_output_path(out, run_name)
-    output_dir = resolved_out.parent
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    log_path = log or output_dir / f"{run_name}.log"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-
-    def _print_console(msg: str) -> None:
-        """Print only to console"""
-        console.print(msg)
+    checkpoints = _ensure_checkpoints(checkpoints or Path("checkpoints"))
 
     start_time = datetime.now(timezone.utc)
-    base_workdir = workdir or output_dir
-    run_workdir = base_workdir / run_name if base_workdir != resolved_out else base_workdir
+    base_workdir = workdir or out
+    run_workdir = base_workdir / run_name
     if run_workdir.exists():
         if overwrite:
             shutil.rmtree(run_workdir)
@@ -287,6 +285,15 @@ def run_matcha(
                 f"Working directory {run_workdir} already exists. Use --overwrite or change --run-name."
             )
     run_workdir.mkdir(parents=True, exist_ok=True)
+
+    work_dir = run_workdir / "work"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    best_dir = all_dir = None
+    if ligand_dir is not None:
+        best_dir = run_workdir / "best_poses"
+        all_dir = run_workdir / "all_poses"
+        best_dir.mkdir(parents=True, exist_ok=True)
+        all_dir.mkdir(parents=True, exist_ok=True)
 
     banner = r"""
 ███╗   ███╗ █████╗ ████████╗ ██████╗██╗  ██╗ █████╗
@@ -301,86 +308,86 @@ def run_matcha(
     console.print("=" * 60)
     console.print("")
 
-    # Search space (box) configuration - OPTIONAL
-    # If not specified, will run on entire protein (blind docking)
-    box_center_val: Optional[Tuple[float, float, float]] = None
-
-    # Check which method was specified
+    # Box handling
     manual_box_specified = any([center_x, center_y, center_z])
     autobox_specified = autobox_ligand is not None
+    box_center_val: Optional[Tuple[float, float, float]] = None
 
     if manual_box_specified and autobox_specified:
         raise typer.BadParameter("Cannot use both manual box and autobox. Choose one method.")
-
-    # Manual box
     if manual_box_specified:
         if not all([center_x is not None, center_y is not None, center_z is not None]):
-            raise typer.BadParameter(
-                "Manual box requires ALL three parameters:\n"
-                "  --center-x, --center-y, --center-z"
-            )
+            raise typer.BadParameter("Manual box requires --center-x/--center-y/--center-z")
         box_center_val = (center_x, center_y, center_z)
-        _print_console(f"[bold green][matcha][/bold green] manual center: {box_center_val}")
-
-    # Autobox from reference ligand
+        console.print(f"[bold green][matcha][/bold green] manual center: {box_center_val}")
     elif autobox_specified:
         if not autobox_ligand.exists():
             raise typer.BadParameter(f"Autobox ligand file not found: {autobox_ligand}")
         box_center_val = _autobox_from_ligand(autobox_ligand)
-        _print_console(f"[bold green][matcha][/bold green] autobox from reference ligand {autobox_ligand.name}")
-        _print_console(f"[bold green][matcha][/bold green] center: {box_center_val}")
-
-    # No box specified - blind docking on entire protein
+        console.print(f"[bold green][matcha][/bold green] autobox from reference ligand {autobox_ligand.name}")
+        console.print(f"[bold green][matcha][/bold green] center: {box_center_val}")
     else:
-        _print_console(f"[bold yellow][matcha][/bold yellow] No box specified - running blind docking on entire protein")
-        _print_console(f"[bold yellow][matcha][/bold yellow] For faster/focused docking, consider using --autobox-ligand or manual box")
+        console.print(f"[bold yellow][matcha][/bold yellow] No box specified - running blind docking on entire protein")
 
     receptor_for_run = receptor
-    original_receptor = receptor
     pocket_centers_filename = None
-    if box_center_val is not None:
-        def _create_pocket_centers_file(box_center_val: Tuple[float, float, float], n_samples: int, complex_name: str, pocket_centers_filename: Path) -> None:
-            pocket_centers = {}
-            ligand_center = np.array(box_center_val)
-            protein_center = np.zeros(3)
-            for i in range(n_samples):
-                pocket_centers[f'{complex_name}_mol0_conf{i}'] = [{'tr_pred_init': ligand_center, 'full_protein_center': protein_center}]
-            np.save(pocket_centers_filename, [pocket_centers])
 
-        pocket_centers_filename = run_workdir / 'stage1_any_conf.npy'
-        _create_pocket_centers_file(box_center_val, n_samples, complex_name=run_name, pocket_centers_filename=pocket_centers_filename)
+    dataset_dir = work_dir / "datasets" / "any_conf"
+    dataset_dir.mkdir(parents=True, exist_ok=True)
+    molecule_uids: List[str] = []
 
-
-    dataset_dir = run_workdir / "datasets" / "any_conf"
-    _prepare_singleton_dataset(receptor_for_run, ligand, dataset_dir, run_name, original_receptor=original_receptor)
+    if batch_mode:
+        console.print(f"[bold cyan][matcha][/bold cyan] Batch mode: processing multiple molecules from {ligand_dir.name}")
+        if ligand_dir.is_file():
+            molecules = _split_multi_sdf(ligand_dir)
+        elif ligand_dir.is_dir():
+            molecules = []
+            for sdf_file in ligand_dir.glob("*.sdf"):
+                molecules.extend(_split_multi_sdf(sdf_file))
+        else:
+            raise typer.BadParameter("--ligand-dir must be a file or directory")
+        if not molecules:
+            raise typer.BadParameter(f"No molecules found in {ligand_dir}")
+        console.print(f"[bold green][matcha][/bold green] Found {len(molecules)} molecules to process")
+        molecule_uids = _prepare_batch_dataset(receptor, molecules, dataset_dir)
+        if box_center_val is not None:
+            pocket_centers_filename = work_dir / 'stage1_any_conf.npy'
+            _create_batch_pocket_centers(box_center_val, molecule_uids, n_samples, pocket_centers_filename)
+    else:
+        if box_center_val is not None:
+            pocket_centers_filename = work_dir / 'stage1_any_conf.npy'
+            def _create_pocket_centers_file(box_center_val: Tuple[float, float, float], n_samples: int, complex_name: str, pocket_centers_filename: Path) -> None:
+                pocket_centers = {}
+                ligand_center = np.array(box_center_val)
+                protein_center = np.zeros(3)
+                for i in range(n_samples):
+                    pocket_centers[f'{complex_name}_mol0_conf{i}'] = [{'tr_pred_init': ligand_center, 'full_protein_center': protein_center}]
+                np.save(pocket_centers_filename, [pocket_centers])
+            _create_pocket_centers_file(box_center_val, n_samples, complex_name=run_name, pocket_centers_filename=pocket_centers_filename)
+        _prepare_singleton_dataset(receptor_for_run, ligand, dataset_dir, run_name, original_receptor=receptor)
+        molecule_uids = [run_name]
 
     base_conf = _load_base_conf(config)
-    conf = _build_conf(base_conf, run_workdir, checkpoints)
-
+    conf = _build_conf(base_conf, work_dir, checkpoints)
     if n_confs is not None and n_confs < 1:
         raise typer.BadParameter("--n-confs must be >= 1")
-
-    _print_console(f"[bold green][matcha][/bold green] workdir: {run_workdir}")
-    _print_console(f"[bold green][matcha][/bold green] checkpoints: {checkpoints}")
-    _print_console(f"[bold green][matcha][/bold green] samples per ligand: {n_samples}")
-    if n_confs is not None:
-        _print_console(f"[bold green][matcha][/bold green] ligand conformers: {n_confs}")
-        conf.n_confs_override = int(n_confs)
+    console.print(f"[bold green][matcha][/bold green] workdir: {run_workdir}")
+    console.print(f"[bold green][matcha][/bold green] checkpoints: {checkpoints}")
+    console.print(f"[bold green][matcha][/bold green] samples per ligand: {n_samples}")
     if gpu is not None:
-        _print_console(f"[bold green][matcha][/bold green] using CUDA device #{gpu}")
+        console.print(f"[bold green][matcha][/bold green] using CUDA device #{gpu}")
 
     compute_sequences(conf)
     compute_esm_embeddings(conf)
-    run_inference_pipeline(copy.deepcopy(conf), run_name, n_samples, pocket_centers_filename, 
+    run_inference_pipeline(copy.deepcopy(conf), run_name, n_samples, pocket_centers_filename,
                            docking_batch_limit=docking_batch_limit, scoring_batch_size=scoring_batch_size)
     compute_fast_filters(conf, run_name, n_samples)
     save_best_pred_to_sdf(conf, run_name)
 
     preds_root = Path(conf.inference_results_folder) / run_name
-    fast_metrics_path = preds_root / f"{conf.test_dataset_types[0]}_final_preds_fast_metrics.npy"
-    pred_sdf = preds_root / conf.test_dataset_types[0] / "sdf_predictions" / f"{run_name}.sdf"
-    if not pred_sdf.exists():
-        raise typer.Exit(code=1)
+    dataset_name = conf.test_dataset_types[0]
+    fast_metrics_path = preds_root / f"{dataset_name}_final_preds_fast_metrics.npy"
+    metrics = np.load(fast_metrics_path, allow_pickle=True).item()
 
     def _rank_samples(sample_metrics: List[dict]) -> List[Tuple[int, dict]]:
         ranked_indices = sorted(
@@ -392,15 +399,28 @@ def run_matcha(
         )
         return [(rank, sample_metrics[i]) for rank, i in enumerate(ranked_indices, start=1)]
 
-    def _save_all_poses(metrics_path: Path, out_path: Path) -> List[Tuple[int, dict]]:
-        data = np.load(metrics_path, allow_pickle=True).item()
-        if len(data) == 0:
-            return []
-        uid, sample_data = next(iter(data.items()))
+    def _pose_is_physical(sample: dict) -> bool:
+        pb_flags = sample.get("posebusters_filters_fast")
+        if pb_flags is not None and len(pb_flags) >= 4:
+            return all(bool(pb_flags[i]) for i in range(4))
+        pb_count = sample.get("posebusters_filters_passed_count_fast")
+        if pb_count is not None:
+            return int(pb_count) == 4
+        return True
+
+    def _save_all_poses_for_uid(metrics_data, uid, out_path, filter_non_physical: bool = True):
+        if uid not in metrics_data:
+            return [], 0, 0
+        sample_data = metrics_data[uid]
         orig_mol = sample_data["orig_mol"]
-        writer = Chem.SDWriter(str(out_path))
         ranked = _rank_samples(sample_data["sample_metrics"])
-        for rank, sample in ranked:
+
+        # Optionally filter out poses failing PoseBusters fast checks
+        ranked_filtered = [(r, s) for r, s in ranked if not filter_non_physical or _pose_is_physical(s)]
+        ranked_to_use = ranked_filtered if ranked_filtered else ranked
+
+        writer = Chem.SDWriter(str(out_path))
+        for rank, sample in ranked_to_use:
             mol = copy.deepcopy(orig_mol)
             conf = Chem.Conformer(orig_mol.GetNumAtoms())
             for idx, (x, y, z) in enumerate(sample["pred_pos"]):
@@ -408,70 +428,323 @@ def run_matcha(
             mol.RemoveAllConformers()
             mol.AddConformer(conf, assignId=True)
             mol.SetProp("_Name", f"{uid}_rank{rank}")
-            if "error_estimate_0" in sample:
-                mol.SetDoubleProp("error_estimate_0", float(sample["error_estimate_0"]))
-            pb_count = sample.get("posebusters_filters_passed_count_fast")
-            if pb_count is not None:
-                mol.SetIntProp("posebusters_pass_fast", int(pb_count))
-            pb_flags = sample.get("posebusters_filters_fast")
-            if pb_flags is not None:
-                keys = ["not_too_far_away", "no_internal_clash", "no_clashes", "no_volume_clash", "is_buried_fraction"]
-                for key_idx, key in enumerate(keys):
-                    mol.SetProp(f"pb_{key}", str(pb_flags[key_idx]))
             writer.write(mol)
         writer.close()
-        return ranked
+        return ranked_to_use, len(ranked_filtered), len(ranked)
+    
+    # single mode output
+    if not batch_mode:
+        resolved_out = run_workdir / f"{run_name}_best.sdf"
+        all_poses_dest = run_workdir / f"{run_name}_poses.sdf"
 
-    # Copy best pose to user-visible location
-    shutil.copyfile(pred_sdf, resolved_out)
-    _print_console(f"[bold green][matcha][/bold green] saved top-ranked pose to {resolved_out}")
+        uid, mdata = next(iter(metrics.items()))
+        errs = np.array([float(s.get("error_estimate_0", float("inf"))) for s in mdata["sample_metrics"]])
+        pb_counts = np.array([int(s.get("posebusters_filters_passed_count_fast", 0)) for s in mdata["sample_metrics"]])
+        def _get_best_sample_idx(errs, pb_counts):
+            best_pb_count = max(pb_counts)
+            pb_count_indices = np.arange(len(pb_counts))[pb_counts == best_pb_count]
+            scores = errs[pb_count_indices]
+            best_score_idx = np.argmin(scores)
+            return pb_count_indices[best_score_idx]
+        best_idx = _get_best_sample_idx(errs, pb_counts)
 
-    # Save all poses with properties
-    all_pose_sdf = output_dir / f"{run_name}_poses.sdf"
-    try:
-        ranked_samples = _save_all_poses(fast_metrics_path, all_pose_sdf)
-        _print_console(f"[bold green][matcha][/bold green] saved all poses (with conformers) to {all_pose_sdf}")
-    except Exception as exc:  # pragma: no cover - best-effort logging
-        _print_console(f"[bold yellow][matcha][/bold yellow] failed to save all poses: {exc}")
-        ranked_samples = []
+        pred_sdf_src = preds_root / dataset_name / "sdf_predictions" / f"{run_name}.sdf"
+        shutil.copyfile(pred_sdf_src, resolved_out)
+        ranked_samples, kept_physical, total_samples = _save_all_poses_for_uid(metrics, uid, all_poses_dest, filter_non_physical=physical_only)
 
-    def _get_best_sample_idx(errs, pb_counts):
-        best_pb_count = max(pb_counts)
-        pb_count_indices = np.arange(len(pb_counts))[pb_counts == best_pb_count]
-        scores = errs[pb_count_indices]
-        best_score_idx = np.argmin(scores)
-        return pb_count_indices[best_score_idx]
+        end_time = datetime.now(timezone.utc)
+        runtime = (end_time - start_time).total_seconds()
 
-    # Summaries
-    metrics = np.load(fast_metrics_path, allow_pickle=True).item()
-    uid, mdata = next(iter(metrics.items()))
-    errs = np.array([float(s.get("error_estimate_0", float("inf"))) for s in mdata["sample_metrics"]])
-    pb_counts = np.array([int(s.get("posebusters_filters_passed_count_fast", 0)) for s in mdata["sample_metrics"]])
-    best_idx = _get_best_sample_idx(errs, pb_counts)
+        log_path = (log or run_workdir / f"{run_name}.log").resolve()
+        receptor_abs = receptor.resolve()
+        ligand_abs = ligand.resolve()
+        resolved_out_abs = resolved_out.resolve()
+        all_poses_abs = all_poses_dest.resolve()
+        command_line = "uv run matcha " + " ".join(sys.argv[1:]) if ".venv/bin/matcha" in sys.argv[0] else " ".join(sys.argv)
+        log_lines = [
+            banner.rstrip("\n"),
+            "MATCHA DOCKING ENGINE  v0.1.0",
+            "============================================================",
+            "",
+            "",
+            "[ RUN INFO ]",
+            f"  Start time       : {start_time.isoformat()}Z",
+            f"  Command          : {command_line}",
+            f"  Workdir          : {run_workdir.resolve()}",
+            f"  Runtime          : {_format_runtime(runtime)}",
+            "",
+            "",
+        ]
+
+        if box_center_val is not None:
+            log_lines.extend([
+                "[ AUTODOCKING BOX ]",
+                f"  Mode             : {'manual center' if not autobox_specified else f'autobox from {autobox_ligand.name}'}",
+                f"  Center (Å)       : ({box_center_val[0]:.3f}, {box_center_val[1]:.3f}, {box_center_val[2]:.3f})",
+                "",
+                "",
+            ])
+        else:
+            log_lines.extend([
+                "[ DOCKING MODE ]",
+                "  Mode             : blind docking (entire protein)",
+                "",
+                "",
+            ])
+
+        log_lines.extend([
+            "[ INPUT / OUTPUT FILES ]",
+            f"  Receptor         : {receptor_abs}",
+            f"  Ligand           : {ligand_abs}",
+            f"  Best pose SDF    : {resolved_out_abs}",
+            f"  All poses SDF    : {all_poses_abs}",
+            f"  Log file         : {log_path}",
+            "",
+            "",
+            "[ SUMMARY ]",
+            f"  Samples per ligand     : {n_samples}",
+            f"  error_estimate_0 (Å)   : min={min(errs):.3f}, mean={float(np.mean(errs)):.3f}, max={max(errs):.3f}",
+            f"  posebusters_fast checks: min={min(pb_counts)}/4, max={max(pb_counts)}/4",
+            f"  Best sample            : rank={best_idx+1}, error_estimate_0={errs[best_idx]:.3f}, posebusters_pass_fast={pb_counts[best_idx]}/4",
+            f"  Filtered poses (pb_4/4): kept {kept_physical}/{total_samples}" + ("  [WARNING: none passed, keeping originals]" if physical_only and kept_physical==0 else ""),
+            "",
+            "",
+            "  Note: error_estimate_0 is a lower-is-better RMSD-like metric (Å).",
+            "        Negative values indicate high model confidence, positive values indicate uncertainty.",
+            "        Lower values = higher confidence in the predicted pose.",
+            "",
+            "",
+            "  PoseBusters checks (4 boolean tests):",
+            "    1. not_too_far_away   : ligand is close to protein (distance check)",
+            "    2. no_internal_clash  : no bad bonds/angles in ligand geometry",
+            "    3. no_clashes         : no inter-molecular clashes (ligand-protein)",
+            "    4. no_volume_clash    : no vdW volume overlaps",
+            "  Additional metric:",
+            "    - buried_fraction     : fraction of ligand buried in protein (shown separately)",
+            "",
+            "[ POSE RANKING ]",
+            "  mode  error_est_0(Å)  pb_4/4  not_far  no_int_clash  no_clash  no_vol_clash  buried_frac",
+            "  --------------------------------------------------------------------------------------------",
+        ])
+        for mode, sample in ranked_samples:
+            err = float(sample.get("error_estimate_0", float("inf")))
+            pb_count = int(sample.get("posebusters_filters_passed_count_fast", 0))
+            pb_flags = sample.get("posebusters_filters_fast", [])
+
+            not_far = "✓" if len(pb_flags) > 0 and pb_flags[0] else "✗"
+            no_int_clash = "✓" if len(pb_flags) > 1 and pb_flags[1] else "✗"
+            no_clash = "✓" if len(pb_flags) > 2 and pb_flags[2] else "✗"
+            no_vol_clash = "✓" if len(pb_flags) > 3 and pb_flags[3] else "✗"
+            buried_frac = f"{pb_flags[4]:.2f}" if len(pb_flags) > 4 else "n/a"
+
+            log_lines.append(
+                f"  {mode:<3}     {err:>7.3f}       {pb_count}/4      {not_far:^4}     {no_int_clash:^8}     {no_clash:^5}     {no_vol_clash:^8}      {buried_frac:>6}"
+            )
+
+        log_lines.extend([
+            "",
+            "Legend: ✓ = passed, ✗ = failed",
+            "",
+            "",
+        ])
+
+        if any(e > 0 for e in errs):
+            log_lines.extend([
+                "WARNING: Some poses have positive error_est_0 values.",
+                "         This indicates reduced model confidence in those predictions.",
+                "         Consider generating more samples or inspecting poses manually.",
+                "",
+                "",
+            ])
+        if max(pb_counts) < 4:
+            log_lines.extend([
+                "WARNING: No poses passed all PoseBusters checks (pb_4/4).",
+                "         Inspect poses or regenerate with more samples/box adjustments.",
+                "",
+                "",
+            ])
+
+        log_lines.extend([
+            "[ END ]",
+            f"  Run finished at    : {end_time.isoformat()}Z",
+            f"  Total runtime      : {_format_runtime(runtime)}",
+            f"  Workdir preserved  : {run_workdir}",
+            "============================================================",
+        ])
+        with open(log_path, "w") as log_file:
+            log_file.write("\n".join(log_lines))
+
+        if not keep_workdir:
+            shutil.rmtree(work_dir, ignore_errors=True)
+            console.print(f"[bold green][matcha][/bold green] cleaned workdir {work_dir}")
+        else:
+            console.print(f"[bold green][matcha][/bold green] keeping workdir at {work_dir}")
+        return
+
+    # batch mode output
+    sdf_preds_dir = preds_root / dataset_name / "sdf_predictions"
+    molecule_uids = sorted([p.name for p in (work_dir / "datasets" / "any_conf").iterdir() if p.is_dir()])
+    receptor_abs = receptor.resolve()
+    ligand_dir_abs = ligand_dir.resolve()
+    run_workdir_abs = run_workdir.resolve()
+
+    for mol_uid in molecule_uids:
+        metrics_key = mol_uid if mol_uid in metrics else f"{mol_uid}_mol0"
+        if metrics_key not in metrics:
+            console.print(f"[yellow]Warning: No results for {mol_uid}[/yellow]")
+            continue
+        mdata = metrics[metrics_key]
+        errs = np.array([float(s.get("error_estimate_0", float("inf"))) for s in mdata["sample_metrics"]])
+        pb_counts = np.array([int(s.get("posebusters_filters_passed_count_fast", 0)) for s in mdata["sample_metrics"]])
+        def _get_best_sample_idx(errs, pb_counts):
+            best_pb_count = max(pb_counts)
+            pb_count_indices = np.arange(len(pb_counts))[pb_counts == best_pb_count]
+            scores = errs[pb_count_indices]
+            best_score_idx = np.argmin(scores)
+            return pb_count_indices[best_score_idx]
+        best_idx = _get_best_sample_idx(errs, pb_counts)
+
+        pred_sdf_src = sdf_preds_dir / f"{mol_uid}.sdf"
+        best_dest = best_dir / f"{mol_uid}.sdf"
+        all_dest = all_dir / f"{mol_uid}_poses.sdf"
+
+        if pred_sdf_src.exists():
+            shutil.copyfile(pred_sdf_src, best_dest)
+        ranked_samples, kept_physical, total_samples = _save_all_poses_for_uid(
+            metrics, metrics_key, all_dest, filter_non_physical=physical_only
+        )
+
+        # Per-ligand detailed log (single-style) inside batch run
+        ligand_input = (run_workdir / "work" / "datasets" / "any_conf" / mol_uid / f"{mol_uid}_ligand.sdf").resolve()
+        per_log_dir = run_workdir / "logs"
+        per_log_dir.mkdir(parents=True, exist_ok=True)
+        per_log_path = per_log_dir / f"{mol_uid}.log"
+
+        end_time_local = datetime.now(timezone.utc)
+        runtime_local = (end_time_local - start_time).total_seconds()
+
+        log_lines = [
+            banner.rstrip("\n"),
+            "MATCHA DOCKING ENGINE  v0.1.0",
+            "============================================================",
+            "",
+            "",
+            "[ RUN INFO ]",
+            f"  Start time       : {start_time.isoformat()}Z",
+            f"  Command          : batch run {run_name} (ligand {mol_uid})",
+            f"  Workdir          : {run_workdir_abs}",
+            f"  Runtime          : {_format_runtime(runtime_local)}",
+            "",
+            "",
+        ]
+
+        if box_center_val is not None:
+            log_lines.extend([
+                "[ AUTODOCKING BOX ]",
+                f"  Mode             : {'manual center' if not autobox_specified else f'autobox from {autobox_ligand.name}'}",
+                f"  Center (Å)       : ({box_center_val[0]:.3f}, {box_center_val[1]:.3f}, {box_center_val[2]:.3f})",
+                "",
+                "",
+            ])
+        else:
+            log_lines.extend([
+                "[ DOCKING MODE ]",
+                "  Mode             : blind docking (entire protein)",
+                "",
+                "",
+            ])
+
+        log_lines.extend([
+            "[ INPUT / OUTPUT FILES ]",
+            f"  Receptor         : {receptor_abs}",
+            f"  Ligand           : {ligand_input}",
+            f"  Best pose SDF    : {best_dest.resolve()}",
+            f"  All poses SDF    : {all_dest.resolve()}",
+            f"  Log file         : {per_log_path.resolve()}",
+            "",
+            "",
+            "[ SUMMARY ]",
+            f"  Samples per ligand     : {n_samples}",
+            f"  error_estimate_0 (Å)   : min={min(errs):.3f}, mean={float(np.mean(errs)):.3f}, max={max(errs):.3f}",
+            f"  posebusters_fast checks: min={min(pb_counts)}/4, max={max(pb_counts)}/4",
+            f"  Best sample            : rank={best_idx+1}, error_estimate_0={errs[best_idx]:.3f}, posebusters_pass_fast={pb_counts[best_idx]}/4",
+            f"  Filtered poses (pb_4/4): kept {kept_physical}/{total_samples}" + ("  [WARNING: none passed, keeping originals]" if physical_only and kept_physical==0 else ""),
+            "",
+            "",
+            "  Note: error_estimate_0 is a lower-is-better RMSD-like metric (Å).",
+            "        Negative values indicate high model confidence, positive values indicate uncertainty.",
+            "        Lower values = higher confidence in the predicted pose.",
+            "",
+            "",
+            "  PoseBusters checks (4 boolean tests):",
+            "    1. not_too_far_away   : ligand is close to protein (distance check)",
+            "    2. no_internal_clash  : no bad bonds/angles in ligand geometry",
+            "    3. no_clashes         : no inter-molecular clashes (ligand-protein)",
+            "    4. no_volume_clash    : no vdW volume overlaps",
+            "  Additional metric:",
+            "    - buried_fraction     : fraction of ligand buried in protein (shown separately)",
+            "",
+            "[ POSE RANKING ]",
+            "  mode  error_est_0(Å)  pb_4/4  not_far  no_int_clash  no_clash  no_vol_clash  buried_frac",
+            "  --------------------------------------------------------------------------------------------",
+        ])
+        for mode, sample in ranked_samples:
+            err = float(sample.get("error_estimate_0", float("inf")))
+            pb_count_val = int(sample.get("posebusters_filters_passed_count_fast", 0))
+            pb_flags = sample.get("posebusters_filters_fast", [])
+
+            not_far = "✓" if len(pb_flags) > 0 and pb_flags[0] else "✗"
+            no_int_clash = "✓" if len(pb_flags) > 1 and pb_flags[1] else "✗"
+            no_clash = "✓" if len(pb_flags) > 2 and pb_flags[2] else "✗"
+            no_vol_clash = "✓" if len(pb_flags) > 3 and pb_flags[3] else "✗"
+            buried_frac = f"{pb_flags[4]:.2f}" if len(pb_flags) > 4 else "n/a"
+
+            log_lines.append(
+                f"  {mode:<3}     {err:>7.3f}       {pb_count_val}/4      {not_far:^4}     {no_int_clash:^8}     {no_clash:^5}     {no_vol_clash:^8}      {buried_frac:>6}"
+            )
+
+        log_lines.extend([
+            "",
+            "Legend: ✓ = passed, ✗ = failed",
+            "",
+            "",
+        ])
+
+        if any(e > 0 for e in errs):
+            log_lines.extend([
+                "WARNING: Some poses have positive error_est_0 values.",
+                "         This indicates reduced model confidence in those predictions.",
+                "         Consider generating more samples or inspecting poses manually.",
+                "",
+                "",
+            ])
+        if max(pb_counts) < 4:
+            log_lines.extend([
+                "WARNING: No poses passed all PoseBusters checks (pb_4/4).",
+                "         Inspect poses or regenerate with more samples/box adjustments.",
+                "",
+                "",
+            ])
+
+        log_lines.extend([
+            "[ END ]",
+            f"  Run finished at    : {end_time_local.isoformat()}Z",
+            f"  Total runtime      : {_format_runtime(runtime_local)}",
+            f"  Workdir preserved  : {run_workdir_abs}",
+            "============================================================",
+        ])
+
+        with open(per_log_path, "w") as log_file:
+            log_file.write("\n".join(log_lines))
 
     end_time = datetime.now(timezone.utc)
     runtime = (end_time - start_time).total_seconds()
-    # Simplify command line display
-    if sys.argv[0].endswith('/.venv/bin/matcha'):
-        command_line = "uv run matcha " + " ".join(sys.argv[1:])
-    else:
-        command_line = " ".join(sys.argv)
-    host = socket.gethostname()
-    seed_value = int(conf.get("seed", DEFAULT_CONF["seed"]))
-    cuda_device = gpu if gpu is not None else os.environ.get("CUDA_VISIBLE_DEVICES", "auto")
 
-    # Convert paths to absolute for logging
+    log_path = (log or run_workdir / f"{run_name}.log").resolve()
+    command_line = "uv run matcha " + " ".join(sys.argv[1:]) if ".venv/bin/matcha" in sys.argv[0] else " ".join(sys.argv)
     receptor_abs = receptor.resolve()
-    ligand_abs = ligand.resolve()
-
-    # Determine box mode for logging
-    if autobox_ligand is not None:
-        box_mode = f"start from reference ligand center ({autobox_ligand.name})"
-    elif manual_box_specified:
-        box_mode = "manual"
-    else:
-        box_mode = "blind docking (entire protein)"
-
+    ligand_dir_abs = ligand_dir.resolve()
+    run_workdir_abs = run_workdir.resolve()
     log_lines = [
         banner.rstrip("\n"),
         "MATCHA DOCKING ENGINE  v0.1.0",
@@ -480,129 +753,59 @@ def run_matcha(
         "",
         "[ RUN INFO ]",
         f"  Start time       : {start_time.isoformat()}Z",
-        f"  Host             : {host}",
         f"  Command          : {command_line}",
-        f"  Workdir          : {run_workdir}",
-        f"  Random seed      : {seed_value}",
-        f"  CUDA device      : {cuda_device}",
+        f"  Workdir          : {run_workdir_abs}",
+        f"  Runtime          : {_format_runtime(runtime)}",
         "",
         "",
-    ]
-
-    # Only show AUTODOCKING BOX section if box is specified
-    if box_center_val is not None:
-        log_lines.extend([
-            "[ AUTODOCKING BOX ]",
-            f"  Mode             : {box_mode}",
-            f"  Center (Å)       : ({box_center_val[0]:.3f}, {box_center_val[1]:.3f}, {box_center_val[2]:.3f})",
-            "",
-            "",
-        ])
-    else:
-        log_lines.extend([
-            "[ DOCKING MODE ]",
-            f"  Mode             : {box_mode}",
-            "",
-            "",
-        ])
-
-    log_lines.extend([
-        "[ INPUT / OUTPUT FILES ]",
+        "[ INPUT FILES ]",
         f"  Receptor         : {receptor_abs}",
-        f"  Ligand           : {ligand_abs}",
-        f"  Best pose SDF    : {resolved_out}",
-        f"  All poses SDF    : {all_pose_sdf}",
-        f"  Log file         : {log_path}",
+        f"  Ligands          : {ligand_dir_abs} ({len(molecule_uids)} molecules)",
+        f"  Output dir       : {run_workdir_abs}",
         "",
         "",
-        "",
-        "[ SUMMARY ]",
-        f"  Samples per ligand     : {n_samples}",
-        f"  error_estimate_0 (Å)   : min={min(errs):.3f}, mean={float(np.mean(errs)):.3f}, max={max(errs):.3f}",
-        f"  posebusters_fast checks: min={min(pb_counts)}/4, max={max(pb_counts)}/4",
-        f"  Best sample            : rank={best_idx+1}, error_estimate_0={errs[best_idx]:.3f}, posebusters_pass_fast={pb_counts[best_idx]}/4",
+        "[ PROCESSING SUMMARY ]",
+        f"  Samples per molecule : {n_samples}",
+        f"  Total molecules      : {len(molecule_uids)}",
         "",
         "",
-        "  Note: error_estimate_0 is a lower-is-better RMSD-like metric (Å).",
-        "        Negative values indicate high model confidence, positive values indicate uncertainty.",
-        "        Lower values = higher confidence in the predicted pose.",
-        "",
-        "",
-        "  PoseBusters checks (4 boolean tests):",
-        "    1. not_too_far_away   : ligand is close to protein (distance check)",
-        "    2. no_internal_clash  : no bad bonds/angles in ligand geometry",
-        "    3. no_clashes         : no inter-molecular clashes (ligand-protein)",
-        "    4. no_volume_clash    : no vdW volume overlaps",
-        "  Additional metric:",
-        "    - buried_fraction     : fraction of ligand buried in protein (shown separately)",
-        "",
-        "[ POSE RANKING ]",
-        "  mode  error_est_0(Å)  pb_4/4  not_far  no_int_clash  no_clash  no_vol_clash  buried_frac",
-        "  --------------------------------------------------------------------------------------------",
-    ])
-    for mode, sample in ranked_samples:
-        err = float(sample.get("error_estimate_0", float("inf")))
-        pb_count = int(sample.get("posebusters_filters_passed_count_fast", 0))
-        pb_flags = sample.get("posebusters_filters_fast", [])
-
-        # Extract individual flags
-        not_far = "✓" if len(pb_flags) > 0 and pb_flags[0] else "✗"
-        no_int_clash = "✓" if len(pb_flags) > 1 and pb_flags[1] else "✗"
-        no_clash = "✓" if len(pb_flags) > 2 and pb_flags[2] else "✗"
-        no_vol_clash = "✓" if len(pb_flags) > 3 and pb_flags[3] else "✗"
-        buried_frac = f"{pb_flags[4]:.2f}" if len(pb_flags) > 4 else "n/a"
-
-        log_lines.append(f"    {mode:<3}     {err:>7.3f}       {pb_count}/4      {not_far:^4}     {no_int_clash:^8}     {no_clash:^5}     {no_vol_clash:^8}      {buried_frac:>6}")
+        "[ RESULTS ]",
+    ]
+    for mol_uid in molecule_uids:
+        metrics_key = mol_uid if mol_uid in metrics else f"{mol_uid}_mol0"
+        if metrics_key not in metrics:
+            log_lines.append(f"  {mol_uid}: No results")
+            continue
+        mdata = metrics[metrics_key]
+        errs = np.array([float(s.get("error_estimate_0", float("inf"))) for s in mdata["sample_metrics"]])
+        pb_counts = np.array([int(s.get("posebusters_filters_passed_count_fast", 0)) for s in mdata["sample_metrics"]])
+        best_idx = _get_best_sample_idx(errs, pb_counts)
+        log_lines.append(f"  {mol_uid}: Best err={errs[best_idx]:.3f}, pb={pb_counts[best_idx]}/4")
 
     log_lines.extend([
         "",
-        "Legend: ✓ = passed, ✗ = failed",
-        "",
-        "",
-    ])
-
-    # Add warning if any error_estimate_0 is positive
-    if any(e > 0 for e in errs):
-        log_lines.extend([
-            "WARNING: Some poses have positive error_est_0 values.",
-            "         This indicates reduced model confidence in those predictions.",
-            "         Consider generating more samples or inspecting poses manually.",
-            "",
-            "",
-        ])
-
-    log_lines.extend([
         "[ END ]",
         f"  Run finished at    : {end_time.isoformat()}Z",
-        f"  Total runtime      : {runtime:.1f} s",
-        f"  Workdir preserved  : {run_workdir}",
+        f"  Total runtime      : {_format_runtime(runtime)}",
+        f"  Workdir preserved  : {run_workdir_abs}",
         "============================================================",
     ])
-
-    # Write full report to log file
     with open(log_path, "w") as log_file:
-        for line in log_lines:
-            log_file.write(line + "\n")
+        log_file.write("\n".join(log_lines))
 
-    # Print summary to console
     console.print("")
-    console.print("[ SUMMARY ]")
-    console.print(f"  Samples per ligand     : {n_samples}")
-    console.print(f"  error_estimate_0 (Å)   : min={min(errs):.3f}, mean={float(np.mean(errs)):.3f}, max={max(errs):.3f}")
-    console.print(f"  posebusters_fast checks: min={min(pb_counts)}/4, max={max(pb_counts)}/4")
-    console.print(f"  Best sample            : rank={best_idx+1}, error_estimate_0={errs[best_idx]:.3f}, posebusters_pass_fast={pb_counts[best_idx]}/4")
-    console.print("")
-    console.print(f"  Best pose SDF    : {resolved_out}")
-    console.print(f"  All poses SDF    : {all_pose_sdf}")
+    console.print("[ BATCH SUMMARY ]")
+    console.print(f"  Processed {len(molecule_uids)} molecules")
+    console.print(f"  Results saved to : {run_workdir}")
     console.print(f"  Log file         : {log_path}")
-    console.print(f"  Runtime          : {runtime:.1f} s")
+    console.print(f"  Runtime          : {_format_runtime(runtime)}")
     console.print("")
 
     if keep_workdir:
-        console.print(f"[bold green][matcha][/bold green] keeping workdir at {run_workdir}")
+        console.print(f"[bold green][matcha][/bold green] keeping workdir at {work_dir}")
     else:
-        shutil.rmtree(run_workdir, ignore_errors=True)
-        console.print(f"[bold green][matcha][/bold green] cleaned workdir {run_workdir}")
+        shutil.rmtree(work_dir, ignore_errors=True)
+        console.print(f"[bold green][matcha][/bold green] cleaned workdir {work_dir}")
 
 
 def main() -> None:
