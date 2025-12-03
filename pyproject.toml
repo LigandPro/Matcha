@@ -3,7 +3,7 @@ name = "matcha"
 version = "1.0.2"
 description = "Matcha: Multi-Stage Riemannian Flow Matching for Molecular Docking"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = { file = "LICENSE" }
 authors = [
   { name = "Matcha authors" }
@@ -14,7 +14,7 @@ dependencies = [
   "scipy",
   "torch",
   "deli",
-  "transformers",
+  "transformers>=4.40.0",
   "pyyaml",
   "biopython",
   "accelerate",
@@ -26,9 +26,9 @@ dependencies = [
   "prody",
   "typer>=0.20.0",
   "rich",
-  "huggingface-hub>=0.23",
-  "pandas>=2.3.3",
-  "posebusters>=0.6.0",
+  "huggingface-hub",
+  "pandas",
+  "posebusters",
 ]
 
 [project.scripts]
