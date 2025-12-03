@@ -184,10 +184,10 @@ class PDBBind(Dataset):
                  predicted_ligand_transforms_path=None, dataset_type='pdbbind',
                  add_all_atom_pos=False, use_predicted_tr_only=True,
                  data_dir_conf=None, n_preds_to_use=1, use_all_chains=False,
-                 min_lig_size=0):
+                 min_lig_size=0, n_confs_override=None):
         self.data_dir = data_dir
         self.n_preds_to_use = n_preds_to_use
-        self.n_confs_to_use = min(10, self.n_preds_to_use)
+        self.n_confs_to_use = n_confs_override if n_confs_override is not None else min(10, self.n_preds_to_use)
         self.data_dir_conf = data_dir_conf
         self.esm_embeddings_path = esm_embeddings_path
         self.sequences_path = sequences_path
@@ -289,10 +289,11 @@ class PDBBind(Dataset):
                 extended_complex.ligand.pred_tr = pred_data['tr_pred_init'] + \
                     pred_data['full_protein_center'] - \
                     extended_complex.protein.full_protein_center
+                extended_complex.ligand.pred_tr = extended_complex.ligand.pred_tr.astype(np.float32)
 
-                pred_pos = pred_data['transformed_orig'] + pred_data['full_protein_center'] - \
-                    extended_complex.protein.full_protein_center
                 if not self.use_predicted_tr_only:
+                    pred_pos = pred_data['transformed_orig'] + pred_data['full_protein_center'] - \
+                               extended_complex.protein.full_protein_center
                     extended_complex.ligand.predicted_pos = pred_pos
 
                 extended_complexes.append(extended_complex)

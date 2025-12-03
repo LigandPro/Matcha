@@ -236,7 +236,8 @@ def compute_fast_filters(conf, inference_run_name, n_preds_to_use):
                 inference_run_name, file_name_save), predicts, allow_pickle=True)
 
 
-def run_inference_pipeline(conf, run_name, n_preds_to_use):
+def run_inference_pipeline(conf, run_name, n_preds_to_use, pocket_centers_filename=None, 
+                           docking_batch_limit=15000, scoring_batch_size=4):
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.multiprocessing.set_sharing_strategy('file_system')
     torch.manual_seed(conf.seed)
@@ -253,17 +254,13 @@ def run_inference_pipeline(conf, run_name, n_preds_to_use):
     num_steps = 10
     print('Generate', n_preds_to_use, 'samples for each ligand')
 
-    if conf.use_all_chains:
-        conf.batch_limit = 15000
-        batch_size = 4
-    else:
-        conf.batch_limit = 30000
-        batch_size = 16
+
+    conf.batch_limit = docking_batch_limit
     num_workers = 8
 
     def get_dataloader_docking(dataset): return DataLoader(dataset, batch_size=1, shuffle=False,
                                                            collate_fn=dummy_ranking_collate_fn, num_workers=num_workers)
-    def get_dataloader_scoring(dataset): return DataLoader(dataset, batch_size=batch_size, shuffle=False,
+    def get_dataloader_scoring(dataset): return DataLoader(dataset, batch_size=scoring_batch_size, shuffle=False,
                                                            collate_fn=complex_collate_fn, num_workers=num_workers)
     dataset_names = conf.test_dataset_types
     print('DATASET NAMES:', dataset_names)
@@ -327,12 +324,18 @@ def run_inference_pipeline(conf, run_name, n_preds_to_use):
                                             predicted_ligand_transforms_path=predicted_ligand_transforms_path,
                                             complex_collate_fn=complex_collate_fn,
                                             n_preds_to_use=n_preds_to_use,
-                                            **module['dataset_kwargs'])['test']
+                                            **docking_modules[0]['dataset_kwargs'])['test']
         print({ds_name: len(ds)
               for ds_name, ds in test_dataset_docking.items()})
         test_dataset_docking = test_dataset_docking[dataset_name]
 
         for stage_idx in [0, 1, 2]:
+            if pocket_centers_filename is not None and stage_idx == 0:
+                predicted_ligand_transforms_path = pocket_centers_filename
+                print('Skipping docking stage 1')
+                print(f'Using pocket centers from {pocket_centers_filename}')
+                continue
+
             module = pipeline['docking'][min(
                 stage_idx, len(pipeline['docking']) - 1)]
             model = module['model']
@@ -341,6 +344,8 @@ def run_inference_pipeline(conf, run_name, n_preds_to_use):
             print(f'Stage {stage_idx + 1}; predicted_ligand_transforms_path:',
                   predicted_ligand_transforms_path)
             if predicted_ligand_transforms_path is not None:
+                use_predicted_tr_only = docking_modules[stage_idx]['dataset_kwargs'].get('use_predicted_tr_only', True)
+                test_dataset_docking.dataset.use_predicted_tr_only = use_predicted_tr_only
                 test_dataset_docking.reset_predicted_ligand_transforms(
                     predicted_ligand_transforms_path, n_preds_to_use)
 

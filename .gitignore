@@ -5,7 +5,8 @@ __pycache__/
 
 # C extensions
 *.so
-
+uv.lock
+checkpoints/
 # Distribution / packaging
 .Python
 build/
@@ -205,3 +206,5 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+outputs/
