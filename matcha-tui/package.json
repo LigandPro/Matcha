@@ -1,0 +1,52 @@
+{
+  "name": "matcha-tui",
+  "version": "1.0.0",
+  "description": "Production-level TUI for Matcha molecular docking",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "matcha-tui": "./bin/matcha-tui.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js",
+    "lint": "eslint src --ext .ts,.tsx",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "molecular-docking",
+    "tui",
+    "cli",
+    "ink",
+    "matcha"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "ink": "^5.0.1",
+    "ink-select-input": "^6.0.0",
+    "ink-spinner": "^5.0.0",
+    "ink-text-input": "^6.0.0",
+    "react": "^18.3.1",
+    "zustand": "^4.5.5",
+    "chalk": "^5.3.0",
+    "figures": "^6.1.0",
+    "boxen": "^7.1.1",
+    "cli-truncate": "^4.0.0",
+    "date-fns": "^3.6.0",
+    "execa": "^9.4.1",
+    "tree-kill": "^1.2.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/react": "^18.3.12",
+    "typescript": "^5.7.2",
+    "@typescript-eslint/eslint-plugin": "^8.17.0",
+    "@typescript-eslint/parser": "^8.17.0",
+    "eslint": "^9.16.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

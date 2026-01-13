@@ -33,6 +33,7 @@ dependencies = [
 
 [project.scripts]
 matcha = "matcha.cli:main"
+matcha-tui-backend = "matcha.tui:main"
 
 [build-system]
 requires = ["setuptools>=61.0"]
