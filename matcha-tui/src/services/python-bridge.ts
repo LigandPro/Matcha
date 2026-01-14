@@ -154,6 +154,12 @@ export class PythonBridge extends EventEmitter {
       this.emit('error', err);
     });
 
+    // Collect stderr for error messages
+    let stderrOutput = '';
+    this.process.stderr?.on('data', (data: Buffer) => {
+      stderrOutput += data.toString();
+    });
+
     // Wait for ready notification
     await new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
@@ -173,7 +179,8 @@ export class PythonBridge extends EventEmitter {
       this.process?.once('exit', (code) => {
         clearTimeout(timeout);
         if (!this.ready) {
-          reject(new Error(`Backend exited with code ${code} during startup`));
+          const stderrInfo = stderrOutput ? `\nStderr: ${stderrOutput.slice(-500)}` : '';
+          reject(new Error(`Backend exited with code ${code} during startup${stderrInfo}`));
         }
       });
     });

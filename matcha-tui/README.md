@@ -31,29 +31,63 @@ Interactive Terminal User Interface for Matcha molecular docking.
 
 - Node.js 18+ and npm
 - Python 3.12+
-- UV package manager (for Python dependencies)
+- UV package manager (`pip install uv`)
+- Matcha project with checkpoints downloaded
 
-### Build
+### Setup
 
-```bash
-cd matcha-tui
-npm install
-npm run build
-```
+1. Clone the repository (if not already):
+   ```bash
+   git clone <repo-url> matcha-tui-dev
+   cd matcha-tui-dev
+   ```
+
+2. Install Python dependencies:
+   ```bash
+   uv sync
+   ```
+
+3. Download model checkpoints (if not already):
+   ```bash
+   uv run python -m matcha.utils.download
+   ```
+
+4. Build the TUI:
+   ```bash
+   cd matcha-tui
+   npm install
+   npm run build
+   ```
 
 ## Usage
 
-### Start TUI
+### Quick Start
 
 ```bash
 cd matcha-tui
 npm start
 ```
 
-Or from the parent project (if `matcha-tui` is installed as a command):
+### Step-by-Step Guide
+
+1. Launch TUI: `npm start`
+2. Press **Enter** to select "New docking job"
+3. Press **Enter** to select "Single ligand" mode
+4. Type the path to your receptor `.pdb` file, then press **Tab**
+5. Type the path to your ligand `.sdf` file, then press **Tab**
+6. Press **Enter** to accept "Blind docking" (or configure box)
+7. Press **Tab** through parameters (or adjust as needed)
+8. Press **Enter** on the Review screen to start docking
+9. Wait for results (press **c** to cancel if needed)
+
+### Example Files
 
 ```bash
-matcha-tui
+# Receptor
+/path/to/protein.pdb
+
+# Ligand
+/path/to/ligand.sdf
 ```
 
 ### Keyboard Shortcuts

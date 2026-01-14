@@ -2,14 +2,16 @@
  * Running Screen - shows docking progress with batch monitoring support.
  */
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { useStore } from '../store/index.js';
-import { getBridge, type ProgressEvent } from '../services/index.js';
+import { getBridge, initBridge, closeBridge, type ProgressEvent } from '../services/index.js';
 import { ProgressBar } from '../components/ProgressBar.js';
 import { icons } from '../utils/colors.js';
 import { PIPELINE_STAGES, type PipelineStage, type PoseResult } from '../types/index.js';
 import { formatDuration } from '../utils/format.js';
+import * as path from 'path';
+import { fileURLToPath } from 'url';
 
 interface StageStatus {
   status: 'pending' | 'running' | 'done' | 'error';
@@ -33,11 +35,14 @@ export function RunningScreen(): React.ReactElement {
   const setResults = useStore((s) => s.setResults);
   const setError = useStore((s) => s.setError);
   const addLog = useStore((s) => s.addLog);
+  const jobConfig = useStore((s) => s.jobConfig);
 
   const [stages, setStages] = useState<Record<string, StageStatus>>({});
   const [poses, setPoses] = useState<PoseResult[]>([]);
   const [startTime] = useState(Date.now());
   const [elapsedTime, setElapsedTime] = useState(0);
+  const jobStartedRef = useRef(false);
+  const [bridgeReady, setBridgeReady] = useState(false);
 
   // Batch mode state
   const [isBatch, setIsBatch] = useState(false);
@@ -54,7 +59,94 @@ export function RunningScreen(): React.ReactElement {
     return () => clearInterval(timer);
   }, [startTime]);
 
+  // Start docking job on mount
   useEffect(() => {
+    if (jobStartedRef.current) return;
+    jobStartedRef.current = true;
+    setRunning(true);
+
+    // Build config from jobConfig
+    const config = {
+      receptor: jobConfig.receptor || '',
+      ligand: jobConfig.mode === 'single' ? jobConfig.ligand : undefined,
+      ligand_dir: jobConfig.mode === 'batch' ? jobConfig.ligandDir : undefined,
+      output_dir: jobConfig.params?.outputDir || './results',
+      run_name: jobConfig.params?.runName || `matcha_${Date.now()}`,
+      n_samples: jobConfig.params?.nSamples || 40,
+      n_confs: jobConfig.params?.nConfs,
+      gpu: jobConfig.params?.gpu,
+      checkpoints: jobConfig.params?.checkpointsDir,
+      physical_only: jobConfig.params?.physicalOnly || false,
+      box_mode: jobConfig.box?.mode || 'blind',
+      center_x: jobConfig.box?.centerX,
+      center_y: jobConfig.box?.centerY,
+      center_z: jobConfig.box?.centerZ,
+      autobox_ligand: jobConfig.box?.autoboxLigand,
+    };
+
+    addLog(`Starting docking with config: ${JSON.stringify(config)}`);
+
+    // Initialize bridge first, then start docking
+    const startJob = async () => {
+      try {
+        // Initialize Python backend
+        addLog('Initializing Python backend...');
+        // Get project root from env (set in index.tsx) or calculate from current file
+        const __filename = fileURLToPath(import.meta.url);
+        const __dirname = path.dirname(__filename);
+        const projectRoot = process.env.MATCHA_ROOT || path.resolve(__dirname, '..', '..', '..');
+        addLog(`Project root: ${projectRoot}`);
+        addLog(`MATCHA_ROOT env: ${process.env.MATCHA_ROOT || 'not set'}`);
+        addLog(`__dirname: ${__dirname}`);
+
+        // Capture all stderr before bridge starts
+        let stderrBuffer = '';
+
+        const bridge = await initBridge({
+          projectRoot,
+          useUv: true,
+        });
+
+        // Listen for stderr to help with debugging
+        bridge.on('stderr', (data: string) => {
+          stderrBuffer += data;
+          addLog(`[stderr] ${data}`);
+        });
+
+        bridge.on('error', (err: Error) => {
+          addLog(`[bridge error] ${err.message}`);
+        });
+
+        bridge.on('exit', (code: number) => {
+          addLog(`[backend exit] code ${code}`);
+        });
+
+        addLog('Backend initialized, starting docking...');
+        setBridgeReady(true);
+
+        // Start docking
+        await bridge.startDocking(config);
+      } catch (err) {
+        const error = err as Error;
+        addLog(`Error: ${error.message}`);
+        setError(`Failed to start docking: ${error.message}`);
+        setRunning(false);
+        setScreen('welcome');
+      }
+    };
+
+    startJob();
+
+    // Cleanup on unmount
+    return () => {
+      closeBridge().catch(() => {});
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!bridgeReady) return;
+
     const bridge = getBridge();
 
     const handleProgress = (event: ProgressEvent) => {
@@ -133,10 +225,10 @@ export function RunningScreen(): React.ReactElement {
 
     bridge.on('progress', handleProgress);
     return () => { bridge.off('progress', handleProgress); };
-  }, [addLog, setScreen, setRunning, setResults, setError, startTime, poses]);
+  }, [bridgeReady, addLog, setScreen, setRunning, setResults, setError, startTime, poses]);
 
   useInput((input) => {
-    if (input === 'c') {
+    if (input === 'c' && bridgeReady) {
       getBridge().cancelJob().catch(() => {});
     }
   });
@@ -145,12 +237,12 @@ export function RunningScreen(): React.ReactElement {
     <Box flexDirection="column" gap={1}>
       {/* Header with elapsed time */}
       <Box>
-        <Text color="cyan">Elapsed: </Text>
+        <Text color="magenta">Elapsed: </Text>
         <Text color="white">{formatDuration(elapsedTime)}</Text>
         {isBatch && (
           <>
             <Text color="gray"> │ </Text>
-            <Text color="cyan">Ligand: </Text>
+            <Text color="magenta">Ligand: </Text>
             <Text color="white">{currentLigandIndex + 1}/{totalLigands}</Text>
           </>
         )}
@@ -169,7 +261,7 @@ export function RunningScreen(): React.ReactElement {
       {/* Current ligand info (if batch mode) */}
       {isBatch && currentLigand && (
         <Box marginTop={1}>
-          <Text color="cyan">Current: </Text>
+          <Text color="magenta">Current: </Text>
           <Text color="yellow">{currentLigand}</Text>
         </Box>
       )}
@@ -192,7 +284,7 @@ export function RunningScreen(): React.ReactElement {
             {poses.slice(0, 5).map((pose) => (
               <Box key={pose.rank}>
                 <Text color="white">{String(pose.rank).padEnd(6)}</Text>
-                <Text color="cyan">{pose.errorEstimate.toFixed(3).padEnd(12)}</Text>
+                <Text color="magenta">{pose.errorEstimate.toFixed(3).padEnd(12)}</Text>
                 <Text color={pose.pbCount === 4 ? 'green' : 'yellow'}>{pose.pbCount}/4</Text>
               </Box>
             ))}
@@ -260,13 +352,13 @@ function LigandRow({ ligand, isCurrent }: { ligand: LigandStatus; isCurrent: boo
   return (
     <Box>
       <Text color={statusColor}>{statusIcon} </Text>
-      <Text color={isCurrent ? 'cyan' : 'white'} bold={isCurrent}>
+      <Text color={isCurrent ? 'magenta' : 'white'} bold={isCurrent}>
         {ligand.name.substring(0, 25).padEnd(25)}
       </Text>
       {ligand.status === 'completed' && ligand.error_estimate !== undefined && (
         <>
           <Text color="gray"> err: </Text>
-          <Text color="cyan">{ligand.error_estimate.toFixed(3)}</Text>
+          <Text color="magenta">{ligand.error_estimate.toFixed(3)}</Text>
           <Text color="gray"> pb: </Text>
           <Text color={ligand.pb_count === 4 ? 'green' : 'yellow'}>{ligand.pb_count}/4</Text>
         </>

@@ -328,6 +328,10 @@ def process_single_ligand(
         emit(ProgressEvent(type="cancelled", message="Job cancelled"))
         return None
 
+    # Prepare data directory
+    data_dir = run_workdir / "data" / ligand_name
+    data_dir.mkdir(parents=True, exist_ok=True)
+
     # Build config
     conf = OmegaConf.create({
         "seed": 42,
@@ -341,7 +345,9 @@ def process_single_ligand(
         "checkpoints_folder": str(checkpoint_path),
         "cache_path": str(run_workdir / "cache"),
         "inference_results_folder": str(run_workdir / "runs" / ligand_name),
-        "any_data_dir": str(run_workdir / "datasets"),
+        "any_data_dir": str(run_workdir / "datasets" / "any_conf"),
+        "test_dataset_types": ["any_conf"],
+        "data_folder": str(data_dir),
     })
 
     # ESM embeddings
@@ -355,10 +361,7 @@ def process_single_ligand(
     ))
     start_time = time.time()
 
-    data_dir = run_workdir / "data" / ligand_name
-    data_dir.mkdir(parents=True, exist_ok=True)
-
-    compute_sequences(conf, "any_conf", data_dir)
+    compute_sequences(conf)
     emit(ProgressEvent(
         type="stage_progress",
         stage="esm",
@@ -372,7 +375,7 @@ def process_single_ligand(
         emit(ProgressEvent(type="cancelled", message="Job cancelled"))
         return None
 
-    compute_esm_embeddings(conf, "any_conf", data_dir)
+    compute_esm_embeddings(conf)
     emit(ProgressEvent(
         type="stage_done",
         stage="esm",
@@ -386,80 +389,53 @@ def process_single_ligand(
         emit(ProgressEvent(type="cancelled", message="Job cancelled"))
         return None
 
-    # Pocket centers (if specified)
-    pocket_centers = None
+    # Pocket centers file (if specified)
+    import copy
+    pocket_centers_filename = None
     if box_mode == "manual" and all(v is not None for v in [center_x, center_y, center_z]):
         import numpy as np
-        pocket_centers = {uid: np.array([center_x, center_y, center_z])}
+        pocket_centers_filename = run_workdir / "pocket_centers.npy"
+        pocket_centers = {}
+        ligand_center = np.array([center_x, center_y, center_z])
+        protein_center = np.zeros(3)
+        for i in range(n_samples):
+            pocket_centers[f'{uid}_mol0_conf{i}'] = [{'tr_pred_init': ligand_center, 'full_protein_center': protein_center}]
+        np.save(pocket_centers_filename, [pocket_centers])
     elif box_mode == "autobox" and autobox_ligand:
         import numpy as np
         autobox_path = Path(autobox_ligand).expanduser().resolve()
         mol = Chem.MolFromMolFile(str(autobox_path), removeHs=False, sanitize=False)
         if mol is not None:
+            pocket_centers_filename = run_workdir / "pocket_centers.npy"
             conformer = mol.GetConformer()
             coords = np.array([conformer.GetAtomPosition(i) for i in range(mol.GetNumAtoms())])
             center = coords.mean(axis=0)
-            pocket_centers = {uid: center}
+            pocket_centers = {}
+            protein_center = np.zeros(3)
+            for i in range(n_samples):
+                pocket_centers[f'{uid}_mol0_conf{i}'] = [{'tr_pred_init': center, 'full_protein_center': protein_center}]
+            np.save(pocket_centers_filename, [pocket_centers])
 
-    # Run inference stages
-    stages = ["stage1", "stage2", "stage3"]
-    for stage_name in stages:
-        emit(ProgressEvent(
-            type="stage_start",
-            stage=stage_name,
-            name=f"Stage {stage_name[-1]} inference",
-            current_ligand=ligand.name,
-            ligand_index=ligand_index,
-            total_ligands=total_ligands,
-        ))
-        start_time = time.time()
-
-        if job.is_cancelled():
-            emit(ProgressEvent(type="cancelled", message="Job cancelled"))
-            return None
-
-        run_inference_pipeline(
-            conf,
-            "any_conf",
-            data_dir,
-            stage_name,
-            n_samples=n_samples,
-            n_confs=n_confs,
-            pocket_centers=pocket_centers,
-        )
-
-        emit(ProgressEvent(
-            type="stage_done",
-            stage=stage_name,
-            elapsed=time.time() - start_time,
-            current_ligand=ligand.name,
-            ligand_index=ligand_index,
-            total_ligands=total_ligands,
-        ))
-
-    if job.is_cancelled():
-        emit(ProgressEvent(type="cancelled", message="Job cancelled"))
-        return None
-
-    # Scoring
+    # Run inference pipeline (all stages at once)
     emit(ProgressEvent(
         type="stage_start",
-        stage="scoring",
-        name="Scoring poses",
+        stage="stage1",
+        name="Running inference pipeline",
         current_ligand=ligand.name,
         ligand_index=ligand_index,
         total_ligands=total_ligands,
     ))
     start_time = time.time()
 
+    if job.is_cancelled():
+        emit(ProgressEvent(type="cancelled", message="Job cancelled"))
+        return None
+
     run_inference_pipeline(
-        conf,
+        copy.deepcopy(conf),
         "any_conf",
-        data_dir,
-        "scoring",
-        n_samples=n_samples,
-        n_confs=n_confs,
-        pocket_centers=pocket_centers,
+        n_samples,
+        pocket_centers_filename,
     )
 
     emit(ProgressEvent(
@@ -486,7 +462,7 @@ def process_single_ligand(
     ))
     start_time = time.time()
 
-    compute_fast_filters(conf, "any_conf", conf.inference_results_folder)
+    compute_fast_filters(conf, "any_conf", n_samples)
 
     emit(ProgressEvent(
         type="stage_done",
@@ -501,13 +477,7 @@ def process_single_ligand(
     output_ligand_dir = run_workdir.parent / "outputs" / ligand_name
     output_ligand_dir.mkdir(parents=True, exist_ok=True)
 
-    save_best_pred_to_sdf(
-        conf,
-        "any_conf",
-        conf.inference_results_folder,
-        output_ligand_dir,
-        physical_only=physical_only,
-    )
+    save_best_pred_to_sdf(conf, "any_conf")
 
     # Get pose info
     import numpy as np
