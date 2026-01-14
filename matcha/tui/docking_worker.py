@@ -419,39 +419,42 @@ def process_single_ligand(
                 pocket_centers[f'{uid}_mol0_conf{i}'] = [{'tr_pred_init': center, 'full_protein_center': protein_center}]
             np.save(pocket_centers_filename, [pocket_centers])
 
-    # Run inference pipeline (all stages at once)
-    emit(ProgressEvent(
-        type="stage_start",
-        stage="stage1",
-        name="Running inference pipeline",
-        current_ligand=ligand.name,
-        ligand_index=ligand_index,
-        total_ligands=total_ligands,
-    ))
-    start_time = time.time()
+    # Run inference pipeline with progress callback
+    # Create a callback that emits progress for all stages (1, 2, 3, scoring)
+    def inference_progress_callback(event_type, stage, name, elapsed=None):
+        """Callback to emit progress events from inference pipeline."""
+        if event_type == 'stage_start':
+            emit(ProgressEvent(
+                type="stage_start",
+                stage=stage,
+                name=name,
+                current_ligand=ligand.name,
+                ligand_index=ligand_index,
+                total_ligands=total_ligands,
+            ))
+        elif event_type == 'stage_done':
+            emit(ProgressEvent(
+                type="stage_done",
+                stage=stage,
+                elapsed=elapsed,
+                current_ligand=ligand.name,
+                ligand_index=ligand_index,
+                total_ligands=total_ligands,
+            ))
 
     if job.is_cancelled():
         emit(ProgressEvent(type="cancelled", message="Job cancelled"))
         return None
 
+    # Run inference pipeline - stages 1, 2, 3, and scoring will emit their own progress
     run_inference_pipeline(
         copy.deepcopy(conf),
         "any_conf",
         n_samples,
         pocket_centers_filename,
         num_workers=0,  # Use 0 workers to avoid multiprocessing deadlocks in TUI
+        progress_callback=inference_progress_callback,  # Pass callback for all stages
     )
-
-    # Inference pipeline is done - mark stage1 complete
-    # (stages 2-3 happen inside run_inference_pipeline without separate progress)
-    emit(ProgressEvent(
-        type="stage_done",
-        stage="stage1",
-        elapsed=time.time() - start_time,
-        current_ligand=ligand.name,
-        ligand_index=ligand_index,
-        total_ligands=total_ligands,
-    ))
 
     if job.is_cancelled():
         emit(ProgressEvent(type="cancelled", message="Job cancelled"))

@@ -1,4 +1,5 @@
 import os
+import time
 from tqdm import tqdm
 import numpy as np
 import pandas as pd
@@ -237,7 +238,7 @@ def compute_fast_filters(conf, inference_run_name, n_preds_to_use):
 
 
 def run_inference_pipeline(conf, run_name, n_preds_to_use, pocket_centers_filename=None,
-                           docking_batch_limit=15000, scoring_batch_size=4, num_workers=8):
+                           docking_batch_limit=15000, scoring_batch_size=4, num_workers=8, progress_callback=None):
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.multiprocessing.set_sharing_strategy('file_system')
     torch.manual_seed(conf.seed)
@@ -342,6 +343,12 @@ def run_inference_pipeline(conf, run_name, n_preds_to_use, pocket_centers_filena
 
             print(f'Stage {stage_idx + 1}; predicted_ligand_transforms_path:',
                   predicted_ligand_transforms_path)
+
+            # Emit stage_start for all stages
+            stage_names = ['Translation (R³)', 'Rotation (SO(3))', 'Torsion (SO(2))']
+            if progress_callback is not None:
+                progress_callback('stage_start', f'stage{stage_idx + 1}', stage_names[stage_idx])
+
             if predicted_ligand_transforms_path is not None:
                 use_predicted_tr_only = docking_modules[stage_idx]['dataset_kwargs'].get('use_predicted_tr_only', True)
                 test_dataset_docking.dataset.use_predicted_tr_only = use_predicted_tr_only
@@ -350,14 +357,20 @@ def run_inference_pipeline(conf, run_name, n_preds_to_use, pocket_centers_filena
 
             # Dataloaders
             test_loader = get_dataloader_docking(test_dataset_docking)
+            stage_start_time = time.time()
             metrics = run_evaluation(
                 test_loader, num_steps=num_steps, solver=euler, model=model)
+            stage_elapsed = time.time() - stage_start_time
 
             # Save results
             predicted_ligand_transforms_path = os.path.join(
                 conf.inference_results_folder, run_name, f'stage{stage_idx+1}_{dataset_name}.npy')
             np.save(predicted_ligand_transforms_path, [metrics])
             print(f'Saved metrics to {predicted_ligand_transforms_path}')
+
+            # Emit stage_done for all stages
+            if progress_callback is not None:
+                progress_callback('stage_done', f'stage{stage_idx + 1}', None, stage_elapsed)
 
         # load dataset with predicted ligand transforms
         conf.use_sorted_batching = False
@@ -372,11 +385,21 @@ def run_inference_pipeline(conf, run_name, n_preds_to_use, pocket_centers_filena
         print('Scoring', dataset_name, len(test_dataset_scoring))
         test_loader = get_dataloader_scoring(test_dataset_scoring)
 
+        # Emit scoring stage start
+        if progress_callback is not None:
+            progress_callback('stage_start', 'scoring', 'Scoring poses')
+
+        scoring_start_time = time.time()
         pred_scores = scoring_inference(
             loader=test_loader, model=scoring_model)
         metrics = add_score_results(
             metrics, pred_scores, score_name='error_estimate', n_samples=None)
+        scoring_elapsed = time.time() - scoring_start_time
         np.save(predicted_ligand_transforms_path, [metrics])
+
+        # Emit scoring stage done
+        if progress_callback is not None:
+            progress_callback('stage_done', 'scoring', None, scoring_elapsed)
 
         updated_metrics = construct_output_dict(metrics, test_dataset_scoring)
         final_preds_path = os.path.join(
