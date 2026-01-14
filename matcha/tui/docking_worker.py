@@ -165,6 +165,7 @@ def run_docking(job: "DockingJob") -> None:
                     receptor=receptor,
                     ligand=ligand,
                     run_workdir=run_workdir,
+                    run_name=run_name,
                     checkpoint_path=checkpoint_path,
                     n_samples=n_samples,
                     n_confs=n_confs,
@@ -259,6 +260,7 @@ def process_single_ligand(
     receptor: Path,
     ligand: Path,
     run_workdir: Path,
+    run_name: str,
     checkpoint_path: Path,
     n_samples: int,
     n_confs: Optional[int],
@@ -490,11 +492,16 @@ def process_single_ligand(
 
     # Copy final SDF to top-level output directory (like CLI does)
     run_output_dir = run_workdir.parent  # This is output_path / run_name
-    sdf_preds_dir = Path(conf.inference_results_folder) / "any_conf" / "sdf_predictions"
+    sdf_preds_dir = Path(conf.inference_results_folder) / "any_conf" / "any_conf" / "sdf_predictions"
     pred_sdf_files = list(sdf_preds_dir.glob("*.sdf"))
     if pred_sdf_files:
-        best_dest = run_output_dir / f"{ligand_name}_best.sdf"
-        all_dest = run_output_dir / f"{ligand_name}_poses.sdf"
+        # For batch mode, prefix with ligand name; for single mode, use run_name
+        if total_ligands > 1:
+            best_dest = run_output_dir / f"{ligand_name}_best.sdf"
+            all_dest = run_output_dir / f"{ligand_name}_poses.sdf"
+        else:
+            best_dest = run_output_dir / f"{run_name}_best.sdf"
+            all_dest = run_output_dir / f"{run_name}_poses.sdf"
         shutil.copyfile(pred_sdf_files[0], best_dest)
         shutil.copyfile(pred_sdf_files[0], all_dest)
 
@@ -505,8 +512,10 @@ def process_single_ligand(
     poses = []
     if metrics_file:
         data = np.load(metrics_file[0], allow_pickle=True).item()
-        for uid_key, samples in data.items():
-            for i, sample in enumerate(samples[:10]):
+        for uid_key, uid_data in data.items():
+            # uid_data is a dict with 'sample_metrics' and 'orig_mol' keys
+            sample_metrics = uid_data.get('sample_metrics', [])
+            for i, sample in enumerate(sample_metrics[:10]):
                 pb_filters = sample.get("posebusters_filters_fast", [False] * 5)
                 poses.append({
                     "rank": i + 1,
