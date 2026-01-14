@@ -52,7 +52,7 @@ def euler(model, batch, device, num_steps=20):
     return cur_batch, tr_agg, R_agg, tor_agg
 
 
-def run_evaluation(dataloader, num_steps, solver, model):
+def run_evaluation(dataloader, num_steps, solver, model, progress_callback=None, current_stage=None):
     def revert_augm(batch):
         batch.ligand.pos[:] = torch.einsum(
             'bij,bjk->bik', batch.ligand.pos, batch.original_augm_rot)
@@ -62,7 +62,8 @@ def run_evaluation(dataloader, num_steps, solver, model):
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     metrics_dict = {}
-    for batch in tqdm(dataloader, desc="Docking inference"):
+    total_batches = len(dataloader)
+    for batch_idx, batch in enumerate(tqdm(dataloader, desc="Docking inference")):
         batch = batch['batch']
         optimized, tr_agg, R_agg, tor_agg = solver(
             model, batch, device=device, num_steps=num_steps)
@@ -119,6 +120,12 @@ def run_evaluation(dataloader, num_steps, solver, model):
             complex_metrics['full_protein_center'] = optimized.protein.full_protein_center[i].cpu(
             ).numpy()
             metrics_dict[name] = metrics_dict.get(name, []) + [complex_metrics]
+
+        # Update progress for TUI
+        if progress_callback is not None and current_stage is not None:
+            progress_percent = int((batch_idx + 1) / total_batches * 100)
+            progress_callback('stage_progress', current_stage, None, None, progress_percent)
+
     return metrics_dict
 
 

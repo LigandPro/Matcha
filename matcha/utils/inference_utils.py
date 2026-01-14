@@ -347,7 +347,7 @@ def run_inference_pipeline(conf, run_name, n_preds_to_use, pocket_centers_filena
             # Emit stage_start for all stages
             stage_names = ['Translation (R³)', 'Rotation (SO(3))', 'Torsion (SO(2))']
             if progress_callback is not None:
-                progress_callback('stage_start', f'stage{stage_idx + 1}', stage_names[stage_idx])
+                progress_callback('stage_start', f'stage{stage_idx + 1}', stage_names[stage_idx], None, None)
 
             if predicted_ligand_transforms_path is not None:
                 use_predicted_tr_only = docking_modules[stage_idx]['dataset_kwargs'].get('use_predicted_tr_only', True)
@@ -359,7 +359,8 @@ def run_inference_pipeline(conf, run_name, n_preds_to_use, pocket_centers_filena
             test_loader = get_dataloader_docking(test_dataset_docking)
             stage_start_time = time.time()
             metrics = run_evaluation(
-                test_loader, num_steps=num_steps, solver=euler, model=model)
+                test_loader, num_steps=num_steps, solver=euler, model=model,
+                progress_callback=progress_callback, current_stage=f'stage{stage_idx + 1}')
             stage_elapsed = time.time() - stage_start_time
 
             # Save results
@@ -370,7 +371,7 @@ def run_inference_pipeline(conf, run_name, n_preds_to_use, pocket_centers_filena
 
             # Emit stage_done for all stages
             if progress_callback is not None:
-                progress_callback('stage_done', f'stage{stage_idx + 1}', None, stage_elapsed)
+                progress_callback('stage_done', f'stage{stage_idx + 1}', None, stage_elapsed, None)
 
         # load dataset with predicted ligand transforms
         conf.use_sorted_batching = False
@@ -387,7 +388,7 @@ def run_inference_pipeline(conf, run_name, n_preds_to_use, pocket_centers_filena
 
         # Emit scoring stage start
         if progress_callback is not None:
-            progress_callback('stage_start', 'scoring', 'Scoring poses')
+            progress_callback('stage_start', 'scoring', 'Scoring poses', None, None)
 
         scoring_start_time = time.time()
         pred_scores = scoring_inference(
@@ -399,7 +400,7 @@ def run_inference_pipeline(conf, run_name, n_preds_to_use, pocket_centers_filena
 
         # Emit scoring stage done
         if progress_callback is not None:
-            progress_callback('stage_done', 'scoring', None, scoring_elapsed)
+            progress_callback('stage_done', 'scoring', None, scoring_elapsed, None)
 
         updated_metrics = construct_output_dict(metrics, test_dataset_scoring)
         final_preds_path = os.path.join(

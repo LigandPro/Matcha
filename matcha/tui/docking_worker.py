@@ -423,13 +423,22 @@ def process_single_ligand(
 
     # Run inference pipeline with progress callback
     # Create a callback that emits progress for all stages (1, 2, 3, scoring)
-    def inference_progress_callback(event_type, stage, name, elapsed=None):
+    def inference_progress_callback(event_type, stage, name, elapsed=None, progress=None):
         """Callback to emit progress events from inference pipeline."""
         if event_type == 'stage_start':
             emit(ProgressEvent(
                 type="stage_start",
                 stage=stage,
                 name=name,
+                current_ligand=ligand.name,
+                ligand_index=ligand_index,
+                total_ligands=total_ligands,
+            ))
+        elif event_type == 'stage_progress':
+            emit(ProgressEvent(
+                type="stage_progress",
+                stage=stage,
+                progress=progress,
                 current_ligand=ligand.name,
                 ligand_index=ligand_index,
                 total_ligands=total_ligands,
