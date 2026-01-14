@@ -52,8 +52,28 @@ class ValidationResult:
 
 
 @dataclass
+class LigandStatus:
+    """Status for a single ligand in batch processing."""
+    name: str
+    path: str
+    status: str  # pending, running, completed, failed
+    error_estimate: Optional[float] = None
+    pb_count: Optional[int] = None
+    error_message: Optional[str] = None
+
+    def to_dict(self) -> dict:
+        return {k: v for k, v in asdict(self).items() if v is not None}
+
+
+@dataclass
 class ProgressEvent:
-    type: str  # stage_start, stage_progress, stage_done, poses_update, job_done, error
+    # Event types:
+    # - stage_start, stage_progress, stage_done: pipeline stage events
+    # - poses_update: new poses available
+    # - job_done, error, cancelled: job termination
+    # - batch_start, batch_progress: batch processing events
+    # - ligand_start, ligand_done, ligand_error: per-ligand events
+    type: str
     stage: Optional[str] = None
     name: Optional[str] = None
     progress: Optional[int] = None
@@ -66,6 +86,7 @@ class ProgressEvent:
     current_ligand: Optional[str] = None
     ligand_index: Optional[int] = None
     total_ligands: Optional[int] = None
+    ligand_statuses: Optional[list] = None  # List of LigandStatus dicts
 
     def to_dict(self) -> dict:
         return {k: v for k, v in asdict(self).items() if v is not None}

@@ -32,6 +32,7 @@ export interface ProgressEvent {
   current_ligand?: string;
   ligand_index?: number;
   total_ligands?: number;
+  ligand_statuses?: unknown[];
 }
 
 export interface FileInfo {

@@ -32,6 +32,7 @@ export const colors = {
 export const icons = {
   check: chalk.green('✓'),
   cross: chalk.red('✗'),
+  error: chalk.red('✗'),
   pending: chalk.gray('○'),
   running: chalk.yellow('●'),
   arrow: chalk.cyan('→'),

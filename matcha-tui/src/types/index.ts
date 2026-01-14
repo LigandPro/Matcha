@@ -112,6 +112,16 @@ export interface PoseResult {
   buriedFraction: number;
 }
 
+// Batch ligand status (from backend)
+export interface BatchLigandStatus {
+  name: string;
+  path: string;
+  status: 'pending' | 'running' | 'completed' | 'failed';
+  error_estimate?: number;
+  pb_count?: number;
+  error_message?: string;
+}
+
 // Job results
 export interface JobResults {
   runName: string;
@@ -122,6 +132,9 @@ export interface JobResults {
   bestPosePath: string;
   allPosesPath: string;
   logPath: string;
+  // Batch mode fields
+  totalLigands?: number;
+  ligandStatuses?: BatchLigandStatus[];
 }
 
 // Stored job for history

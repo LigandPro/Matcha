@@ -1,21 +1,34 @@
 #!/usr/bin/env node
+
 /**
- * Matcha TUI - Terminal User Interface entry point.
- *
- * This script launches the TUI application.
+ * Matcha TUI launcher
+ * 
+ * This script launches the Matcha Terminal User Interface.
+ * It initializes the Python backend and starts the Ink frontend.
  */
 
-import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
+import { render } from '../dist/index.js';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-
-// Import and run the main entry point
-import(join(__dirname, '..', 'dist', 'index.js')).catch((err) => {
-  console.error('Failed to start Matcha TUI:', err.message);
-  console.error('');
-  console.error('Make sure to build the project first:');
-  console.error('  cd matcha-tui && npm run build');
+// Handle uncaught errors gracefully
+process.on('uncaughtException', (error) => {
+  console.error('\n❌ Fatal error:', error.message);
   process.exit(1);
 });
+
+process.on('unhandledRejection', (error) => {
+  console.error('\n❌ Unhandled rejection:', error);
+  process.exit(1);
+});
+
+// Start the TUI
+try {
+  render();
+} catch (error) {
+  console.error('\n❌ Failed to start TUI:', error.message);
+  console.error('\nTroubleshooting:');
+  console.error('  1. Ensure dependencies are installed: npm install');
+  console.error('  2. Build the project: npm run build');
+  console.error('  3. Verify Python backend: uv run python -c "from matcha.tui import main"');
+  console.error('  4. Run integration test: node test-backend.mjs');
+  process.exit(1);
+}

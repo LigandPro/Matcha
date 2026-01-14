@@ -1,5 +1,5 @@
 /**
- * Running Screen - shows docking progress.
+ * Running Screen - shows docking progress with batch monitoring support.
  */
 
 import React, { useEffect, useState } from 'react';
@@ -18,6 +18,15 @@ interface StageStatus {
   message?: string;
 }
 
+interface LigandStatus {
+  name: string;
+  path: string;
+  status: 'pending' | 'running' | 'completed' | 'failed';
+  error_estimate?: number;
+  pb_count?: number;
+  error_message?: string;
+}
+
 export function RunningScreen(): React.ReactElement {
   const setScreen = useStore((s) => s.setScreen);
   const setRunning = useStore((s) => s.setRunning);
@@ -29,6 +38,14 @@ export function RunningScreen(): React.ReactElement {
   const [poses, setPoses] = useState<PoseResult[]>([]);
   const [startTime] = useState(Date.now());
   const [elapsedTime, setElapsedTime] = useState(0);
+
+  // Batch mode state
+  const [isBatch, setIsBatch] = useState(false);
+  const [totalLigands, setTotalLigands] = useState(1);
+  const [currentLigandIndex, setCurrentLigandIndex] = useState(0);
+  const [currentLigand, setCurrentLigand] = useState<string | null>(null);
+  const [ligandStatuses, setLigandStatuses] = useState<LigandStatus[]>([]);
+  const [batchProgress, setBatchProgress] = useState(0);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -43,7 +60,37 @@ export function RunningScreen(): React.ReactElement {
     const handleProgress = (event: ProgressEvent) => {
       addLog(JSON.stringify(event));
 
-      if (event.type === 'stage_start' && event.stage) {
+      // Batch events
+      if (event.type === 'batch_start') {
+        setIsBatch(true);
+        setTotalLigands(event.total_ligands ?? 1);
+        if (event.ligand_statuses) {
+          setLigandStatuses(event.ligand_statuses as LigandStatus[]);
+        }
+      } else if (event.type === 'batch_progress') {
+        setBatchProgress(event.progress ?? 0);
+        setCurrentLigandIndex(event.ligand_index ?? 0);
+        if (event.ligand_statuses) {
+          setLigandStatuses(event.ligand_statuses as LigandStatus[]);
+        }
+      } else if (event.type === 'ligand_start') {
+        setCurrentLigand(event.current_ligand ?? null);
+        setCurrentLigandIndex(event.ligand_index ?? 0);
+        setTotalLigands(event.total_ligands ?? 1);
+        // Reset stages for new ligand
+        setStages({});
+        if (event.ligand_statuses) {
+          setLigandStatuses(event.ligand_statuses as LigandStatus[]);
+        }
+      } else if (event.type === 'ligand_done') {
+        if (event.ligand_statuses) {
+          setLigandStatuses(event.ligand_statuses as LigandStatus[]);
+        }
+      } else if (event.type === 'stage_start' && event.stage) {
+        // Update current ligand if provided
+        if (event.current_ligand) {
+          setCurrentLigand(event.current_ligand);
+        }
         setStages((prev) => ({
           ...prev,
           [event.stage!]: { status: 'running', progress: 0, message: event.name },
@@ -71,6 +118,8 @@ export function RunningScreen(): React.ReactElement {
           bestPosePath: event.output_path ?? '',
           allPosesPath: '',
           logPath: '',
+          totalLigands: event.total_ligands,
+          ligandStatuses: event.ligand_statuses as LigandStatus[] | undefined,
         });
         setScreen('results');
       } else if (event.type === 'error') {
@@ -94,11 +143,38 @@ export function RunningScreen(): React.ReactElement {
 
   return (
     <Box flexDirection="column" gap={1}>
+      {/* Header with elapsed time */}
       <Box>
         <Text color="cyan">Elapsed: </Text>
         <Text color="white">{formatDuration(elapsedTime)}</Text>
+        {isBatch && (
+          <>
+            <Text color="gray"> │ </Text>
+            <Text color="cyan">Ligand: </Text>
+            <Text color="white">{currentLigandIndex + 1}/{totalLigands}</Text>
+          </>
+        )}
       </Box>
 
+      {/* Batch progress (if batch mode) */}
+      {isBatch && (
+        <Box flexDirection="column" marginTop={1}>
+          <Text bold color="white">Batch Progress</Text>
+          <Box marginTop={1}>
+            <ProgressBar percent={batchProgress} width={40} showPercent />
+          </Box>
+        </Box>
+      )}
+
+      {/* Current ligand info (if batch mode) */}
+      {isBatch && currentLigand && (
+        <Box marginTop={1}>
+          <Text color="cyan">Current: </Text>
+          <Text color="yellow">{currentLigand}</Text>
+        </Box>
+      )}
+
+      {/* Pipeline stages */}
       <Box flexDirection="column" marginTop={1}>
         <Text bold color="white">Pipeline Progress</Text>
         <Box flexDirection="column" marginTop={1}>
@@ -108,9 +184,10 @@ export function RunningScreen(): React.ReactElement {
         </Box>
       </Box>
 
+      {/* Current poses for this ligand */}
       {poses.length > 0 && (
         <Box flexDirection="column" marginTop={1}>
-          <Text bold color="white">Top Poses</Text>
+          <Text bold color="white">Top Poses {currentLigand ? `(${currentLigand})` : ''}</Text>
           <Box flexDirection="column" marginTop={1}>
             {poses.slice(0, 5).map((pose) => (
               <Box key={pose.rank}>
@@ -119,6 +196,21 @@ export function RunningScreen(): React.ReactElement {
                 <Text color={pose.pbCount === 4 ? 'green' : 'yellow'}>{pose.pbCount}/4</Text>
               </Box>
             ))}
+          </Box>
+        </Box>
+      )}
+
+      {/* Ligand status list (if batch mode, scrollable) */}
+      {isBatch && ligandStatuses.length > 0 && (
+        <Box flexDirection="column" marginTop={1}>
+          <Text bold color="white">Ligand Status</Text>
+          <Box flexDirection="column" marginTop={1} height={Math.min(8, ligandStatuses.length)}>
+            {ligandStatuses.slice(0, 8).map((lig, idx) => (
+              <LigandRow key={idx} ligand={lig} isCurrent={idx === currentLigandIndex} />
+            ))}
+            {ligandStatuses.length > 8 && (
+              <Text color="gray">... and {ligandStatuses.length - 8} more</Text>
+            )}
           </Box>
         </Box>
       )}
@@ -145,6 +237,42 @@ function StageRow({ stage, status }: { stage: { id: PipelineStage; name: string 
       )}
       {status?.status === 'done' && status.elapsed !== undefined && (
         <Text color="gray"> {formatDuration(Math.round(status.elapsed))}</Text>
+      )}
+    </Box>
+  );
+}
+
+function LigandRow({ ligand, isCurrent }: { ligand: LigandStatus; isCurrent: boolean }): React.ReactElement {
+  const statusIcon = {
+    pending: icons.pending,
+    running: icons.running,
+    completed: icons.check,
+    failed: icons.error,
+  }[ligand.status];
+
+  const statusColor = {
+    pending: 'gray',
+    running: 'yellow',
+    completed: 'green',
+    failed: 'red',
+  }[ligand.status] as 'gray' | 'yellow' | 'green' | 'red';
+
+  return (
+    <Box>
+      <Text color={statusColor}>{statusIcon} </Text>
+      <Text color={isCurrent ? 'cyan' : 'white'} bold={isCurrent}>
+        {ligand.name.substring(0, 25).padEnd(25)}
+      </Text>
+      {ligand.status === 'completed' && ligand.error_estimate !== undefined && (
+        <>
+          <Text color="gray"> err: </Text>
+          <Text color="cyan">{ligand.error_estimate.toFixed(3)}</Text>
+          <Text color="gray"> pb: </Text>
+          <Text color={ligand.pb_count === 4 ? 'green' : 'yellow'}>{ligand.pb_count}/4</Text>
+        </>
+      )}
+      {ligand.status === 'failed' && ligand.error_message && (
+        <Text color="red"> {ligand.error_message.substring(0, 30)}</Text>
       )}
     </Box>
   );

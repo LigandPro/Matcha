@@ -132,10 +132,26 @@ matcha-tui/
 ### Build Commands
 
 ```bash
-npm run build   # Compile TypeScript
-npm run dev     # Watch mode
-npm start       # Run TUI
+npm run build      # Compile TypeScript
+npm run typecheck  # Type checking only
+npm run dev        # Watch mode (auto-recompile)
+npm start          # Run TUI
 ```
+
+### Testing
+
+Test the integration between Node.js frontend and Python backend:
+
+```bash
+node test-backend.mjs
+```
+
+This verifies:
+- Backend process startup
+- JSON-RPC communication
+- GPU detection
+- Checkpoint availability
+- File system operations
 
 ### Python Backend
 
@@ -180,6 +196,7 @@ Streamed during docking:
 - Ensure UV is installed: `pip install uv`
 - Check Python version: `python --version` (should be 3.12+)
 - Verify matcha installation: `uv run python -c "import matcha"`
+- Run integration test: `node test-backend.mjs`
 
 ### "CUDA out of memory"
 
