@@ -304,8 +304,8 @@ export function RunningScreen(): React.ReactElement {
             {poses.slice(0, 5).map((pose) => (
               <Box key={pose.rank}>
                 <Text color="white">{String(pose.rank).padEnd(6)}</Text>
-                <Text color="magenta">{pose.errorEstimate.toFixed(3).padEnd(12)}</Text>
-                <Text color={pose.pbCount === 4 ? 'green' : 'yellow'}>{pose.pbCount}/4</Text>
+                <Text color="magenta">{(pose.errorEstimate ?? 0).toFixed(3).padEnd(12)}</Text>
+                <Text color={pose.pbCount === 4 ? 'green' : 'yellow'}>{pose.pbCount ?? 0}/4</Text>
               </Box>
             ))}
           </Box>
