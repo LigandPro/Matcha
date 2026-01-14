@@ -4,12 +4,14 @@
 
 import React, { useEffect, useState, useRef } from 'react';
 import { Box, Text, useInput } from 'ink';
+import path from 'path';
 import { useStore } from '../store/index.js';
 import { getBridge, initBridge, closeBridge, type ProgressEvent } from '../services/index.js';
 import { ProgressBar } from '../components/ProgressBar.js';
 import { icons } from '../utils/colors.js';
 import { PIPELINE_STAGES, type PipelineStage, type PoseResult } from '../types/index.js';
 import { formatDuration } from '../utils/format.js';
+import { logger } from '../utils/logger.js';
 
 interface StageStatus {
   status: 'pending' | 'running' | 'done' | 'error';
@@ -34,6 +36,8 @@ export function RunningScreen(): React.ReactElement {
   const setError = useStore((s) => s.setError);
   const addLog = useStore((s) => s.addLog);
   const jobConfig = useStore((s) => s.jobConfig);
+  const debugMode = useStore((s) => s.debugMode);
+  const addDebugLog = useStore((s) => s.addDebugLog);
 
   const [stages, setStages] = useState<Record<string, StageStatus>>({});
   const [poses, setPoses] = useState<PoseResult[]>([]);
@@ -89,8 +93,9 @@ export function RunningScreen(): React.ReactElement {
       try {
         // Initialize Python backend
         addLog('Initializing Python backend...');
-        // Use current working directory as project root (like CLI does)
-        const projectRoot = process.env.MATCHA_ROOT || process.cwd();
+        // TUI is in matcha-tui/ subdirectory, but Python package is in parent directory
+        // Use parent directory as project root so 'uv run python -m matcha.tui.backend' can find the package
+        const projectRoot = process.env.MATCHA_ROOT || path.join(process.cwd(), '..');
         addLog(`Project root: ${projectRoot}`);
 
         // Capture all stderr before bridge starts
@@ -107,12 +112,107 @@ export function RunningScreen(): React.ReactElement {
           addLog(`[stderr] ${data}`);
         });
 
+        // Listen for debug events from backend
+        bridge.on('debug', (event: any) => {
+          if (debugMode) {
+            // Add to store for UI display
+            addDebugLog({
+              level: event.level,
+              component: event.component,
+              message: event.message,
+              data: event.data,
+            });
+
+            // Write to file via logger
+            const logMethod = event.level as 'debug' | 'info' | 'warn' | 'error';
+            logger[logMethod](event.component, event.message, event.data);
+
+            // Also add to running logs display
+            addLog(`[${event.level}] [${event.component}] ${event.message}`);
+          }
+        });
+
         bridge.on('error', (err: Error) => {
           addLog(`[bridge error] ${err.message}`);
         });
 
         bridge.on('exit', (code: number) => {
           addLog(`[backend exit] code ${code}`);
+        });
+
+        // IMPORTANT: Subscribe to progress BEFORE starting docking!
+        bridge.on('progress', (event: ProgressEvent) => {
+          addLog(JSON.stringify(event));
+
+          // Batch events
+          if (event.type === 'batch_start') {
+            setIsBatch(true);
+            setTotalLigands(event.total_ligands ?? 1);
+            if (event.ligand_statuses) {
+              setLigandStatuses(event.ligand_statuses as LigandStatus[]);
+            }
+          } else if (event.type === 'batch_progress') {
+            setBatchProgress(event.progress ?? 0);
+            setCurrentLigandIndex(event.ligand_index ?? 0);
+            if (event.ligand_statuses) {
+              setLigandStatuses(event.ligand_statuses as LigandStatus[]);
+            }
+          } else if (event.type === 'ligand_start') {
+            setCurrentLigand(event.current_ligand ?? null);
+            setCurrentLigandIndex(event.ligand_index ?? 0);
+            setTotalLigands(event.total_ligands ?? 1);
+            // Reset stages for new ligand
+            setStages({});
+            if (event.ligand_statuses) {
+              setLigandStatuses(event.ligand_statuses as LigandStatus[]);
+            }
+          } else if (event.type === 'ligand_done') {
+            if (event.ligand_statuses) {
+              setLigandStatuses(event.ligand_statuses as LigandStatus[]);
+            }
+          } else if (event.type === 'stage_start' && event.stage) {
+            // Update current ligand if provided
+            if (event.current_ligand) {
+              setCurrentLigand(event.current_ligand);
+            }
+            setStages((prev) => ({
+              ...prev,
+              [event.stage!]: { status: 'running', progress: 0, message: event.name },
+            }));
+          } else if (event.type === 'stage_progress' && event.stage) {
+            setStages((prev) => ({
+              ...prev,
+              [event.stage!]: { ...prev[event.stage!], progress: event.progress ?? 0, message: event.message },
+            }));
+          } else if (event.type === 'stage_done' && event.stage) {
+            setStages((prev) => ({
+              ...prev,
+              [event.stage!]: { status: 'done', progress: 100, elapsed: event.elapsed },
+            }));
+          } else if (event.type === 'poses_update' && event.poses) {
+            setPoses(event.poses as PoseResult[]);
+          } else if (event.type === 'job_done') {
+            setRunning(false);
+            setResults({
+              runName: 'completed',
+              runtime: (Date.now() - startTime) / 1000,
+              totalPoses: poses.length,
+              physicalPoses: poses.filter((p) => p.pbCount === 4).length,
+              poses,
+              bestPosePath: event.output_path ?? '',
+              allPosesPath: '',
+              logPath: '',
+              totalLigands: event.total_ligands,
+              ligandStatuses: event.ligand_statuses as LigandStatus[] | undefined,
+            });
+            setScreen('results');
+          } else if (event.type === 'error') {
+            setError(event.message ?? 'Unknown error');
+            setRunning(false);
+          } else if (event.type === 'cancelled') {
+            setRunning(false);
+            setScreen('welcome');
+          }
         });
 
         addLog('Backend initialized, starting docking...');
@@ -138,88 +238,7 @@ export function RunningScreen(): React.ReactElement {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useEffect(() => {
-    if (!bridgeReady) return;
-
-    const bridge = getBridge();
-
-    const handleProgress = (event: ProgressEvent) => {
-      addLog(JSON.stringify(event));
-
-      // Batch events
-      if (event.type === 'batch_start') {
-        setIsBatch(true);
-        setTotalLigands(event.total_ligands ?? 1);
-        if (event.ligand_statuses) {
-          setLigandStatuses(event.ligand_statuses as LigandStatus[]);
-        }
-      } else if (event.type === 'batch_progress') {
-        setBatchProgress(event.progress ?? 0);
-        setCurrentLigandIndex(event.ligand_index ?? 0);
-        if (event.ligand_statuses) {
-          setLigandStatuses(event.ligand_statuses as LigandStatus[]);
-        }
-      } else if (event.type === 'ligand_start') {
-        setCurrentLigand(event.current_ligand ?? null);
-        setCurrentLigandIndex(event.ligand_index ?? 0);
-        setTotalLigands(event.total_ligands ?? 1);
-        // Reset stages for new ligand
-        setStages({});
-        if (event.ligand_statuses) {
-          setLigandStatuses(event.ligand_statuses as LigandStatus[]);
-        }
-      } else if (event.type === 'ligand_done') {
-        if (event.ligand_statuses) {
-          setLigandStatuses(event.ligand_statuses as LigandStatus[]);
-        }
-      } else if (event.type === 'stage_start' && event.stage) {
-        // Update current ligand if provided
-        if (event.current_ligand) {
-          setCurrentLigand(event.current_ligand);
-        }
-        setStages((prev) => ({
-          ...prev,
-          [event.stage!]: { status: 'running', progress: 0, message: event.name },
-        }));
-      } else if (event.type === 'stage_progress' && event.stage) {
-        setStages((prev) => ({
-          ...prev,
-          [event.stage!]: { ...prev[event.stage!], progress: event.progress ?? 0, message: event.message },
-        }));
-      } else if (event.type === 'stage_done' && event.stage) {
-        setStages((prev) => ({
-          ...prev,
-          [event.stage!]: { status: 'done', progress: 100, elapsed: event.elapsed },
-        }));
-      } else if (event.type === 'poses_update' && event.poses) {
-        setPoses(event.poses as PoseResult[]);
-      } else if (event.type === 'job_done') {
-        setRunning(false);
-        setResults({
-          runName: 'completed',
-          runtime: (Date.now() - startTime) / 1000,
-          totalPoses: poses.length,
-          physicalPoses: poses.filter((p) => p.pbCount === 4).length,
-          poses,
-          bestPosePath: event.output_path ?? '',
-          allPosesPath: '',
-          logPath: '',
-          totalLigands: event.total_ligands,
-          ligandStatuses: event.ligand_statuses as LigandStatus[] | undefined,
-        });
-        setScreen('results');
-      } else if (event.type === 'error') {
-        setError(event.message ?? 'Unknown error');
-        setRunning(false);
-      } else if (event.type === 'cancelled') {
-        setRunning(false);
-        setScreen('welcome');
-      }
-    };
-
-    bridge.on('progress', handleProgress);
-    return () => { bridge.off('progress', handleProgress); };
-  }, [bridgeReady, addLog, setScreen, setRunning, setResults, setError, startTime, poses]);
+  // Progress events are now handled in the first useEffect (before startDocking)
 
   useInput((input) => {
     if (input === 'c' && bridgeReady) {

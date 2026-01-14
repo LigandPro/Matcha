@@ -96,6 +96,22 @@ class ProgressEvent:
 
 
 @dataclass
+class DebugEvent:
+    """Debug logging event for diagnostics."""
+    level: str  # 'debug', 'info', 'warn', 'error'
+    component: str  # 'backend', 'worker', 'rpc', etc.
+    message: str
+    timestamp: str
+    data: Optional[dict] = None
+
+    def to_dict(self) -> dict:
+        return {k: v for k, v in asdict(self).items() if v is not None}
+
+    def to_json(self) -> str:
+        return json.dumps(self.to_dict())
+
+
+@dataclass
 class PoseInfo:
     rank: int
     error_estimate: float

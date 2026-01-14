@@ -7,6 +7,7 @@ import { Box, Text, useApp, useInput } from 'ink';
 import { useStore } from './store/index.js';
 import { Header } from './components/Header.js';
 import { Footer } from './components/Footer.js';
+import { logger } from './utils/logger.js';
 
 // Screen imports
 import { Welcome } from './screens/Welcome.js';
@@ -41,6 +42,21 @@ export function App(): React.ReactElement {
   const isRunning = useStore((s) => s.isRunning);
   const error = useStore((s) => s.error);
   const setError = useStore((s) => s.setError);
+  const debugMode = useStore((s) => s.debugMode);
+  const trackNavigation = useStore((s) => s.trackNavigation);
+
+  // Navigation wrapper with tracking
+  const navigateTo = useCallback(
+    (newScreen: Screen) => {
+      const oldScreen = screen;
+      if (debugMode) {
+        logger.info('navigation', `${oldScreen} → ${newScreen}`);
+        trackNavigation(oldScreen, newScreen);
+      }
+      setScreen(newScreen);
+    },
+    [screen, debugMode, setScreen, trackNavigation]
+  );
 
   // Global keyboard shortcuts
   useInput((input, key) => {
@@ -76,9 +92,12 @@ export function App(): React.ReactElement {
 
     const prevScreen = backMap[screen];
     if (prevScreen && !isRunning) {
-      setScreen(prevScreen);
+      if (debugMode) {
+        logger.debug('navigation', `Back: ${screen} → ${prevScreen}`);
+      }
+      navigateTo(prevScreen);
     }
-  }, [screen, isRunning, setScreen]);
+  }, [screen, isRunning, debugMode, navigateTo]);
 
   // Clear error after 5 seconds
   useEffect(() => {

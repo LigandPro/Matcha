@@ -1,5 +1,6 @@
 import React from 'react';
 import { Box, Text } from 'ink';
+import { useStore } from '../store/index.js';
 import type { Screen } from '../types/index.js';
 
 interface Shortcut {
@@ -58,6 +59,7 @@ const SCREEN_SHORTCUTS: Record<Screen, Shortcut[]> = {
 
 export function Footer({ screen, isRunning }: FooterProps): React.ReactElement {
   const shortcuts = SCREEN_SHORTCUTS[screen] || [];
+  const debugMode = useStore((s) => s.debugMode);
 
   return (
     <Box flexDirection="column" marginTop={1}>
@@ -77,6 +79,11 @@ export function Footer({ screen, isRunning }: FooterProps): React.ReactElement {
         ))}
         {!shortcuts.length && (
           <Text color="gray">Press ? for help</Text>
+        )}
+        {debugMode && (
+          <Box marginLeft={2}>
+            <Text color="yellow" bold> [DEBUG MODE]</Text>
+          </Box>
         )}
       </Box>
     </Box>

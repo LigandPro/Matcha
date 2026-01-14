@@ -3,18 +3,19 @@ import { Box, Text, useInput } from 'ink';
 import TextInput from 'ink-text-input';
 import { useStore } from '../store/index.js';
 import { truncatePath } from '../utils/format.js';
+import { logger } from '../utils/logger.js';
 import * as fs from 'fs';
 import * as path from 'path';
 
 type Field = 'receptor' | 'ligand';
 
-// Default test files path
-const DEFAULT_TEST_DIR = './test';
+// Default test files path (relative to matcha-tui directory)
+const DEFAULT_TEST_DIR = '../test';
 const DEFAULT_RECEPTOR = `${DEFAULT_TEST_DIR}/1HVY_D16_protein_std.pdb`;
 const DEFAULT_LIGAND = `${DEFAULT_TEST_DIR}/1HVY_D16_ligand.sdf`;
 
 export function SetupFiles(): React.ReactElement {
-  const { setScreen, setJobConfig, jobConfig } = useStore();
+  const { setScreen, setJobConfig, jobConfig, debugMode } = useStore();
   const [activeField, setActiveField] = useState<Field>('receptor');
   const [receptor, setReceptor] = useState(jobConfig.receptor || DEFAULT_RECEPTOR);
   const [ligand, setLigand] = useState(
@@ -35,13 +36,23 @@ export function SetupFiles(): React.ReactElement {
     const receptorPath = expandPath(receptor.trim());
     const ligandPath = expandPath(ligand.trim());
 
+    if (debugMode) {
+      logger.debug('validation', 'Starting file validation', {
+        receptor: receptorPath,
+        ligand: ligandPath,
+        mode: isBatch ? 'batch' : 'single'
+      });
+    }
+
     if (!receptorPath) {
+      logger.warn('validation', 'Receptor file is required');
       setError('Receptor file is required');
       setActiveField('receptor');
       return;
     }
 
     if (!fs.existsSync(receptorPath)) {
+      logger.warn('validation', `Receptor file not found: ${receptorPath}`);
       setError(`Receptor file not found: ${receptorPath}`);
       setActiveField('receptor');
       return;
@@ -84,6 +95,10 @@ export function SetupFiles(): React.ReactElement {
         setActiveField('ligand');
         return;
       }
+    }
+
+    if (debugMode) {
+      logger.info('validation', 'Validation passed', { receptorPath, ligandPath });
     }
 
     setJobConfig({

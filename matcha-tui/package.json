@@ -10,7 +10,10 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "start": "node dist/index.js",
+    "start": "node bin/matcha-tui.js",
+    "start:debug": "node bin/matcha-tui.js --debug",
+    "logs": "tail -f ~/.matcha-tui/debug.log 2>/dev/null || echo 'No log file found. Run with --debug to enable logging.'",
+    "logs:clear": "rm -f ~/.matcha-tui/debug.log*",
     "lint": "eslint src --ext .ts,.tsx",
     "typecheck": "tsc --noEmit"
   },

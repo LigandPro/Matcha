@@ -14,9 +14,7 @@ async function main(): Promise<void> {
   process.env.MATCHA_ROOT = process.env.MATCHA_ROOT ?? process.cwd();
 
   try {
-    // Clear console and render app
-    console.clear();
-
+    // Render app without clearing console
     const { waitUntilExit } = render(<App />);
 
     // Wait for the app to exit

@@ -19,6 +19,7 @@ from matcha.tui.protocol import (
     RunInfo,
     PoseInfo,
     ProgressEvent,
+    DebugEvent,
     PipelineStage,
     make_response,
     make_error,
@@ -29,6 +30,30 @@ from matcha.tui.protocol import (
 # Global state
 _current_job: Optional["DockingJob"] = None
 _shutdown_event = threading.Event()
+
+
+def emit_debug(level: str, component: str, message: str, data: dict = None) -> None:
+    """Emit a debug event to the frontend.
+
+    Args:
+        level: 'debug', 'info', 'warn', or 'error'
+        component: Component name (e.g., 'backend', 'worker', 'rpc')
+        message: Debug message
+        data: Optional additional data
+    """
+    if not os.environ.get('MATCHA_DEBUG'):
+        return
+
+    event = DebugEvent(
+        level=level,
+        component=component,
+        message=message,
+        timestamp=datetime.now().isoformat(),
+        data=data
+    )
+
+    notification = make_notification("debug", event.to_dict())
+    print(json.dumps(notification), flush=True)
 
 
 class DockingJob:
@@ -132,10 +157,13 @@ class RPCHandler:
 
     def validate_receptor(self, path: str) -> dict:
         """Validate a receptor PDB file."""
+        emit_debug("debug", "backend", f"Validating receptor: {path}")
         p = Path(path).expanduser().resolve()
         if not p.exists():
+            emit_debug("warn", "backend", f"Receptor file not found: {path}")
             return ValidationResult(False, f"File not found: {path}").to_dict()
         if p.suffix.lower() != ".pdb":
+            emit_debug("warn", "backend", f"Invalid receptor extension: {p.suffix}")
             return ValidationResult(False, "Receptor must be a .pdb file").to_dict()
 
         try:
@@ -150,6 +178,7 @@ class RPCHandler:
                     if len(line) > 21:
                         chains.add(line[21])
 
+            emit_debug("info", "backend", f"Receptor validated: {atom_count} atoms, {len(chains)} chains")
             return ValidationResult(
                 True,
                 f"Valid PDB: {atom_count} atoms, {hetatm_count} hetatoms, {len(chains)} chains",
@@ -160,6 +189,7 @@ class RPCHandler:
                 },
             ).to_dict()
         except Exception as e:
+            emit_debug("error", "backend", f"Error reading receptor PDB: {e}")
             return ValidationResult(False, f"Error reading PDB: {e}").to_dict()
 
     def validate_ligand(self, path: str) -> dict:
@@ -241,7 +271,10 @@ class RPCHandler:
         """Start a docking job."""
         global _current_job
 
+        emit_debug("info", "backend", "Starting docking job", {"config": config})
+
         if _current_job is not None and _current_job.thread and _current_job.thread.is_alive():
+            emit_debug("warn", "backend", "Job already running", {"job_id": _current_job.job_id})
             return {"error": "A job is already running", "job_id": _current_job.job_id}
 
         job_id = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -255,10 +288,11 @@ class RPCHandler:
         from matcha.tui.docking_worker import run_docking
 
         _current_job.thread = threading.Thread(
-            target=run_docking, args=(_current_job,), daemon=True
+            target=run_docking, args=(_current_job,), daemon=False
         )
         _current_job.thread.start()
 
+        emit_debug("info", "backend", f"Docking job started: {job_id}")
         return {"job_id": job_id, "status": "started"}
 
     def get_progress(self) -> dict:
@@ -277,8 +311,10 @@ class RPCHandler:
         """Cancel the current job."""
         global _current_job
         if _current_job is None:
+            emit_debug("warn", "backend", "No job to cancel")
             return {"status": "no_job"}
 
+        emit_debug("info", "backend", f"Cancelling job: {_current_job.job_id}")
         _current_job.cancel()
         return {"status": "cancelled", "job_id": _current_job.job_id}
 

@@ -7,6 +7,16 @@
  * It initializes the Python backend and starts the Ink frontend.
  */
 
+// Parse command line arguments for debug mode
+const args = process.argv.slice(2);
+const DEBUG = args.includes('--debug') || process.env.DEBUG?.includes('matcha');
+
+if (DEBUG) {
+  process.env.MATCHA_DEBUG = '1';
+  console.error('[matcha-tui] Debug mode enabled');
+  console.error('[matcha-tui] Logs will be written to ~/.matcha-tui/debug.log');
+}
+
 // Handle uncaught errors gracefully
 process.on('uncaughtException', (error) => {
   console.error('\n❌ Fatal error:', error.message);

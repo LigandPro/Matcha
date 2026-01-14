@@ -115,6 +115,15 @@ export class PythonBridge extends EventEmitter {
 
     const cmd = this.options.useUv ? 'uv' : 'python';
 
+    const debugMode = process.env.MATCHA_DEBUG === '1';
+
+    if (debugMode) {
+      console.error('[python-bridge] Starting backend process');
+      console.error(`[python-bridge] Command: ${cmd} ${args.join(' ')}`);
+      console.error(`[python-bridge] CWD: ${this.options.projectRoot}`);
+      console.error(`[python-bridge] MATCHA_DEBUG: ${process.env.MATCHA_DEBUG}`);
+    }
+
     this.process = spawn(cmd, args, {
       cwd: this.options.projectRoot,
       env: {
@@ -157,7 +166,13 @@ export class PythonBridge extends EventEmitter {
     // Collect stderr for error messages
     let stderrOutput = '';
     this.process.stderr?.on('data', (data: Buffer) => {
-      stderrOutput += data.toString();
+      const text = data.toString();
+      stderrOutput += text;
+
+      // Output stderr in real-time during debug mode
+      if (debugMode) {
+        console.error('[python-bridge] Backend stderr:', text.trim());
+      }
     });
 
     // Wait for ready notification

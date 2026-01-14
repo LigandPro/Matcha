@@ -100,6 +100,12 @@ export class RPCClient extends EventEmitter {
     // Check if it's a notification (no id)
     if (!('id' in message)) {
       const notification = message as RPCNotification;
+
+      // Handle debug notifications specially
+      if (notification.method === 'debug') {
+        this.emit('debug', notification.params);
+      }
+
       this.emit('notification', notification);
       this.emit(`notification:${notification.method}`, notification.params);
       return;

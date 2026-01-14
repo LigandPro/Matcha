@@ -1,6 +1,16 @@
 import { create } from 'zustand';
 import type { Screen, JobConfig, ProgressInfo, JobResults, StoredJob } from '../types/index.js';
 
+export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+
+export interface DebugLog {
+  timestamp: string;
+  level: LogLevel;
+  component: string;
+  message: string;
+  data?: any;
+}
+
 interface AppState {
   // Navigation
   screen: Screen;
@@ -33,6 +43,14 @@ interface AppState {
   // UI state
   error: string | null;
   setError: (error: string | null) => void;
+
+  // Debug mode
+  debugMode: boolean;
+  navigationHistory: string[];
+  debugLogs: DebugLog[];
+  trackNavigation: (from: Screen, to: Screen) => void;
+  addDebugLog: (log: Omit<DebugLog, 'timestamp'>) => void;
+  clearDebugLogs: () => void;
 }
 
 const initialJobConfig: Partial<JobConfig> = {
@@ -92,4 +110,24 @@ export const useStore = create<AppState>((set) => ({
   // UI
   error: null,
   setError: (error) => set({ error }),
+
+  // Debug mode
+  debugMode: process.env.MATCHA_DEBUG === '1',
+  navigationHistory: [],
+  debugLogs: [],
+  trackNavigation: (from, to) =>
+    set((state) => ({
+      navigationHistory: [...state.navigationHistory, `${from} → ${to}`].slice(-100), // Keep last 100 transitions
+    })),
+  addDebugLog: (log) =>
+    set((state) => ({
+      debugLogs: [
+        ...state.debugLogs.slice(-1000), // Keep last 1000 debug logs
+        {
+          ...log,
+          timestamp: new Date().toISOString(),
+        },
+      ],
+    })),
+  clearDebugLogs: () => set({ debugLogs: [], navigationHistory: [] }),
 }));

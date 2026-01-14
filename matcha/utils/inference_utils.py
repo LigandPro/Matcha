@@ -236,8 +236,8 @@ def compute_fast_filters(conf, inference_run_name, n_preds_to_use):
                 inference_run_name, file_name_save), predicts, allow_pickle=True)
 
 
-def run_inference_pipeline(conf, run_name, n_preds_to_use, pocket_centers_filename=None, 
-                           docking_batch_limit=15000, scoring_batch_size=4):
+def run_inference_pipeline(conf, run_name, n_preds_to_use, pocket_centers_filename=None,
+                           docking_batch_limit=15000, scoring_batch_size=4, num_workers=8):
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.multiprocessing.set_sharing_strategy('file_system')
     torch.manual_seed(conf.seed)
@@ -256,7 +256,6 @@ def run_inference_pipeline(conf, run_name, n_preds_to_use, pocket_centers_filena
 
 
     conf.batch_limit = docking_batch_limit
-    num_workers = 8
 
     def get_dataloader_docking(dataset): return DataLoader(dataset, batch_size=1, shuffle=False,
                                                            collate_fn=dummy_ranking_collate_fn, num_workers=num_workers)

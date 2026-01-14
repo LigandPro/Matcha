@@ -29,7 +29,12 @@ def run_docking(job: "DockingJob") -> None:
     emit = job.progress_callback
 
     try:
-        # Extract config
+        # Extract GPU FIRST and set CUDA_VISIBLE_DEVICES BEFORE any PyTorch imports
+        gpu = config.get("gpu")
+        if gpu is not None:
+            os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
+
+        # Extract rest of config
         receptor_path = config.get("receptor")
         ligand_path = config.get("ligand")
         ligand_dir = config.get("ligand_dir")
@@ -37,7 +42,6 @@ def run_docking(job: "DockingJob") -> None:
         run_name = config.get("run_name", "matcha_tui_run")
         n_samples = config.get("n_samples", 40)
         n_confs = config.get("n_confs")
-        gpu = config.get("gpu")
         checkpoints = config.get("checkpoints")
         physical_only = config.get("physical_only", False)
 
@@ -82,12 +86,11 @@ def run_docking(job: "DockingJob") -> None:
             emit(ProgressEvent(type="cancelled", message="Job cancelled"))
             return
 
-        # Set GPU
-        if gpu is not None:
-            os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
-
         # Import matcha modules (once for all ligands)
+        # GPU was already set via CUDA_VISIBLE_DEVICES at the start of this function
         emit(ProgressEvent(type="stage_start", stage="init", name="Initializing"))
+        if gpu is not None:
+            emit(ProgressEvent(type="info", message=f"Using CUDA device #{gpu}"))
 
         from omegaconf import OmegaConf
         from matcha.utils.esm_utils import compute_esm_embeddings, compute_sequences
@@ -436,11 +439,14 @@ def process_single_ligand(
         "any_conf",
         n_samples,
         pocket_centers_filename,
+        num_workers=0,  # Use 0 workers to avoid multiprocessing deadlocks in TUI
     )
 
+    # Inference pipeline is done - mark stage1 complete
+    # (stages 2-3 happen inside run_inference_pipeline without separate progress)
     emit(ProgressEvent(
         type="stage_done",
-        stage="scoring",
+        stage="stage1",
         elapsed=time.time() - start_time,
         current_ligand=ligand.name,
         ligand_index=ligand_index,
