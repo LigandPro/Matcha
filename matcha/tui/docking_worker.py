@@ -6,6 +6,7 @@ Supports both single-ligand and batch processing modes.
 import os
 import shutil
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
@@ -21,6 +22,104 @@ def find_ligands(ligand_dir: Path, extensions: tuple = (".sdf", ".mol", ".mol2")
     for ext in extensions:
         ligands.extend(ligand_dir.glob(f"*{ext}"))
     return sorted(ligands, key=lambda p: p.name.lower())
+
+
+def _write_log_file(
+    log_path: Path,
+    run_name: str,
+    output_dir: Path,
+    receptor: str,
+    ligand: Optional[Path],
+    ligand_dir: Optional[str],
+    n_samples: int,
+    box_mode: str,
+    center: Optional[tuple],
+    all_poses: list,
+    physical_only: bool,
+) -> None:
+    """Write log file similar to CLI output."""
+    import numpy as np
+
+    timestamp = datetime.now(timezone.utc).isoformat() + "Z"
+
+    log_lines = [
+        "MATCHA DOCKING ENGINE (TUI)",
+        "============================================================",
+        "",
+        "[ RUN INFO ]",
+        f"  Start time       : {timestamp}",
+        f"  Run name         : {run_name}",
+        f"  Output directory : {output_dir}",
+        "",
+    ]
+
+    if box_mode == "manual" and center:
+        log_lines.extend([
+            "[ DOCKING BOX ]",
+            f"  Mode             : manual center",
+            f"  Center (Å)       : ({center[0]:.3f}, {center[1]:.3f}, {center[2]:.3f})",
+            "",
+        ])
+    else:
+        log_lines.extend([
+            "[ DOCKING MODE ]",
+            f"  Mode             : {box_mode} docking",
+            "",
+        ])
+
+    log_lines.extend([
+        "[ INPUT FILES ]",
+        f"  Receptor         : {receptor}",
+    ])
+
+    if ligand:
+        log_lines.append(f"  Ligand           : {ligand}")
+    elif ligand_dir:
+        log_lines.append(f"  Ligand directory : {ligand_dir}")
+
+    log_lines.extend([
+        "",
+        "[ OUTPUT FILES ]",
+        f"  Best pose SDF    : {output_dir / f'{run_name}_best.sdf'}",
+        f"  All poses SDF    : {output_dir / f'{run_name}_poses.sdf'}",
+        f"  Log file         : {log_path}",
+        "",
+    ])
+
+    if all_poses:
+        errs = [p.get("error_estimate", 0) for p in all_poses]
+        pb_counts = [p.get("pb_count", 0) for p in all_poses]
+
+        log_lines.extend([
+            "[ SUMMARY ]",
+            f"  Samples generated      : {n_samples}",
+            f"  Total poses            : {len(all_poses)}",
+            f"  error_estimate (Å)     : min={min(errs):.3f}, mean={float(np.mean(errs)):.3f}, max={max(errs):.3f}",
+            f"  posebusters checks     : min={min(pb_counts)}/4, max={max(pb_counts)}/4",
+            f"  Physical-only filter   : {physical_only}",
+            "",
+            "[ TOP 10 POSES ]",
+            "  rank  error_est(Å)  pb_checks",
+            "  ---------------------------------",
+        ])
+
+        for i, pose in enumerate(all_poses[:10], 1):
+            err = pose.get("error_estimate", 0)
+            pb = pose.get("pb_count", 0)
+            log_lines.append(f"  {i:4d}  {err:12.3f}  {pb:2d}/4")
+
+        log_lines.extend([
+            "",
+            "Note: Lower error_estimate values indicate higher confidence.",
+            "      Negative values = high confidence, positive = uncertainty.",
+        ])
+    else:
+        log_lines.extend([
+            "[ SUMMARY ]",
+            "  No poses generated.",
+        ])
+
+    log_path.write_text("\n".join(log_lines) + "\n")
 
 
 def run_docking(job: "DockingJob") -> None:
@@ -239,6 +338,22 @@ def run_docking(job: "DockingJob") -> None:
                 for pose in result["poses"]:
                     pose["ligand"] = result["ligand"]
                 all_poses.extend(result["poses"])
+
+        # Create log file (like CLI does)
+        log_path = output_run_dir / f"{run_name}.log"
+        _write_log_file(
+            log_path=log_path,
+            run_name=run_name,
+            output_dir=output_run_dir,
+            receptor=receptor_path,
+            ligand=ligands[0] if len(ligands) == 1 else None,
+            ligand_dir=ligand_dir,
+            n_samples=n_samples,
+            box_mode=box_mode,
+            center=(center_x, center_y, center_z) if box_mode == "manual" else None,
+            all_poses=all_poses,
+            physical_only=physical_only,
+        )
 
         emit(ProgressEvent(
             type="job_done",
