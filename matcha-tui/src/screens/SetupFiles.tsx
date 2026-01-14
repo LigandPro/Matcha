@@ -8,12 +8,17 @@ import * as path from 'path';
 
 type Field = 'receptor' | 'ligand';
 
+// Default test files path
+const DEFAULT_TEST_DIR = './test';
+const DEFAULT_RECEPTOR = `${DEFAULT_TEST_DIR}/1HVY_D16_protein_std.pdb`;
+const DEFAULT_LIGAND = `${DEFAULT_TEST_DIR}/1HVY_D16_ligand.sdf`;
+
 export function SetupFiles(): React.ReactElement {
   const { setScreen, setJobConfig, jobConfig } = useStore();
   const [activeField, setActiveField] = useState<Field>('receptor');
-  const [receptor, setReceptor] = useState(jobConfig.receptor || '');
+  const [receptor, setReceptor] = useState(jobConfig.receptor || DEFAULT_RECEPTOR);
   const [ligand, setLigand] = useState(
-    jobConfig.mode === 'batch' ? jobConfig.ligandDir || '' : jobConfig.ligand || ''
+    jobConfig.mode === 'batch' ? jobConfig.ligandDir || '' : jobConfig.ligand || DEFAULT_LIGAND
   );
   const [error, setError] = useState<string | null>(null);
 
