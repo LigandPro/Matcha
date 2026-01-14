@@ -39,7 +39,14 @@ export function RunningScreen(): React.ReactElement {
   const debugMode = useStore((s) => s.debugMode);
   const addDebugLog = useStore((s) => s.addDebugLog);
 
-  const [stages, setStages] = useState<Record<string, StageStatus>>({});
+  // Initialize all stages with pending status to avoid race conditions
+  const [stages, setStages] = useState<Record<string, StageStatus>>(() => {
+    const initial: Record<string, StageStatus> = {};
+    PIPELINE_STAGES.forEach(stage => {
+      initial[stage.id] = { status: 'pending', progress: 0 };
+    });
+    return initial;
+  });
   const [poses, setPoses] = useState<PoseResult[]>([]);
   const [startTime] = useState(Date.now());
   const [elapsedTime, setElapsedTime] = useState(0);
