@@ -10,8 +10,6 @@ import { ProgressBar } from '../components/ProgressBar.js';
 import { icons } from '../utils/colors.js';
 import { PIPELINE_STAGES, type PipelineStage, type PoseResult } from '../types/index.js';
 import { formatDuration } from '../utils/format.js';
-import * as path from 'path';
-import { fileURLToPath } from 'url';
 
 interface StageStatus {
   status: 'pending' | 'running' | 'done' | 'error';
@@ -91,13 +89,9 @@ export function RunningScreen(): React.ReactElement {
       try {
         // Initialize Python backend
         addLog('Initializing Python backend...');
-        // Get project root from env (set in index.tsx) or calculate from current file
-        const __filename = fileURLToPath(import.meta.url);
-        const __dirname = path.dirname(__filename);
-        const projectRoot = process.env.MATCHA_ROOT || path.resolve(__dirname, '..', '..', '..');
+        // Use current working directory as project root (like CLI does)
+        const projectRoot = process.env.MATCHA_ROOT || process.cwd();
         addLog(`Project root: ${projectRoot}`);
-        addLog(`MATCHA_ROOT env: ${process.env.MATCHA_ROOT || 'not set'}`);
-        addLog(`__dirname: ${__dirname}`);
 
         // Capture all stderr before bridge starts
         let stderrBuffer = '';

@@ -479,6 +479,16 @@ def process_single_ligand(
 
     save_best_pred_to_sdf(conf, "any_conf")
 
+    # Copy final SDF to top-level output directory (like CLI does)
+    run_output_dir = run_workdir.parent  # This is output_path / run_name
+    sdf_preds_dir = Path(conf.inference_results_folder) / "any_conf" / "sdf_predictions"
+    pred_sdf_files = list(sdf_preds_dir.glob("*.sdf"))
+    if pred_sdf_files:
+        best_dest = run_output_dir / f"{ligand_name}_best.sdf"
+        all_dest = run_output_dir / f"{ligand_name}_poses.sdf"
+        shutil.copyfile(pred_sdf_files[0], best_dest)
+        shutil.copyfile(pred_sdf_files[0], all_dest)
+
     # Get pose info
     import numpy as np
 
@@ -515,5 +525,5 @@ def process_single_ligand(
 
     return {
         "poses": poses,
-        "output_path": str(output_ligand_dir),
+        "output_path": str(run_output_dir),
     }
