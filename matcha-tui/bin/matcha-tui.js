@@ -2,12 +2,10 @@
 
 /**
  * Matcha TUI launcher
- * 
+ *
  * This script launches the Matcha Terminal User Interface.
  * It initializes the Python backend and starts the Ink frontend.
  */
-
-import { render } from '../dist/index.js';
 
 // Handle uncaught errors gracefully
 process.on('uncaughtException', (error) => {
@@ -20,10 +18,8 @@ process.on('unhandledRejection', (error) => {
   process.exit(1);
 });
 
-// Start the TUI
-try {
-  render();
-} catch (error) {
+// Import and run the main module (which auto-executes)
+import('../dist/index.js').catch((error) => {
   console.error('\n❌ Failed to start TUI:', error.message);
   console.error('\nTroubleshooting:');
   console.error('  1. Ensure dependencies are installed: npm install');
@@ -31,4 +27,4 @@ try {
   console.error('  3. Verify Python backend: uv run python -c "from matcha.tui import main"');
   console.error('  4. Run integration test: node test-backend.mjs');
   process.exit(1);
-}
+});
