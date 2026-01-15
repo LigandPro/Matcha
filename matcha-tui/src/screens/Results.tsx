@@ -7,6 +7,7 @@ import { Box, Text, useInput } from 'ink';
 import { exec } from 'child_process';
 import path from 'path';
 import * as fs from 'fs';
+import * as os from 'os';
 import { useStore } from '../store/index.js';
 import { icons } from '../utils/colors.js';
 import { formatDuration } from '../utils/format.js';
@@ -27,6 +28,7 @@ export function ResultsScreen(): React.ReactElement {
     url: string;
     port: number;
     fileName: string;
+    sshCommand?: string;
   } | null>(null);
 
   const openOutputFolder = () => {
@@ -98,6 +100,7 @@ export function ResultsScreen(): React.ReactElement {
         // SSH mode - start HTTP server and show URL
         const port = 8765; // Fixed port for simplicity
         const fileName = path.basename(htmlPath);
+        const hostname = os.hostname();
 
         // Start simple HTTP server in background
         exec(`cd "${resultDir}" && python3 -m http.server ${port} > /dev/null 2>&1 &`, (error) => {
@@ -106,14 +109,15 @@ export function ResultsScreen(): React.ReactElement {
           }
         });
 
-        // Set viewer info to display in UI
+        // Set viewer info to display in UI with SSH forwarding command
         setViewer3DInfo({
           url: `http://localhost:${port}/${fileName}`,
           port,
           fileName,
+          sshCommand: `ssh -L ${port}:localhost:${port} user@${hostname}`,
         });
 
-        setNotification('3D Viewer server started! See instructions below.');
+        setNotification('3D Viewer server started! Use SSH port forwarding.');
       } else {
         // Local mode - try to open browser
         const command = process.platform === 'darwin'
@@ -211,9 +215,17 @@ export function ResultsScreen(): React.ReactElement {
 
       {/* 3D Viewer URL */}
       {viewer3DInfo && (
-        <Box marginTop={1}>
-          <Text color="cyan">3D Viewer: </Text>
-          <Text color="white">{viewer3DInfo.url}</Text>
+        <Box flexDirection="column" marginTop={1}>
+          {viewer3DInfo.sshCommand && (
+            <Box>
+              <Text color="gray">SSH forward: </Text>
+              <Text color="yellow">{viewer3DInfo.sshCommand}</Text>
+            </Box>
+          )}
+          <Box>
+            <Text color="cyan">3D Viewer: </Text>
+            <Text color="white">{viewer3DInfo.url}</Text>
+          </Box>
         </Box>
       )}
 
