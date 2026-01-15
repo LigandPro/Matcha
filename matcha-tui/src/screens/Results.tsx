@@ -4,6 +4,7 @@
 
 import React, { useState } from 'react';
 import { Box, Text, useInput } from 'ink';
+import SelectInput from 'ink-select-input';
 import { exec } from 'child_process';
 import path from 'path';
 import * as fs from 'fs';
@@ -13,6 +14,8 @@ import { formatDuration } from '../utils/format.js';
 import { generateMolstarViewer } from '../utils/molstar-viewer.js';
 import type { BatchLigandStatus } from '../types/index.js';
 
+type MenuAction = 'new' | 'view3d' | 'open' | 'toggle' | 'back' | 'home';
+
 export function ResultsScreen(): React.ReactElement {
   const setScreen = useStore((s) => s.setScreen);
   const resetJobConfig = useStore((s) => s.resetJobConfig);
@@ -20,6 +23,7 @@ export function ResultsScreen(): React.ReactElement {
   const results = useStore((s) => s.results);
   const setError = useStore((s) => s.setError);
   const [viewMode, setViewMode] = useState<'summary' | 'ligands'>('summary');
+  const [useArrowNav, setUseArrowNav] = useState(false);
 
   const openOutputFolder = () => {
     const outputPath = results?.bestPosePath;
@@ -48,10 +52,16 @@ export function ResultsScreen(): React.ReactElement {
     if (!results) return;
 
     try {
+      // bestPosePath can be either a directory or a file path
+      const stats = fs.statSync(results.bestPosePath);
+      const resultDir = stats.isDirectory() ? results.bestPosePath : path.dirname(results.bestPosePath);
+
+      // Get run name from directory
+      const runName = path.basename(resultDir);
+
       // Find paths to structure files
-      const resultDir = path.dirname(results.bestPosePath);
       const proteinPath = path.join(resultDir, 'work/datasets/any_conf/sample_0/sample_0_protein.pdb');
-      const ligandPath = results.bestPosePath;
+      const ligandPath = path.join(resultDir, `${runName}_best.sdf`);
 
       // Check if files exist
       if (!fs.existsSync(proteinPath)) {
@@ -91,25 +101,58 @@ export function ResultsScreen(): React.ReactElement {
     }
   };
 
-  useInput((input, key) => {
-    if (input === 'n') {
-      resetJobConfig();
-      setScreen('setup-files');
-    } else if (input === 'h') {
-      setScreen('welcome');
-    } else if (input === 'b' || key.escape) {
-      // Context-aware back navigation
-      if (previousScreen === 'history') {
-        setScreen('history');
-      } else {
+  const handleMenuAction = (action: MenuAction) => {
+    switch (action) {
+      case 'new':
+        resetJobConfig();
+        setScreen('setup-files');
+        break;
+      case 'view3d':
+        view3D();
+        break;
+      case 'open':
+        openOutputFolder();
+        break;
+      case 'toggle':
+        setViewMode(viewMode === 'summary' ? 'ligands' : 'summary');
+        break;
+      case 'back':
+        if (previousScreen === 'history') {
+          setScreen('history');
+        } else if (previousScreen === 'setup-review') {
+          setScreen('setup-review');
+        } else {
+          setScreen('welcome');
+        }
+        break;
+      case 'home':
         setScreen('welcome');
+        break;
+    }
+  };
+
+  useInput((input, key) => {
+    // Toggle arrow navigation with Tab
+    if (key.tab) {
+      setUseArrowNav(!useArrowNav);
+      return;
+    }
+
+    // Keyboard shortcuts (always available)
+    if (!useArrowNav) {
+      if (input === 'n') {
+        handleMenuAction('new');
+      } else if (input === 'h') {
+        handleMenuAction('home');
+      } else if (input === 'b') {
+        handleMenuAction('back');
+      } else if (input === 'l' && results?.ligandStatuses) {
+        handleMenuAction('toggle');
+      } else if (input === 'o') {
+        handleMenuAction('open');
+      } else if (input === 'v') {
+        handleMenuAction('view3d');
       }
-    } else if (input === 'l' && results?.ligandStatuses) {
-      setViewMode(viewMode === 'summary' ? 'ligands' : 'summary');
-    } else if (input === 'o') {
-      openOutputFolder();
-    } else if (input === 'v') {
-      view3D();
     }
   });
 
@@ -238,14 +281,34 @@ export function ResultsScreen(): React.ReactElement {
       )}
 
       {/* Navigation */}
-      <Box marginTop={2} gap={4}>
-        <Text color="cyan">[n] New docking</Text>
-        {isBatch && <Text color="yellow">[l] {viewMode === 'summary' ? 'All ligands' : 'Summary'}</Text>}
-        <Text color="magenta">[v] View 3D</Text>
-        <Text color="magenta">[o] Open folder</Text>
-        <Text color="gray">[b] Back to {previousScreen === 'history' ? 'History' : 'Home'}</Text>
-        <Text color="gray">[h] Home</Text>
-      </Box>
+      {useArrowNav ? (
+        <Box marginTop={2} flexDirection="column">
+          <Text color="gray" dimColor>Use ↑↓ to navigate, ⏎ to select</Text>
+          <SelectInput
+            items={[
+              { label: 'New docking', value: 'new' as MenuAction },
+              ...(isBatch ? [{ label: viewMode === 'summary' ? 'All ligands' : 'Summary', value: 'toggle' as MenuAction }] : []),
+              { label: 'View 3D', value: 'view3d' as MenuAction },
+              { label: 'Open folder', value: 'open' as MenuAction },
+              { label: `Back to ${previousScreen === 'history' ? 'History' : 'Home'}`, value: 'back' as MenuAction },
+              { label: 'Home', value: 'home' as MenuAction },
+            ]}
+            onSelect={(item) => handleMenuAction(item.value)}
+          />
+        </Box>
+      ) : (
+        <Box marginTop={2} gap={4}>
+          <Text color="cyan">[n] New docking</Text>
+          {isBatch && <Text color="yellow">[l] {viewMode === 'summary' ? 'All ligands' : 'Summary'}</Text>}
+          <Text color="magenta">[v] View 3D</Text>
+          <Text color="magenta">[o] Open folder</Text>
+          <Text color="gray">[b] Back to {previousScreen === 'history' ? 'History' : 'Home'}</Text>
+          <Text color="gray">[h] Home</Text>
+          <Box marginLeft={4}>
+            <Text color="gray" dimColor>[Tab] Arrow navigation</Text>
+          </Box>
+        </Box>
+      )}
     </Box>
   );
 }
