@@ -36,6 +36,7 @@ def _write_log_file(
     center: Optional[tuple],
     all_poses: list,
     physical_only: bool,
+    runtime: float = 0.0,
 ) -> None:
     """Write log file similar to CLI output."""
     import numpy as np
@@ -50,6 +51,7 @@ def _write_log_file(
         f"  Start time       : {timestamp}",
         f"  Run name         : {run_name}",
         f"  Output directory : {output_dir}",
+        f"  Total runtime    : {runtime:.1f}s",
         "",
     ]
 
@@ -126,6 +128,7 @@ def run_docking(job: "DockingJob") -> None:
     """Run docking job with progress reporting."""
     config = job.config
     emit = job.progress_callback
+    job_start_time = time.time()
 
     try:
         # Extract GPU FIRST and set CUDA_VISIBLE_DEVICES BEFORE any PyTorch imports
@@ -346,6 +349,9 @@ def run_docking(job: "DockingJob") -> None:
         if all_poses:
             print(f"[DEBUG] First pose: {all_poses[0]}", file=sys.stderr)
 
+        # Calculate total runtime
+        total_runtime = time.time() - job_start_time
+
         # Create log file (like CLI does)
         log_path = output_run_dir / f"{run_name}.log"
         _write_log_file(
@@ -360,6 +366,7 @@ def run_docking(job: "DockingJob") -> None:
             center=(center_x, center_y, center_z) if box_mode == "manual" else None,
             all_poses=all_poses,
             physical_only=physical_only,
+            runtime=total_runtime,
         )
 
         emit(ProgressEvent(

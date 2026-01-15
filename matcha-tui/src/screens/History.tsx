@@ -31,6 +31,7 @@ interface RunDetails {
 
 export function HistoryScreen(): React.ReactElement {
   const setScreen = useStore((s) => s.setScreen);
+  const setPreviousScreen = useStore((s) => s.setPreviousScreen);
   const setError = useStore((s) => s.setError);
   const setResults = useStore((s) => s.setResults);
   const jobConfig = useStore((s) => s.jobConfig);
@@ -151,7 +152,8 @@ export function HistoryScreen(): React.ReactElement {
       if (details.files?.log && fs.existsSync(details.files.log)) {
         try {
           const logContent = fs.readFileSync(details.files.log, 'utf-8');
-          const match = logContent.match(/Total runtime: ([\d.]+)/);
+          // Match "Total runtime" with flexible spacing and optional 's' suffix
+          const match = logContent.match(/Total runtime\s*:\s*([\d.]+)/);
           if (match) {
             runtime = parseFloat(match[1]);
           }
@@ -176,6 +178,7 @@ export function HistoryScreen(): React.ReactElement {
 
       // Set results and navigate to results screen
       setResults(results);
+      setPreviousScreen('history');
       setScreen('results');
     } catch (err: any) {
       logger.error('History', 'Failed to load results', { error: err });

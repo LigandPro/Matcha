@@ -219,7 +219,8 @@ export function ResultsScreen(): React.ReactElement {
           <Text bold color="white" underline>3D Viewer</Text>
           <Box marginLeft={2} marginTop={1} flexDirection="column">
             <Box>
-              <Text color="gray">File: </Text>
+              <Text color="gray">File:</Text>
+              <Text> </Text>
               <Text color="cyan">{makeClickableLink(viewer3DInfo.url, shortenPath(viewer3DInfo.url))}</Text>
             </Box>
             {viewer3DInfo.port === 0 && (
@@ -291,7 +292,11 @@ export function ResultsScreen(): React.ReactElement {
       <Box flexDirection="column" marginTop={1}>
         <Text bold color="white" underline>Output</Text>
         <Box flexDirection="column" marginLeft={2} marginTop={1}>
-          <Box><Text color="gray">Directory: </Text><Text color="blue">{results.bestPosePath}</Text></Box>
+          <Box>
+            <Text color="gray">Directory:</Text>
+            <Text> </Text>
+            <Text color="blue">{results.bestPosePath}</Text>
+          </Box>
         </Box>
       </Box>
 
