@@ -21,7 +21,13 @@ export function ResultsScreen(): React.ReactElement {
   const previousScreen = useStore((s) => s.previousScreen);
   const results = useStore((s) => s.results);
   const setError = useStore((s) => s.setError);
+  const setNotification = useStore((s) => s.setNotification);
   const [viewMode, setViewMode] = useState<'summary' | 'ligands'>('summary');
+  const [viewer3DInfo, setViewer3DInfo] = useState<{
+    url: string;
+    port: number;
+    fileName: string;
+  } | null>(null);
 
   const openOutputFolder = () => {
     const outputPath = results?.bestPosePath;
@@ -96,19 +102,18 @@ export function ResultsScreen(): React.ReactElement {
         // Start simple HTTP server in background
         exec(`cd "${resultDir}" && python3 -m http.server ${port} > /dev/null 2>&1 &`, (error) => {
           if (error) {
-            console.error('Failed to start HTTP server:', error);
+            setError('Failed to start HTTP server');
           }
         });
 
-        console.log('\n╭──────────────────────────────────────────────────╮');
-        console.log('│ 3D Viewer Ready                                  │');
-        console.log('├──────────────────────────────────────────────────┤');
-        console.log(`│ Server started on port ${port}                        │`);
-        console.log('│                                                  │');
-        console.log('│ Open in browser with SSH port forwarding:       │');
-        console.log(`│   ssh -L ${port}:localhost:${port} user@server              │`);
-        console.log(`│   Then open: http://localhost:${port}/${fileName.padEnd(16)}│`);
-        console.log('╰──────────────────────────────────────────────────╯\n');
+        // Set viewer info to display in UI
+        setViewer3DInfo({
+          url: `http://localhost:${port}/${fileName}`,
+          port,
+          fileName,
+        });
+
+        setNotification('3D Viewer server started! See instructions below.');
       } else {
         // Local mode - try to open browser
         const command = process.platform === 'darwin'
@@ -160,6 +165,12 @@ export function ResultsScreen(): React.ReactElement {
   };
 
   useInput((input, key) => {
+    // Close 3D viewer instructions
+    if (input === 'c' && viewer3DInfo) {
+      setViewer3DInfo(null);
+      return;
+    }
+
     // Arrow key shortcuts
     if (key.leftArrow) {
       handleMenuAction('back');
@@ -203,6 +214,32 @@ export function ResultsScreen(): React.ReactElement {
       <Box>
         <Text color="green" bold>{icons.check} Docking completed successfully!</Text>
       </Box>
+
+      {/* 3D Viewer SSH Instructions */}
+      {viewer3DInfo && (
+        <Box flexDirection="column" marginTop={1} borderStyle="round" borderColor="cyan" paddingX={1} paddingY={1}>
+          <Text bold color="cyan">🔬 3D Viewer Ready (SSH Mode)</Text>
+          <Box marginTop={1}>
+            <Text color="gray">Server started on port: </Text>
+            <Text color="white">{viewer3DInfo.port}</Text>
+          </Box>
+          <Box marginTop={1} flexDirection="column">
+            <Text color="magenta" bold>Setup SSH port forwarding:</Text>
+            <Box marginLeft={2} marginTop={1}>
+              <Text color="white">ssh -L {viewer3DInfo.port}:localhost:{viewer3DInfo.port} user@server</Text>
+            </Box>
+          </Box>
+          <Box marginTop={1} flexDirection="column">
+            <Text color="magenta" bold>Then open in your browser:</Text>
+            <Box marginLeft={2} marginTop={1}>
+              <Text color="cyan">{viewer3DInfo.url}</Text>
+            </Box>
+          </Box>
+          <Box marginTop={1}>
+            <Text color="gray" dimColor>[Press 'c' to close this message]</Text>
+          </Box>
+        </Box>
+      )}
 
       {/* Summary section */}
       <Box flexDirection="column" marginTop={1}>
