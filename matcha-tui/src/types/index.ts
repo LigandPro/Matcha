@@ -98,18 +98,18 @@ export interface ProgressInfo {
   ligands?: LigandStatus[];
 }
 
-// Pose result
+// Pose result (matches backend snake_case format)
 export interface PoseResult {
   rank: number;
-  errorEstimate: number;
-  pbCount: number;
+  error_estimate: number;
+  pb_count: number;
   checks: {
-    notTooFarAway: boolean;
-    noInternalClash: boolean;
-    noClashes: boolean;
-    noVolumeClash: boolean;
+    not_too_far_away: boolean;
+    no_internal_clash: boolean;
+    no_clashes: boolean;
+    no_volume_clash: boolean;
   };
-  buriedFraction: number;
+  buried_fraction: number;
 }
 
 // Batch ligand status (from backend)

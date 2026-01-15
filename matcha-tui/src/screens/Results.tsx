@@ -99,14 +99,14 @@ export function ResultsScreen(): React.ReactElement {
         <Box flexDirection="column" marginTop={1}>
           <Text bold color="white" underline>Best Pose</Text>
           <Box flexDirection="column" marginLeft={2} marginTop={1}>
-            <Box><Text color="gray">Error estimate: </Text><Text color="cyan">{(bestPose.errorEstimate ?? 0).toFixed(3)}</Text></Box>
-            <Box><Text color="gray">PoseBusters: </Text><Text color={(bestPose.pbCount ?? 0) === 4 ? 'green' : 'yellow'}>{bestPose.pbCount ?? 0}/4</Text></Box>
+            <Box><Text color="gray">Error estimate: </Text><Text color="cyan">{(bestPose.error_estimate ?? 0).toFixed(3)}</Text></Box>
+            <Box><Text color="gray">PoseBusters: </Text><Text color={(bestPose.pb_count ?? 0) === 4 ? 'green' : 'yellow'}>{bestPose.pb_count ?? 0}/4</Text></Box>
             <Box>
               <Text color="gray">Checks: </Text>
-              <Text color={bestPose.checks?.notTooFarAway ? 'green' : 'red'}>{bestPose.checks?.notTooFarAway ? icons.check : icons.cross} </Text>
-              <Text color={bestPose.checks?.noInternalClash ? 'green' : 'red'}>{bestPose.checks?.noInternalClash ? icons.check : icons.cross} </Text>
-              <Text color={bestPose.checks?.noClashes ? 'green' : 'red'}>{bestPose.checks?.noClashes ? icons.check : icons.cross} </Text>
-              <Text color={bestPose.checks?.noVolumeClash ? 'green' : 'red'}>{bestPose.checks?.noVolumeClash ? icons.check : icons.cross}</Text>
+              <Text color={bestPose.checks?.not_too_far_away ? 'green' : 'red'}>{bestPose.checks?.not_too_far_away ? icons.check : icons.cross} </Text>
+              <Text color={bestPose.checks?.no_internal_clash ? 'green' : 'red'}>{bestPose.checks?.no_internal_clash ? icons.check : icons.cross} </Text>
+              <Text color={bestPose.checks?.no_clashes ? 'green' : 'red'}>{bestPose.checks?.no_clashes ? icons.check : icons.cross} </Text>
+              <Text color={bestPose.checks?.no_volume_clash ? 'green' : 'red'}>{bestPose.checks?.no_volume_clash ? icons.check : icons.cross}</Text>
             </Box>
           </Box>
         </Box>
@@ -163,13 +163,13 @@ export function ResultsScreen(): React.ReactElement {
             {results.poses.slice(0, 10).map((pose) => (
               <Box key={pose.rank}>
                 <Text color="white">{String(pose.rank).padEnd(6)}</Text>
-                <Text color="cyan">{(pose.errorEstimate ?? 0).toFixed(3).padEnd(10)}</Text>
-                <Text color={(pose.pbCount ?? 0) === 4 ? 'green' : 'yellow'}>{`${pose.pbCount ?? 0}/4`.padEnd(6)}</Text>
+                <Text color="cyan">{(pose.error_estimate ?? 0).toFixed(3).padEnd(10)}</Text>
+                <Text color={(pose.pb_count ?? 0) === 4 ? 'green' : 'yellow'}>{`${pose.pb_count ?? 0}/4`.padEnd(6)}</Text>
                 <Text>
-                  {pose.checks?.notTooFarAway ? icons.check : icons.cross}
-                  {pose.checks?.noInternalClash ? icons.check : icons.cross}
-                  {pose.checks?.noClashes ? icons.check : icons.cross}
-                  {pose.checks?.noVolumeClash ? icons.check : icons.cross}
+                  {pose.checks?.not_too_far_away ? icons.check : icons.cross}
+                  {pose.checks?.no_internal_clash ? icons.check : icons.cross}
+                  {pose.checks?.no_clashes ? icons.check : icons.cross}
+                  {pose.checks?.no_volume_clash ? icons.check : icons.cross}
                 </Text>
               </Box>
             ))}

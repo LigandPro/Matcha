@@ -207,7 +207,7 @@ export function RunningScreen(): React.ReactElement {
               runName: 'completed',
               runtime: (Date.now() - startTime) / 1000,
               totalPoses: finalPoses.length,
-              physicalPoses: finalPoses.filter((p) => p.pbCount === 4).length,
+              physicalPoses: finalPoses.filter((p) => p.pb_count === 4).length,
               poses: finalPoses,
               bestPosePath: event.output_path ?? '',
               allPosesPath: '',
@@ -307,8 +307,8 @@ export function RunningScreen(): React.ReactElement {
             {poses.slice(0, 5).map((pose) => (
               <Box key={pose.rank}>
                 <Text color="white">{String(pose.rank).padEnd(6)}</Text>
-                <Text color="magenta">{(pose.errorEstimate ?? 0).toFixed(3).padEnd(12)}</Text>
-                <Text color={pose.pbCount === 4 ? 'green' : 'yellow'}>{pose.pbCount ?? 0}/4</Text>
+                <Text color="magenta">{(pose.error_estimate ?? 0).toFixed(3).padEnd(12)}</Text>
+                <Text color={pose.pb_count === 4 ? 'green' : 'yellow'}>{pose.pb_count ?? 0}/4</Text>
               </Box>
             ))}
           </Box>
