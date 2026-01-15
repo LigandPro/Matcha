@@ -10,7 +10,8 @@ import { getBridge, initBridge, closeBridge, type ProgressEvent } from '../servi
 import { ProgressBar } from '../components/ProgressBar.js';
 import { icons } from '../utils/colors.js';
 import { PIPELINE_STAGES, type PipelineStage, type PoseResult } from '../types/index.js';
-import { formatDuration } from '../utils/format.js';
+import { formatDuration, generateRunName } from '../utils/format.js';
+import { isKey } from '../utils/keyboard.js';
 import { logger } from '../utils/logger.js';
 
 interface StageStatus {
@@ -62,6 +63,18 @@ export function RunningScreen(): React.ReactElement {
   const [currentLigand, setCurrentLigand] = useState<string | null>(null);
   const [ligandStatuses, setLigandStatuses] = useState<LigandStatus[]>([]);
   const [batchProgress, setBatchProgress] = useState(0);
+  const stageOrder = ['init', 'checkpoints', 'dataset', 'esm', 'stage1', 'stage2', 'stage3', 'scoring', 'posebusters'] as const;
+  const stageWeights: Record<string, number> = {
+    init: 1,
+    checkpoints: 1,
+    dataset: 1,
+    esm: 1,
+    stage1: 1,
+    stage2: 1,
+    stage3: 1,
+    scoring: 1,
+    posebusters: 1,
+  };
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -69,6 +82,33 @@ export function RunningScreen(): React.ReactElement {
     }, 1000);
     return () => clearInterval(timer);
   }, [startTime]);
+
+  // Compute overall batch progress from stage progress
+  useEffect(() => {
+    if (!isBatch) return;
+    let totalWeight = 0;
+    let weightedProgress = 0;
+
+    for (const stageId of stageOrder) {
+      const weight = stageWeights[stageId] ?? 1;
+      totalWeight += weight;
+      const status = stages[stageId];
+      if (!status) {
+        continue;
+      }
+      let percent = 0;
+      if (status.status === 'done') {
+        percent = 100;
+      } else if (status.status === 'running') {
+        percent = status.progress ?? 0;
+      }
+      weightedProgress += weight * percent;
+    }
+
+    if (totalWeight > 0) {
+      setBatchProgress(Math.round(weightedProgress / totalWeight));
+    }
+  }, [isBatch, stages]);
 
   // Start docking job on mount
   useEffect(() => {
@@ -82,7 +122,7 @@ export function RunningScreen(): React.ReactElement {
       ligand: jobConfig.mode === 'single' ? jobConfig.ligand : undefined,
       ligand_dir: jobConfig.mode === 'batch' ? jobConfig.ligandDir : undefined,
       output_dir: jobConfig.params?.outputDir || './results',
-      run_name: jobConfig.params?.runName || `matcha_${Date.now()}`,
+      run_name: jobConfig.params?.runName || generateRunName(),
       n_samples: jobConfig.params?.nSamples || 40,
       n_confs: jobConfig.params?.nConfs,
       gpu: jobConfig.params?.gpu,
@@ -161,7 +201,6 @@ export function RunningScreen(): React.ReactElement {
               setLigandStatuses(event.ligand_statuses as LigandStatus[]);
             }
           } else if (event.type === 'batch_progress') {
-            setBatchProgress(event.progress ?? 0);
             setCurrentLigandIndex(event.ligand_index ?? 0);
             if (event.ligand_statuses) {
               setLigandStatuses(event.ligand_statuses as LigandStatus[]);
@@ -202,9 +241,23 @@ export function RunningScreen(): React.ReactElement {
             setPoses(event.poses as PoseResult[]);
           } else if (event.type === 'job_done') {
             setRunning(false);
+            if (isBatch) {
+              setBatchProgress(100);
+            }
             // Use event.poses from backend (aggregated data for all ligands)
             // Local 'poses' state is only for displaying current ligand during execution
             const finalPoses = (event.poses ?? []) as PoseResult[];
+            const runDir = event.output_path ?? '';
+            const runName = jobConfig.params?.runName ?? 'matcha_tui_run';
+            const isBatchRun =
+              (event.total_ligands ?? 0) > 1 || jobConfig.mode === 'batch';
+            const bestPosePath = isBatchRun
+              ? path.join(runDir, 'best_poses')
+              : path.join(runDir, `${runName}_best.sdf`);
+            const allPosesPath = isBatchRun
+              ? path.join(runDir, 'all_poses')
+              : path.join(runDir, `${runName}_poses.sdf`);
+            const logPath = path.join(runDir, `${runName}.log`);
 
             // DEBUG: Log received poses
             console.error('[DEBUG] job_done event.poses count:', finalPoses.length);
@@ -213,14 +266,14 @@ export function RunningScreen(): React.ReactElement {
             }
 
             const results = {
-              runName: 'completed',
+              runName,
               runtime: (Date.now() - startTime) / 1000,
               totalPoses: finalPoses.length,
               physicalPoses: finalPoses.filter((p) => p.pb_count === 4).length,
               poses: finalPoses,
-              bestPosePath: event.output_path ?? '',
-              allPosesPath: '',
-              logPath: '',
+              bestPosePath,
+              allPosesPath,
+              logPath,
               receptor: jobConfig.receptor,
               ligand: jobConfig.ligand,
               totalLigands: event.total_ligands,
@@ -269,9 +322,9 @@ export function RunningScreen(): React.ReactElement {
   // Progress events are now handled in the first useEffect (before startDocking)
 
   useInput((input, key) => {
-    if (input === 'c' && bridgeReady) {
+    if (isKey(input, 'c') && bridgeReady) {
       getBridge().cancelJob().catch(() => {});
-    } else if (input === 'h' || key.escape) {
+    } else if (isKey(input, 'h') || key.escape) {
       // Allow user to leave running screen and go back to home
       // Job continues in background
       setScreen('welcome');
@@ -280,17 +333,22 @@ export function RunningScreen(): React.ReactElement {
 
   return (
     <Box flexDirection="column" gap={1}>
-      {/* Header with elapsed time */}
+      {/* Compact status line */}
       <Box>
-        <Text color="magenta">Elapsed: </Text>
-        <Text color="white">{formatDuration(elapsedTime)}</Text>
+        <Text color="yellow">{icons.running} </Text>
+        <Text color="white" bold>Docking</Text>
+        <Text color="gray" dimColor> • </Text>
+        <Text color="gray" dimColor>{formatDuration(elapsedTime)}</Text>
         {isBatch && (
           <>
-            <Text color="gray"> │ </Text>
-            <Text color="magenta">Ligand: </Text>
+            <Text color="gray" dimColor> • </Text>
+            <Text color="magenta">Ligand </Text>
             <Text color="white">{currentLigandIndex + 1}/{totalLigands}</Text>
           </>
         )}
+        <Text color="gray" dimColor> • </Text>
+        <Text color="cyan" dimColor>Esc</Text>
+        <Text color="gray" dimColor> to home</Text>
       </Box>
 
       {/* Batch progress (if batch mode) */}
@@ -352,10 +410,6 @@ export function RunningScreen(): React.ReactElement {
         </Box>
       )}
 
-      <Box marginTop={2} gap={2}>
-        <Text color="yellow">[c] Cancel</Text>
-        <Text color="cyan">[h] Go to Home (job continues in background)</Text>
-      </Box>
     </Box>
   );
 }

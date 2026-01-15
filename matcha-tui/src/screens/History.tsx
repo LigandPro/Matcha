@@ -10,7 +10,8 @@ import { useStore } from '../store/index.js';
 import { getBridge, initBridge } from '../services/index.js';
 import { icons } from '../utils/colors.js';
 import { logger } from '../utils/logger.js';
-import type { JobResults, PoseResult } from '../types/index.js';
+import { isKey } from '../utils/keyboard.js';
+import type { BatchLigandStatus, JobResults, PoseResult } from '../types/index.js';
 
 interface RunInfo {
   name: string;
@@ -27,6 +28,7 @@ interface RunDetails {
   files: Record<string, string>;
   receptor?: string;
   ligand?: string;
+  is_batch?: boolean;
 }
 
 export function HistoryScreen(): React.ReactElement {
@@ -45,10 +47,14 @@ export function HistoryScreen(): React.ReactElement {
   const [loadingResults, setLoadingResults] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   // Update modal state when confirmDelete changes
   useEffect(() => {
     setModalOpen(confirmDelete);
+    if (confirmDelete) {
+      setDeleteError(null);
+    }
     return () => setModalOpen(false); // Clean up on unmount
   }, [confirmDelete, setModalOpen]);
 
@@ -111,11 +117,16 @@ export function HistoryScreen(): React.ReactElement {
     try {
       setLoadingResults(true);
 
-      // Load poses and details from backend
-      const [poses, details] = await Promise.all([
-        getBridge().getPoses(selectedRun.path),
-        getBridge().getRunDetails(selectedRun.path),
-      ]);
+      const details = (await getBridge().getRunDetails(selectedRun.path)) as RunDetails;
+      const isBatchRun =
+        Boolean(details.is_batch) ||
+        Boolean(details.files?.best_poses) ||
+        Boolean(details.files?.all_poses_dir);
+
+      let poses: any[] = [];
+      if (!isBatchRun) {
+        poses = await getBridge().getPoses(selectedRun.path);
+      }
 
       if (debugMode) {
         logger.debug('History', 'Loaded poses', { count: poses.length });
@@ -149,16 +160,90 @@ export function HistoryScreen(): React.ReactElement {
 
       // Try to extract runtime from log file
       let runtime = 0;
+      let logContent: string | null = null;
       if (details.files?.log && fs.existsSync(details.files.log)) {
         try {
-          const logContent = fs.readFileSync(details.files.log, 'utf-8');
-          // Match "Total runtime" with flexible spacing and optional 's' suffix
-          const match = logContent.match(/Total runtime\s*:\s*([\d.]+)/);
-          if (match) {
-            runtime = parseFloat(match[1]);
+          logContent = fs.readFileSync(details.files.log, 'utf-8');
+          const runtimeMatch = logContent.match(/Total runtime\s*:\s*([^\n]+)/i);
+          if (runtimeMatch) {
+            const runtimeText = runtimeMatch[1].trim();
+            const secondsMatch = runtimeText.match(/^([\d.]+)\s*s?$/i);
+            if (secondsMatch) {
+              runtime = parseFloat(secondsMatch[1]);
+            } else {
+              const days = runtimeText.match(/(\d+)\s*d/i);
+              const hours = runtimeText.match(/(\d+)\s*h/i);
+              const minutes = runtimeText.match(/(\d+)\s*m(?!s)/i);
+              const secs = runtimeText.match(/(\d+)\s*s/i);
+              runtime =
+                (days ? parseInt(days[1], 10) * 86400 : 0) +
+                (hours ? parseInt(hours[1], 10) * 3600 : 0) +
+                (minutes ? parseInt(minutes[1], 10) * 60 : 0) +
+                (secs ? parseInt(secs[1], 10) : 0);
+            }
           }
         } catch (err) {
           // Log parsing failed, keep runtime as 0
+        }
+      }
+
+      let ligandStatuses: BatchLigandStatus[] | undefined;
+      let totalLigandsFromLog: number | undefined;
+      if (isBatchRun) {
+        const summaryLog = details.files?.log;
+        const bestDir = details.files?.best_poses;
+        const parsed: BatchLigandStatus[] = [];
+
+        if (summaryLog && fs.existsSync(summaryLog)) {
+          if (!logContent) {
+            logContent = fs.readFileSync(summaryLog, 'utf-8');
+          }
+          const lines = logContent.split('\n');
+          const bestRegex = /^\s*(\S+):\s*Best err=([-\d.]+),\s*pb=(\d)\/4/;
+          const noResRegex = /^\s*(\S+):\s*No results/;
+          const totalRegex = /Total molecules\s*:\s*(\d+)/i;
+          const totalMatch = logContent.match(totalRegex);
+          if (totalMatch) {
+            totalLigandsFromLog = parseInt(totalMatch[1], 10);
+          }
+
+          for (const line of lines) {
+            const bestMatch = line.match(bestRegex);
+            if (bestMatch) {
+              const name = bestMatch[1];
+              const ligandPath = bestDir ? path.join(bestDir, `${name}.sdf`) : '';
+              parsed.push({
+                name,
+                path: ligandPath,
+                status: 'completed',
+                error_estimate: parseFloat(bestMatch[2]),
+                pb_count: parseInt(bestMatch[3], 10),
+              });
+              continue;
+            }
+
+            const noResMatch = line.match(noResRegex);
+            if (noResMatch) {
+              const name = noResMatch[1];
+              parsed.push({
+                name,
+                path: bestDir ? path.join(bestDir, `${name}.sdf`) : '',
+                status: 'failed',
+                error_message: 'No results',
+              });
+            }
+          }
+        }
+
+        if (parsed.length > 0) {
+          ligandStatuses = parsed;
+        } else if (bestDir && fs.existsSync(bestDir)) {
+          const files = fs.readdirSync(bestDir).filter((f) => f.endsWith('.sdf'));
+          ligandStatuses = files.map((file) => ({
+            name: path.basename(file, '.sdf'),
+            path: path.join(bestDir, file),
+            status: 'completed',
+          }));
         }
       }
 
@@ -169,11 +254,13 @@ export function HistoryScreen(): React.ReactElement {
         totalPoses,
         physicalPoses,
         poses: transformedPoses,
-        bestPosePath: details.files?.best_pose || selectedRun.path,
-        allPosesPath: details.files?.all_poses || '',
+        bestPosePath: details.files?.best_pose || details.files?.best_poses || selectedRun.path,
+        allPosesPath: details.files?.all_poses || details.files?.all_poses_dir || '',
         logPath: details.files?.log || '',
         receptor: selectedRun.receptor,
         ligand: selectedRun.ligand,
+        totalLigands: ligandStatuses?.length ?? totalLigandsFromLog,
+        ligandStatuses,
       };
 
       // Set results and navigate to results screen
@@ -212,11 +299,12 @@ export function HistoryScreen(): React.ReactElement {
         }
 
         setConfirmDelete(false);
+        setDeleteError(null);
       } else {
-        setError(result.error || 'Failed to delete run');
+        setDeleteError(result.error || 'Failed to delete run');
       }
     } catch (err: any) {
-      setError(`Failed to delete run: ${err.message}`);
+      setDeleteError(`Failed to delete run: ${err.message}`);
     } finally {
       setDeleting(false);
     }
@@ -227,9 +315,9 @@ export function HistoryScreen(): React.ReactElement {
 
     // Confirmation mode
     if (confirmDelete) {
-      if (input === 'y') {
+      if (isKey(input, 'y')) {
         deleteRun();
-      } else if (input === 'n' || key.escape) {
+      } else if (isKey(input, 'n') || key.escape) {
         setConfirmDelete(false);
       }
       return;
@@ -239,7 +327,7 @@ export function HistoryScreen(): React.ReactElement {
     if (key.upArrow) setSelectedIndex((i) => Math.max(0, i - 1));
     else if (key.downArrow) setSelectedIndex((i) => Math.min(runs.length - 1, i + 1));
     else if (key.return) viewResults();
-    else if (input === 'd' && runs.length > 0) setConfirmDelete(true);
+    else if (isKey(input, 'd') && runs.length > 0) setConfirmDelete(true);
     else if (key.escape) setScreen('welcome');
   });
 
@@ -269,25 +357,26 @@ export function HistoryScreen(): React.ReactElement {
   if (confirmDelete && runs[selectedIndex]) {
     return (
       <Box flexDirection="column" gap={1}>
-        <Box borderStyle="double" borderColor="red" paddingX={2} paddingY={1}>
+        <Box borderStyle="round" borderColor="gray" paddingX={1}>
           <Box flexDirection="column">
-            <Text bold color="red">Delete Run?</Text>
-            <Box marginTop={1}>
-              <Text color="white">Are you sure you want to delete this run?</Text>
-            </Box>
-            <Box marginTop={1}>
-              <Text color="yellow" bold>{runs[selectedIndex].name}</Text>
-            </Box>
-            <Box marginTop={1}>
-              <Text color="gray">This action cannot be undone.</Text>
-            </Box>
+            <Text bold color="white">Delete run?</Text>
+            <Text color="gray" dimColor>This action cannot be undone.</Text>
+            <Text color="yellow">{runs[selectedIndex].name}</Text>
+            {deleteError && (
+              <Text color="red" dimColor>Error: {deleteError}</Text>
+            )}
           </Box>
         </Box>
 
-        <Box marginTop={2} gap={4}>
-          <Text color="red" bold>[y] Yes, delete</Text>
-          <Text color="cyan">[n] No, cancel</Text>
-          <Text color="gray">[Esc] Cancel</Text>
+        <Box paddingX={1}>
+          <Text color="cyan" dimColor>[y]</Text>
+          <Text color="gray" dimColor> delete </Text>
+          <Text color="gray" dimColor>· </Text>
+          <Text color="cyan" dimColor>[n]</Text>
+          <Text color="gray" dimColor> cancel </Text>
+          <Text color="gray" dimColor>· </Text>
+          <Text color="cyan" dimColor>[esc]</Text>
+          <Text color="gray" dimColor> close</Text>
         </Box>
       </Box>
     );

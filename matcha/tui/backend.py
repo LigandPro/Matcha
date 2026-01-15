@@ -90,6 +90,7 @@ class RPCHandler:
             "list_runs": self.list_runs,
             "get_run_details": self.get_run_details,
             "get_poses": self.get_poses,
+            "delete_run": self.delete_run,
             "check_gpu": self.check_gpu,
             "check_checkpoints": self.check_checkpoints,
             "shutdown": self.shutdown,
@@ -331,7 +332,10 @@ class RPCHandler:
         for item in p.iterdir():
             if item.is_dir():
                 log_files = list(item.glob("*.log")) + list(item.glob("**/*.log"))
-                if log_files or list(item.glob("*_best.sdf")):
+                has_single_best = bool(list(item.glob("*_best.sdf")))
+                batch_best_dir = item / "best_poses"
+                has_batch_best = batch_best_dir.is_dir() and any(batch_best_dir.glob("*.sdf"))
+                if log_files or has_single_best or has_batch_best:
                     stat = item.stat()
                     mtime = stat.st_mtime
 
@@ -353,7 +357,7 @@ class RPCHandler:
                         name=item.name,
                         path=str(item),
                         date=datetime.fromtimestamp(mtime).isoformat(),
-                        status="completed" if list(item.glob("*_best.sdf")) else "unknown",
+                        status="completed" if (has_single_best or has_batch_best) else "unknown",
                         receptor=receptor,
                         ligand=ligand,
                     )
@@ -386,6 +390,19 @@ class RPCHandler:
             matches = list(p.glob(pattern))
             if matches:
                 details["files"][key] = str(matches[0])
+
+        batch_best_dir = p / "best_poses"
+        batch_all_dir = p / "all_poses"
+        batch_logs_dir = p / "logs"
+        if batch_best_dir.is_dir():
+            details["files"]["best_poses"] = str(batch_best_dir)
+            details["is_batch"] = True
+        if batch_all_dir.is_dir():
+            details["files"]["all_poses_dir"] = str(batch_all_dir)
+            details["is_batch"] = True
+        if batch_logs_dir.is_dir():
+            details["files"]["logs_dir"] = str(batch_logs_dir)
+            details["is_batch"] = True
 
         # Try to parse log for metrics and input files
         log_file = details["files"].get("log")

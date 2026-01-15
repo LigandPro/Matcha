@@ -2,6 +2,7 @@ import React from 'react';
 import { Box, Text, useInput } from 'ink';
 import { useStore } from '../store/index.js';
 import { truncatePath } from '../utils/format.js';
+import { isKey } from '../utils/keyboard.js';
 import * as path from 'path';
 
 export function SetupReview(): React.ReactElement {
@@ -36,7 +37,7 @@ export function SetupReview(): React.ReactElement {
       setScreen('setup-params');
       return;
     }
-    if (key.return || input === 's') {
+    if (key.return || isKey(input, 's')) {
       startDocking();
     }
   });

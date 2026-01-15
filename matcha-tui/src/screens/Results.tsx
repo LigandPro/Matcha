@@ -10,8 +10,9 @@ import * as fs from 'fs';
 import * as os from 'os';
 import { useStore } from '../store/index.js';
 import { icons } from '../utils/colors.js';
-import { formatDuration } from '../utils/format.js';
+import { formatDuration, truncatePath } from '../utils/format.js';
 import { generateMolstarViewer } from '../utils/molstar-viewer.js';
+import { isKey } from '../utils/keyboard.js';
 import type { BatchLigandStatus } from '../types/index.js';
 
 type MenuAction = 'new' | 'view3d' | 'open' | 'toggle' | 'back' | 'home';
@@ -37,7 +38,11 @@ export function ResultsScreen(): React.ReactElement {
   const results = useStore((s) => s.results);
   const setError = useStore((s) => s.setError);
   const setNotification = useStore((s) => s.setNotification);
-  const [viewMode, setViewMode] = useState<'summary' | 'ligands'>('summary');
+  const [viewMode, setViewMode] = useState<'summary' | 'ligands' | 'ligand-detail'>('summary');
+  const [selectedTopIndex, setSelectedTopIndex] = useState(0);
+  const [selectedLigandIndex, setSelectedLigandIndex] = useState(0);
+  const [detailReturnView, setDetailReturnView] = useState<'summary' | 'ligands'>('summary');
+  const [activeLigandIndex, setActiveLigandIndex] = useState<number | null>(null);
   const [viewer3DInfo, setViewer3DInfo] = useState<{
     url: string;
     port: number;
@@ -50,9 +55,28 @@ export function ResultsScreen(): React.ReactElement {
     if (!outputPath) return;
 
     // Get directory path from bestPosePath (remove filename if present)
-    const dirPath = outputPath.endsWith('.sdf')
+    let dirPath = outputPath.endsWith('.sdf')
       ? path.dirname(outputPath)
       : outputPath;
+    const baseName = path.basename(dirPath);
+    if (baseName === 'best_poses' || baseName === 'all_poses') {
+      dirPath = path.dirname(dirPath);
+    }
+
+    if (!fs.existsSync(dirPath)) {
+      setError(`Output directory not found: ${dirPath}`);
+      return;
+    }
+
+    const isSSH = Boolean(
+      process.env.SSH_CONNECTION ||
+      process.env.SSH_TTY ||
+      process.env.SSH_CLIENT
+    );
+    if (isSSH) {
+      setNotification(`Output directory: ${dirPath}`);
+      return;
+    }
 
     // Platform-specific file explorer commands
     const command = process.platform === 'darwin'
@@ -63,6 +87,7 @@ export function ResultsScreen(): React.ReactElement {
 
     exec(command, (error) => {
       if (error) {
+        setNotification(`Could not open folder automatically. Path: ${dirPath}`);
         console.error('Failed to open folder:', error);
       }
     });
@@ -70,6 +95,14 @@ export function ResultsScreen(): React.ReactElement {
 
   const view3D = async () => {
     if (!results) return;
+    const isBatchRun =
+      (results.ligandStatuses && results.ligandStatuses.length > 0) ||
+      (results.totalLigands ?? 0) > 1;
+
+    if (isBatchRun) {
+      setNotification('3D viewer is not available for batch runs. Open a ligand SDF from best_poses/all_poses.');
+      return;
+    }
 
     try {
       // bestPosePath can be either a directory or a file path
@@ -181,29 +214,88 @@ export function ResultsScreen(): React.ReactElement {
     }
   };
 
+  const ligandList = results?.ligandStatuses ?? [];
+  const isBatch =
+    (results?.ligandStatuses && results.ligandStatuses.length > 0) ||
+    (results?.totalLigands ?? 0) > 1;
+  const topLigands = ligandList
+    .map((ligand, index) => ({ ligand, index }))
+    .filter((item) => item.ligand.status === 'completed' && item.ligand.error_estimate !== undefined)
+    .sort((a, b) => (a.ligand.error_estimate ?? 999) - (b.ligand.error_estimate ?? 999))
+    .slice(0, 10);
+
   useInput((input, key) => {
+    if (isBatch && viewMode === 'ligand-detail') {
+      if (key.escape || isKey(input, 'b') || key.leftArrow) {
+        setViewMode(detailReturnView);
+        return;
+      }
+    }
+
+    if (isBatch && viewMode === 'summary') {
+      if (key.upArrow && topLigands.length > 0) {
+        setSelectedTopIndex((i) => Math.max(0, i - 1));
+        return;
+      }
+      if (key.downArrow && topLigands.length > 0) {
+        setSelectedTopIndex((i) => Math.min(topLigands.length - 1, i + 1));
+        return;
+      }
+      if (key.return && topLigands[selectedTopIndex]) {
+        setActiveLigandIndex(topLigands[selectedTopIndex].index);
+        setDetailReturnView('summary');
+        setViewMode('ligand-detail');
+        return;
+      }
+    }
+
+    if (isBatch && viewMode === 'ligands') {
+      if (key.upArrow && ligandList.length > 0) {
+        setSelectedLigandIndex((i) => Math.max(0, i - 1));
+        return;
+      }
+      if (key.downArrow && ligandList.length > 0) {
+        setSelectedLigandIndex((i) => Math.min(ligandList.length - 1, i + 1));
+        return;
+      }
+      if (key.return && ligandList[selectedLigandIndex]) {
+        setActiveLigandIndex(selectedLigandIndex);
+        setDetailReturnView('ligands');
+        setViewMode('ligand-detail');
+        return;
+      }
+    }
+
     // Arrow key shortcuts
-    if (key.leftArrow) {
+    if (key.leftArrow && viewMode !== 'ligand-detail') {
       handleMenuAction('back');
       return;
     }
-    if (key.rightArrow) {
+    if (key.rightArrow && viewMode !== 'ligand-detail') {
       handleMenuAction('new');
       return;
     }
 
     // Keyboard shortcuts (always available)
-    if (input === 'n') {
+    if (isKey(input, 'n')) {
       handleMenuAction('new');
-    } else if (input === 'h') {
+    } else if (isKey(input, 'h')) {
       handleMenuAction('home');
-    } else if (input === 'b') {
+    } else if (isKey(input, 'b') && viewMode !== 'ligand-detail') {
       handleMenuAction('back');
-    } else if (input === 'l' && results?.ligandStatuses) {
-      handleMenuAction('toggle');
-    } else if (input === 'o') {
+    } else if (isKey(input, 'l') && isBatch) {
+      if (viewMode === 'summary') {
+        const selected = topLigands[selectedTopIndex];
+        if (selected) {
+          setSelectedLigandIndex(selected.index);
+        }
+        setViewMode('ligands');
+      } else if (viewMode === 'ligands') {
+        setViewMode('summary');
+      }
+    } else if (isKey(input, 'o')) {
       handleMenuAction('open');
-    } else if (input === 'v') {
+    } else if (isKey(input, 'v')) {
       handleMenuAction('view3d');
     }
   });
@@ -212,7 +304,6 @@ export function ResultsScreen(): React.ReactElement {
     return <Box><Text color="yellow">No results available</Text></Box>;
   }
 
-  const isBatch = results.totalLigands && results.totalLigands > 1;
   const bestPose = results.poses[0];
 
   // Calculate batch statistics
@@ -305,11 +396,56 @@ export function ResultsScreen(): React.ReactElement {
       <Box flexDirection="column" marginTop={1}>
         <Text bold color="white" underline>Output</Text>
         <Box flexDirection="column" marginLeft={2} marginTop={1}>
-          <Box>
-            <Text color="gray">Directory:</Text>
-            <Text> </Text>
-            <Text color="blue">{results.bestPosePath}</Text>
-          </Box>
+          {isBatch ? (
+            <>
+              <Box>
+                <Text color="gray">Run dir:</Text>
+                <Text> </Text>
+                <Text color="blue">{path.dirname(results.bestPosePath)}</Text>
+              </Box>
+              <Box>
+                <Text color="gray">Best poses:</Text>
+                <Text> </Text>
+                <Text color="blue">{results.bestPosePath}</Text>
+              </Box>
+              {results.allPosesPath && (
+                <Box>
+                  <Text color="gray">All poses:</Text>
+                  <Text> </Text>
+                  <Text color="blue">{results.allPosesPath}</Text>
+                </Box>
+              )}
+              {results.logPath && (
+                <Box>
+                  <Text color="gray">Log file:</Text>
+                  <Text> </Text>
+                  <Text color="blue">{results.logPath}</Text>
+                </Box>
+              )}
+            </>
+          ) : (
+            <>
+              <Box>
+                <Text color="gray">Best pose:</Text>
+                <Text> </Text>
+                <Text color="blue">{results.bestPosePath}</Text>
+              </Box>
+              {results.allPosesPath && (
+                <Box>
+                  <Text color="gray">All poses:</Text>
+                  <Text> </Text>
+                  <Text color="blue">{results.allPosesPath}</Text>
+                </Box>
+              )}
+              {results.logPath && (
+                <Box>
+                  <Text color="gray">Log file:</Text>
+                  <Text> </Text>
+                  <Text color="blue">{results.logPath}</Text>
+                </Box>
+              )}
+            </>
+          )}
         </Box>
       </Box>
 
@@ -319,15 +455,15 @@ export function ResultsScreen(): React.ReactElement {
           <Text bold color="white" underline>Top Ligands by Error Estimate</Text>
           <Box flexDirection="column" marginTop={1}>
             <Box>
-              <Text color="gray" bold>{'Name'.padEnd(28)}{'Error'.padEnd(10)}{'PB'.padEnd(6)}Status</Text>
+              <Text color="gray" bold>{'  '}{'Name'.padEnd(28)}{'Error'.padEnd(10)}{'PB'.padEnd(6)}Status</Text>
             </Box>
-            {results.ligandStatuses
-              ?.filter((l) => l.status === 'completed' && l.error_estimate !== undefined)
-              .sort((a, b) => (a.error_estimate ?? 999) - (b.error_estimate ?? 999))
-              .slice(0, 10)
-              .map((lig, idx) => (
-                <LigandResultRow key={idx} ligand={lig} />
-              ))}
+            {topLigands.map((item, idx) => (
+              <LigandResultRow
+                key={`${item.index}-${item.ligand.name}`}
+                ligand={item.ligand}
+                selected={idx === selectedTopIndex}
+              />
+            ))}
           </Box>
         </Box>
       )}
@@ -338,11 +474,67 @@ export function ResultsScreen(): React.ReactElement {
           <Text bold color="white" underline>All Ligands</Text>
           <Box flexDirection="column" marginTop={1} height={15}>
             <Box>
-              <Text color="gray" bold>{'Name'.padEnd(28)}{'Error'.padEnd(10)}{'PB'.padEnd(6)}Status</Text>
+              <Text color="gray" bold>{'  '}{'Name'.padEnd(28)}{'Error'.padEnd(10)}{'PB'.padEnd(6)}Status</Text>
             </Box>
             {results.ligandStatuses.map((lig, idx) => (
-              <LigandResultRow key={idx} ligand={lig} />
+              <LigandResultRow key={idx} ligand={lig} selected={idx === selectedLigandIndex} />
             ))}
+          </Box>
+        </Box>
+      )}
+
+      {isBatch && viewMode === 'ligand-detail' && activeLigandIndex !== null && results.ligandStatuses?.[activeLigandIndex] && (
+        <Box flexDirection="column" marginTop={1}>
+          <Text bold color="white" underline>Ligand Details</Text>
+          <Box flexDirection="column" marginTop={1} marginLeft={2}>
+            <Box>
+              <Text color="gray">Name: </Text>
+              <Text color="white">{results.ligandStatuses[activeLigandIndex].name}</Text>
+            </Box>
+            <Box>
+              <Text color="gray">Status: </Text>
+              <Text color={results.ligandStatuses[activeLigandIndex].status === 'completed' ? 'green' : results.ligandStatuses[activeLigandIndex].status === 'failed' ? 'red' : 'yellow'}>
+                {results.ligandStatuses[activeLigandIndex].status}
+              </Text>
+            </Box>
+            {results.ligandStatuses[activeLigandIndex].error_estimate !== undefined && (
+              <Box>
+                <Text color="gray">Error estimate: </Text>
+                <Text color="cyan">{results.ligandStatuses[activeLigandIndex].error_estimate?.toFixed(3)}</Text>
+              </Box>
+            )}
+            {results.ligandStatuses[activeLigandIndex].pb_count !== undefined && (
+              <Box>
+                <Text color="gray">PoseBusters: </Text>
+                <Text color={results.ligandStatuses[activeLigandIndex].pb_count === 4 ? 'green' : 'yellow'}>
+                  {results.ligandStatuses[activeLigandIndex].pb_count}/4
+                </Text>
+              </Box>
+            )}
+            {results.ligandStatuses[activeLigandIndex].error_message && (
+              <Box>
+                <Text color="gray">Error: </Text>
+                <Text color="red">{results.ligandStatuses[activeLigandIndex].error_message}</Text>
+              </Box>
+            )}
+            <Box marginTop={1}>
+              <Text color="gray">Best pose: </Text>
+              <Text color="blue">
+                {truncatePath(path.join(results.bestPosePath, 'best_poses', `${results.ligandStatuses[activeLigandIndex].name}.sdf`), 60)}
+              </Text>
+            </Box>
+            <Box>
+              <Text color="gray">All poses: </Text>
+              <Text color="blue">
+                {truncatePath(path.join(results.bestPosePath, 'all_poses', `${results.ligandStatuses[activeLigandIndex].name}_poses.sdf`), 60)}
+              </Text>
+            </Box>
+            <Box>
+              <Text color="gray">Log: </Text>
+              <Text color="blue">
+                {truncatePath(path.join(results.bestPosePath, 'logs', `${results.ligandStatuses[activeLigandIndex].name}.log`), 60)}
+              </Text>
+            </Box>
           </Box>
         </Box>
       )}
@@ -367,23 +559,39 @@ export function ResultsScreen(): React.ReactElement {
               </Box>
             ))}
           </Box>
+          <Box marginTop={1} flexDirection="column">
+            <Text color="gray" dimColor>
+              Checks: 1=not too far away · 2=no internal clash
+            </Text>
+            <Text color="gray" dimColor>
+              {'        '}3=no clashes · 4=no volume clash
+            </Text>
+          </Box>
         </Box>
       )}
 
       {/* Navigation */}
       <Box marginTop={2} gap={4}>
         <Text color="cyan">[n or →] New docking</Text>
-        {isBatch && <Text color="yellow">[l] {viewMode === 'summary' ? 'All ligands' : 'Summary'}</Text>}
+        {isBatch && viewMode !== 'ligand-detail' && <Text color="yellow">[l] {viewMode === 'summary' ? 'All ligands' : 'Summary'}</Text>}
+        {isBatch && viewMode !== 'ligand-detail' && <Text color="gray">[Enter] View ligand</Text>}
+        {isBatch && viewMode === 'ligand-detail' && <Text color="gray">[b or Esc] Back to list</Text>}
         <Text color="magenta">[v] View 3D</Text>
         <Text color="magenta">[o] Open folder</Text>
-        <Text color="gray">[b or ←] Back</Text>
+        {viewMode !== 'ligand-detail' && <Text color="gray">[b or ←] Back</Text>}
         <Text color="gray">[h] Home</Text>
       </Box>
     </Box>
   );
 }
 
-function LigandResultRow({ ligand }: { ligand: BatchLigandStatus }): React.ReactElement {
+function LigandResultRow({
+  ligand,
+  selected = false,
+}: {
+  ligand: BatchLigandStatus;
+  selected?: boolean;
+}): React.ReactElement {
   const statusIcon = {
     pending: icons.pending,
     running: icons.running,
@@ -400,14 +608,17 @@ function LigandResultRow({ ligand }: { ligand: BatchLigandStatus }): React.React
 
   return (
     <Box>
-      <Text color="white">{ligand.name.substring(0, 27).padEnd(28)}</Text>
-      <Text color="cyan">
+      <Text color={selected ? 'cyan' : 'gray'}>{selected ? '▸ ' : '  '}</Text>
+      <Text color={selected ? 'cyan' : 'white'} bold={selected}>
+        {ligand.name.substring(0, 27).padEnd(28)}
+      </Text>
+      <Text color="cyan" dimColor={!selected}>
         {ligand.error_estimate !== undefined ? ligand.error_estimate.toFixed(3).padEnd(10) : '-'.padEnd(10)}
       </Text>
-      <Text color={ligand.pb_count === 4 ? 'green' : 'yellow'}>
+      <Text color={ligand.pb_count === 4 ? 'green' : 'yellow'} dimColor={!selected}>
         {ligand.pb_count !== undefined ? `${ligand.pb_count}/4`.padEnd(6) : '-'.padEnd(6)}
       </Text>
-      <Text color={statusColor}>{statusIcon}</Text>
+      <Text color={statusColor} dimColor={!selected}>{statusIcon}</Text>
       {ligand.status === 'failed' && ligand.error_message && (
         <Text color="red"> {ligand.error_message.substring(0, 20)}</Text>
       )}

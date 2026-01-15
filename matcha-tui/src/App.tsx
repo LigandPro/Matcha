@@ -167,23 +167,6 @@ export function App(): React.ReactElement {
         />
       </Box>
 
-      {/* Error banner */}
-      {error && (
-        <Box marginY={1} paddingX={2} flexShrink={0}>
-          <Text color="red" bold>
-            Error: {error}
-          </Text>
-        </Box>
-      )}
-
-      {notification && (
-        <Box marginY={1} paddingX={2} flexShrink={0}>
-          <Text color="green" bold>
-            {notification}
-          </Text>
-        </Box>
-      )}
-
       {/* Main content */}
       <Box flexGrow={1} flexShrink={1} minHeight={0} flexDirection="column" paddingX={1}>
         <ScreenRouter screen={screen} />

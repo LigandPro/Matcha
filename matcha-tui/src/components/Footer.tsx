@@ -44,6 +44,7 @@ const SCREEN_SHORTCUTS: Record<Screen, Shortcut[]> = {
   ],
   running: [
     { key: 'c', label: 'Cancel' },
+    { key: 'Esc', label: 'Home' },
   ],
   results: [
     { key: '←', label: 'Back' },
@@ -62,6 +63,8 @@ export function Footer({ screen, isRunning }: FooterProps): React.ReactElement {
   const { stdout } = useStdout();
   const shortcuts = SCREEN_SHORTCUTS[screen] || [];
   const debugMode = useStore((s) => s.debugMode);
+  const error = useStore((s) => s.error);
+  const notification = useStore((s) => s.notification);
 
   // Show background task indicator if docking is running but user is not on running screen
   const hasBackgroundTask = isRunning && screen !== 'running';
@@ -96,19 +99,31 @@ export function Footer({ screen, isRunning }: FooterProps): React.ReactElement {
         </Box>
       )}
 
+      {error && (
+        <Box paddingX={1}>
+          <Text color="red" dimColor>Error: {error}</Text>
+        </Box>
+      )}
+
+      {notification && (
+        <Box paddingX={1}>
+          <Text color="gray" dimColor>{notification}</Text>
+        </Box>
+      )}
+
       <Box gap={2} paddingX={1}>
         {shortcuts.map(({ key, label, disabled }) => (
           <Box key={key}>
-            <Text color={disabled ? 'gray' : 'cyan'} bold={!disabled} dimColor={disabled}>
+            <Text color={disabled ? 'gray' : 'cyan'} dimColor>
               [{key}]
             </Text>
-            <Text color={disabled ? 'gray' : 'white'} dimColor={disabled}>
+            <Text color="gray" dimColor>
               {' '}{label}
             </Text>
           </Box>
         ))}
         {!shortcuts.length && (
-          <Text color="gray">Press ? for help</Text>
+          <Text color="gray" dimColor>Press ? for help</Text>
         )}
         {debugMode && (
           <Box marginLeft={2}>

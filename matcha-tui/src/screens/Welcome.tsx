@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { useStore } from '../store/index.js';
+import { isKey } from '../utils/keyboard.js';
 import type { Screen } from '../types/index.js';
 
 const menuItems = [
@@ -14,13 +15,13 @@ export function Welcome(): React.ReactElement {
   const [selectedIndex, setSelectedIndex] = useState(0);
 
   useInput((input, key) => {
-    if (input === 'q' || key.escape) {
+    if (isKey(input, 'q') || key.escape) {
       process.exit(0);
     }
-    if (input === 'n') {
+    if (isKey(input, 'n')) {
       setScreen('setup');
     }
-    if (input === 'h') {
+    if (isKey(input, 'h')) {
       setScreen('history');
     }
     if (key.upArrow) {

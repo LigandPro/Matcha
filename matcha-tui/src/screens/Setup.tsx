@@ -2,6 +2,7 @@ import React from 'react';
 import { Box, Text, useInput } from 'ink';
 import SelectInput from 'ink-select-input';
 import { useStore } from '../store/index.js';
+import { isKey } from '../utils/keyboard.js';
 import type { DockingMode } from '../types/index.js';
 
 const modeItems = [
@@ -23,7 +24,7 @@ export function Setup(): React.ReactElement {
   };
 
   useInput((input, key) => {
-    if (key.escape || input === 'q') {
+    if (key.escape || isKey(input, 'q')) {
       setScreen('welcome');
     }
   });
