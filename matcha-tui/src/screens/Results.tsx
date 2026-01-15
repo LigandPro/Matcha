@@ -81,7 +81,11 @@ export function ResultsScreen(): React.ReactElement {
 
       // Find paths to structure files
       const proteinPath = path.join(resultDir, 'work/datasets/any_conf/sample_0/sample_0_protein.pdb');
-      const ligandPath = path.join(resultDir, `${runName}_best.sdf`);
+      // Use poses file (all poses) instead of best pose only
+      const ligandPath = path.join(resultDir, `${runName}_poses.sdf`);
+
+      // Fallback to best pose if poses file doesn't exist
+      const posesPath = fs.existsSync(ligandPath) ? ligandPath : path.join(resultDir, `${runName}_best.sdf`);
 
       // Check if files exist
       if (!fs.existsSync(proteinPath)) {
@@ -89,18 +93,27 @@ export function ResultsScreen(): React.ReactElement {
         return;
       }
 
-      if (!fs.existsSync(ligandPath)) {
+      if (!fs.existsSync(posesPath)) {
         setError('Ligand file not found');
         return;
       }
+
+      // Prepare poses metadata for viewer
+      const posesMetadata = results.poses.map((pose) => ({
+        rank: pose.rank,
+        error_estimate: pose.error_estimate ?? 0,
+        pb_count: pose.pb_count ?? 0,
+        checks: pose.checks,
+      }));
 
       // Generate HTML viewer
       const htmlPath = path.join(resultDir, 'molstar_viewer.html');
       await generateMolstarViewer({
         proteinPath,
-        ligandPath,
+        ligandPath: posesPath,
         outputHtmlPath: htmlPath,
-        title: `Matcha Docking - ${results.runName}`
+        title: `Matcha Docking - ${results.runName}`,
+        poses: posesMetadata,
       });
 
       // Check if running in SSH session
