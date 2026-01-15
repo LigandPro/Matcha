@@ -16,12 +16,168 @@ if TYPE_CHECKING:
     from matcha.tui.backend import DockingJob
 
 
+BANNER = r"""
+███╗   ███╗ █████╗ ████████╗ ██████╗██╗  ██╗ █████╗
+████╗ ████║██╔══██╗╚══██╔══╝██╔════╝██║  ██║██╔══██╗
+██╔████╔██║███████║   ██║   ██║     ███████║███████║
+██║╚██╔╝██║██╔══██║   ██║   ██║     ██╔══██║██╔══██║
+██║ ╚═╝ ██║██║  ██║   ██║   ╚██████╗██║  ██║██║  ██║
+╚═╝     ╚═╝╚═╝  ╚═╝   ╚═╝    ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝
+"""
+
+
 def find_ligands(ligand_dir: Path, extensions: tuple = (".sdf", ".mol", ".mol2")) -> list[Path]:
     """Find all ligand files in a directory."""
     ligands = []
     for ext in extensions:
         ligands.extend(ligand_dir.glob(f"*{ext}"))
     return sorted(ligands, key=lambda p: p.name.lower())
+
+
+def _format_runtime(seconds: float) -> str:
+    secs = int(round(seconds))
+    days, rem = divmod(secs, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, rem = divmod(rem, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes:
+        parts.append(f"{minutes}m")
+    parts.append(f"{rem}s")
+    return " ".join(parts)
+
+
+def _split_multi_sdf(sdf_path: Path) -> list[tuple[str, "Chem.Mol"]]:
+    from rdkit import Chem
+
+    molecules: list[tuple[str, Chem.Mol]] = []
+    suppl = Chem.SDMolSupplier(str(sdf_path), removeHs=False, sanitize=False)
+    for idx, mol in enumerate(suppl):
+        if mol is None:
+            continue
+        name = mol.GetProp("_Name") if mol.HasProp("_Name") else f"mol_{idx}"
+        name = name.strip().replace(" ", "_").replace("/", "_").replace("\\", "_")
+        if not name:
+            name = f"mol_{idx}"
+        molecules.append((name, mol))
+    return molecules
+
+
+def _prepare_batch_dataset(
+    protein: Path,
+    molecules: list[tuple[str, "Chem.Mol"]],
+    dataset_dir: Path,
+) -> list[str]:
+    from rdkit import Chem
+
+    dataset_dir.mkdir(parents=True, exist_ok=True)
+    uids: list[str] = []
+    for name, mol in molecules:
+        uid = name
+        sample_dir = dataset_dir / uid
+        sample_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(protein, sample_dir / f"{uid}_protein.pdb")
+        writer = Chem.SDWriter(str(sample_dir / f"{uid}_ligand.sdf"))
+        writer.write(mol)
+        writer.close()
+        uids.append(uid)
+    return uids
+
+
+def _create_batch_pocket_centers(
+    pocket_center: tuple[float, float, float],
+    molecule_uids: list[str],
+    n_samples: int,
+    output_path: Path,
+) -> None:
+    import numpy as np
+
+    pocket_centers: dict[str, list[dict]] = {}
+    ligand_center = np.array(pocket_center)
+    protein_center = np.zeros(3)
+    for uid in molecule_uids:
+        for conf_idx in range(n_samples):
+            pocket_centers[f"{uid}_mol0_conf{conf_idx}"] = [{
+                "tr_pred_init": ligand_center,
+                "full_protein_center": protein_center,
+            }]
+    np.save(output_path, [pocket_centers])
+
+
+def _autobox_from_ligand(ligand: Path) -> tuple[float, float, float]:
+    import numpy as np
+    from rdkit import Chem
+
+    mol = Chem.MolFromMolFile(str(ligand), removeHs=False, sanitize=False) if ligand.suffix.lower() in {".mol", ".mol2"} else None
+    if mol is None and ligand.suffix.lower() == ".pdb":
+        mol = Chem.MolFromPDBFile(str(ligand), removeHs=False, sanitize=False)
+    if mol is None:
+        suppl = Chem.SDMolSupplier(str(ligand), removeHs=False, sanitize=False)
+        mol = suppl[0] if suppl and len(suppl) > 0 else None
+    if mol is None or mol.GetNumConformers() == 0:
+        raise ValueError(f"Failed to read ligand for autobox: {ligand}")
+    mol = Chem.RemoveAllHs(mol, sanitize=False)
+    return tuple(mol.GetConformer().GetPositions().mean(axis=0).tolist())
+
+
+def _rank_samples(sample_metrics: list[dict]) -> list[tuple[int, dict]]:
+    ranked_indices = sorted(
+        range(len(sample_metrics)),
+        key=lambda i: (
+            -int(sample_metrics[i].get("posebusters_filters_passed_count_fast", 0)),
+            float(sample_metrics[i].get("error_estimate_0", float("inf"))),
+        ),
+    )
+    return [(rank, sample_metrics[i]) for rank, i in enumerate(ranked_indices, start=1)]
+
+
+def _save_all_poses_for_uid(
+    metrics_data: dict,
+    uid: str,
+    out_path: Path,
+    filter_non_physical: bool = True,
+) -> tuple[list[tuple[int, dict]], int, int]:
+    import copy
+    from rdkit import Chem
+
+    if uid not in metrics_data:
+        return [], 0, 0
+    sample_data = metrics_data[uid]
+    orig_mol = sample_data["orig_mol"]
+    ranked = _rank_samples(sample_data["sample_metrics"])
+    best_pb_count = max([
+        int(s.get("posebusters_filters_passed_count_fast", 0))
+        for s in sample_data["sample_metrics"]
+    ])
+
+    ranked_filtered = [
+        (r, s) for r, s in ranked
+        if not filter_non_physical or int(s.get("posebusters_filters_passed_count_fast", 0)) == best_pb_count
+    ]
+    ranked_to_use = ranked_filtered if ranked_filtered else ranked
+
+    writer = Chem.SDWriter(str(out_path))
+    for rank, sample in ranked_to_use:
+        mol = copy.deepcopy(orig_mol)
+        conf = Chem.Conformer(orig_mol.GetNumAtoms())
+        for idx, (x, y, z) in enumerate(sample["pred_pos"]):
+            conf.SetAtomPosition(idx, (float(x), float(y), float(z)))
+        mol.RemoveAllConformers()
+        mol.AddConformer(conf, assignId=True)
+        mol.SetProp("_Name", f"{uid}_rank{rank}")
+        writer.write(mol)
+    writer.close()
+    return ranked_to_use, len(ranked_filtered), len(ranked)
+
+
+def _get_best_sample_idx(errs, pb_counts) -> int:
+    best_pb_count = max(pb_counts)
+    pb_count_indices = [i for i, v in enumerate(pb_counts) if v == best_pb_count]
+    best_score_idx = min(pb_count_indices, key=lambda i: errs[i])
+    return best_score_idx
 
 
 def _write_log_file(
@@ -129,6 +285,7 @@ def run_docking(job: "DockingJob") -> None:
     config = job.config
     emit = job.progress_callback
     job_start_time = time.time()
+    job_start_dt = datetime.now(timezone.utc)
 
     try:
         # Extract GPU FIRST and set CUDA_VISIBLE_DEVICES BEFORE any PyTorch imports
@@ -153,39 +310,9 @@ def run_docking(job: "DockingJob") -> None:
         center_y = config.get("center_y")
         center_z = config.get("center_z")
         autobox_ligand = config.get("autobox_ligand")
-
-        # Determine ligand list
-        ligands: list[Path] = []
-        if ligand_dir:
-            ligand_dir_path = Path(ligand_dir).expanduser().resolve()
-            if ligand_dir_path.is_dir():
-                ligands = find_ligands(ligand_dir_path)
-        elif ligand_path:
-            ligands = [Path(ligand_path).expanduser().resolve()]
-
-        if not ligands:
-            emit(ProgressEvent(type="error", message="No ligand files found"))
-            return
-
-        is_batch = len(ligands) > 1
-        total_ligands = len(ligands)
-
-        # Initialize ligand statuses for batch mode
-        ligand_statuses = [
-            LigandStatus(name=lig.name, path=str(lig), status="pending")
-            for lig in ligands
-        ]
-
-        if is_batch:
-            emit(ProgressEvent(
-                type="batch_start",
-                total_ligands=total_ligands,
-                message=f"Processing {total_ligands} ligands",
-                ligand_statuses=[ls.to_dict() for ls in ligand_statuses],
-            ))
-
-        if job.is_cancelled():
-            emit(ProgressEvent(type="cancelled", message="Job cancelled"))
+        batch_mode = ligand_dir is not None
+        if (ligand_path is None) == (ligand_dir is None):
+            emit(ProgressEvent(type="error", message="Specify either ligand or ligand_dir"))
             return
 
         # Import matcha modules (once for all ligands)
@@ -238,6 +365,472 @@ def run_docking(job: "DockingJob") -> None:
         emit(ProgressEvent(
             type="stage_done", stage="checkpoints", elapsed=time.time() - start_time
         ))
+
+        if job.is_cancelled():
+            emit(ProgressEvent(type="cancelled", message="Job cancelled"))
+            return
+
+        receptor = Path(receptor_path).expanduser().resolve()
+        if not receptor.exists():
+            emit(ProgressEvent(type="error", message=f"Receptor file not found: {receptor_path}"))
+            return
+
+        # Batch mode: match CLI behavior
+        if batch_mode:
+            ligand_dir_path = Path(ligand_dir).expanduser().resolve()
+            box_center_val = None
+            if not ligand_dir_path.exists():
+                emit(ProgressEvent(type="error", message=f"Ligand path not found: {ligand_dir}"))
+                return
+
+            if ligand_dir_path.is_file():
+                if ligand_dir_path.suffix.lower() != ".sdf":
+                    emit(ProgressEvent(type="error", message="Batch ligand file must be .sdf"))
+                    return
+                molecules = _split_multi_sdf(ligand_dir_path)
+            elif ligand_dir_path.is_dir():
+                molecules = []
+                for sdf_file in sorted(ligand_dir_path.glob("*.sdf")):
+                    molecules.extend(_split_multi_sdf(sdf_file))
+            else:
+                emit(ProgressEvent(type="error", message="ligand_dir must be a file or directory"))
+                return
+
+            if not molecules:
+                emit(ProgressEvent(type="error", message=f"No molecules found in {ligand_dir}"))
+                return
+
+            molecule_uids = sorted([name for name, _ in molecules])
+            total_ligands = len(molecule_uids)
+            ligand_statuses = [
+                LigandStatus(name=name, path=str(ligand_dir_path), status="pending")
+                for name in molecule_uids
+            ]
+
+            emit(ProgressEvent(
+                type="batch_start",
+                total_ligands=total_ligands,
+                message=f"Processing {total_ligands} ligands",
+                ligand_statuses=[ls.to_dict() for ls in ligand_statuses],
+            ))
+
+            if job.is_cancelled():
+                emit(ProgressEvent(type="cancelled", message="Job cancelled"))
+                return
+
+            # Prepare dataset for all ligands
+            emit(ProgressEvent(type="stage_start", stage="dataset", name="Preparing dataset"))
+            dataset_start = time.time()
+
+            dataset_dir = run_workdir / "datasets" / "any_conf"
+            dataset_dir.mkdir(parents=True, exist_ok=True)
+            _prepare_batch_dataset(receptor, molecules, dataset_dir)
+
+            pocket_centers_filename = None
+            if box_mode == "manual":
+                if not all(v is not None for v in [center_x, center_y, center_z]):
+                    emit(ProgressEvent(type="error", message="Manual box requires center_x/center_y/center_z"))
+                    return
+                pocket_centers_filename = run_workdir / "stage1_any_conf.npy"
+                box_center_val = (center_x, center_y, center_z)
+                _create_batch_pocket_centers(
+                    (center_x, center_y, center_z),
+                    molecule_uids,
+                    n_samples,
+                    pocket_centers_filename,
+                )
+            elif box_mode == "autobox" and autobox_ligand:
+                try:
+                    box_center = _autobox_from_ligand(Path(autobox_ligand).expanduser().resolve())
+                except Exception as exc:
+                    emit(ProgressEvent(type="error", message=str(exc)))
+                    return
+                box_center_val = box_center
+                pocket_centers_filename = run_workdir / "stage1_any_conf.npy"
+                _create_batch_pocket_centers(
+                    box_center,
+                    molecule_uids,
+                    n_samples,
+                    pocket_centers_filename,
+                )
+
+            emit(ProgressEvent(
+                type="stage_done",
+                stage="dataset",
+                elapsed=time.time() - dataset_start,
+            ))
+
+            if job.is_cancelled():
+                emit(ProgressEvent(type="cancelled", message="Job cancelled"))
+                return
+
+            # Build config (CLI-like)
+            conf = OmegaConf.create({
+                "seed": 42,
+                "tr_std": 5.0,
+                "use_time": True,
+                "dropout_rate": 0.0,
+                "num_kernel_pos_encoder": 128,
+                "objective": "ranking",
+                "llm_emb_dim": 480,
+                "use_all_chains": True,
+                "checkpoints_folder": str(checkpoint_path),
+                "cache_path": str(run_workdir / "cache"),
+                "data_folder": str(run_workdir / "data"),
+                "inference_results_folder": str(run_workdir / "runs"),
+                "any_data_dir": str(dataset_dir),
+                "test_dataset_types": ["any_conf"],
+            })
+
+            # ESM embeddings (once for batch)
+            emit(ProgressEvent(type="stage_start", stage="esm", name="Computing ESM embeddings"))
+            esm_start = time.time()
+            compute_sequences(conf)
+            emit(ProgressEvent(type="stage_progress", stage="esm", progress=30))
+            if job.is_cancelled():
+                emit(ProgressEvent(type="cancelled", message="Job cancelled"))
+                return
+            compute_esm_embeddings(conf)
+            emit(ProgressEvent(
+                type="stage_done",
+                stage="esm",
+                elapsed=time.time() - esm_start,
+            ))
+
+            if job.is_cancelled():
+                emit(ProgressEvent(type="cancelled", message="Job cancelled"))
+                return
+
+            # Run inference pipeline for batch
+            def inference_progress_callback(event_type, stage, name, elapsed=None, progress=None):
+                if event_type == "stage_start":
+                    emit(ProgressEvent(type="stage_start", stage=stage, name=name))
+                elif event_type == "stage_progress":
+                    emit(ProgressEvent(type="stage_progress", stage=stage, progress=progress))
+                elif event_type == "stage_done":
+                    emit(ProgressEvent(type="stage_done", stage=stage, elapsed=elapsed))
+
+            run_inference_pipeline(
+                conf,
+                run_name,
+                n_samples,
+                pocket_centers_filename,
+                num_workers=0,
+                progress_callback=inference_progress_callback,
+            )
+
+            if job.is_cancelled():
+                emit(ProgressEvent(type="cancelled", message="Job cancelled"))
+                return
+
+            # PoseBusters
+            emit(ProgressEvent(
+                type="stage_start",
+                stage="posebusters",
+                name="Physical validation",
+            ))
+            pose_start = time.time()
+            compute_fast_filters(conf, run_name, n_samples)
+            emit(ProgressEvent(
+                type="stage_done",
+                stage="posebusters",
+                elapsed=time.time() - pose_start,
+            ))
+
+            # Save best predictions
+            save_best_pred_to_sdf(conf, run_name)
+
+            preds_root = Path(conf.inference_results_folder) / run_name
+            dataset_name = "any_conf"
+            fast_metrics_path = preds_root / f"{dataset_name}_final_preds_fast_metrics.npy"
+            import numpy as np
+
+            metrics = np.load(fast_metrics_path, allow_pickle=True).item()
+
+            output_run_dir = output_path / run_name
+            best_dir = output_run_dir / "best_poses"
+            all_dir = output_run_dir / "all_poses"
+            logs_dir = output_run_dir / "logs"
+            best_dir.mkdir(parents=True, exist_ok=True)
+            all_dir.mkdir(parents=True, exist_ok=True)
+            logs_dir.mkdir(parents=True, exist_ok=True)
+
+            sdf_preds_dir = preds_root / dataset_name / "sdf_predictions"
+            for idx, mol_uid in enumerate(molecule_uids):
+                metrics_key = mol_uid if mol_uid in metrics else f"{mol_uid}_mol0"
+                if metrics_key not in metrics:
+                    ligand_statuses[idx].status = "failed"
+                    ligand_statuses[idx].error_message = "No results"
+                    emit(ProgressEvent(
+                        type="batch_progress",
+                        progress=int(100 * (idx + 1) / total_ligands),
+                        ligand_index=idx,
+                        total_ligands=total_ligands,
+                        ligand_statuses=[ls.to_dict() for ls in ligand_statuses],
+                    ))
+                    continue
+
+                mdata = metrics[metrics_key]
+                errs = np.array([float(s.get("error_estimate_0", float("inf"))) for s in mdata["sample_metrics"]])
+                pb_counts = np.array([int(s.get("posebusters_filters_passed_count_fast", 0)) for s in mdata["sample_metrics"]])
+                best_idx = _get_best_sample_idx(errs, pb_counts)
+
+                pred_sdf_src = sdf_preds_dir / f"{mol_uid}.sdf"
+                best_dest = best_dir / f"{mol_uid}.sdf"
+                all_dest = all_dir / f"{mol_uid}_poses.sdf"
+
+                if pred_sdf_src.exists():
+                    shutil.copyfile(pred_sdf_src, best_dest)
+
+                ranked_samples, kept_physical, total_samples = _save_all_poses_for_uid(
+                    metrics, metrics_key, all_dest, filter_non_physical=physical_only
+                )
+
+                ligand_statuses[idx].status = "completed"
+                if ranked_samples:
+                    ligand_statuses[idx].error_estimate = float(ranked_samples[0][1].get("error_estimate_0", 0))
+                    ligand_statuses[idx].pb_count = int(ranked_samples[0][1].get("posebusters_filters_passed_count_fast", 0))
+
+                # Per-ligand log (CLI style)
+                ligand_input = (run_workdir / "datasets" / "any_conf" / mol_uid / f"{mol_uid}_ligand.sdf").resolve()
+                per_log_path = logs_dir / f"{mol_uid}.log"
+                runtime_local = time.time() - job_start_time
+                log_lines = [
+                    BANNER.rstrip("\n"),
+                    "MATCHA DOCKING ENGINE  v0.1.0",
+                    "============================================================",
+                    "",
+                    "",
+                    "[ RUN INFO ]",
+                    f"  Start time       : {job_start_dt.isoformat()}Z",
+                    f"  Command          : batch run {run_name} (ligand {mol_uid})",
+                    f"  Workdir          : {output_run_dir.resolve()}",
+                    f"  Runtime          : {_format_runtime(runtime_local)}",
+                    "",
+                    "",
+                ]
+
+                if box_mode == "manual":
+                    log_lines.extend([
+                        "[ AUTODOCKING BOX ]",
+                        "  Mode             : manual center",
+                        f"  Center (Å)       : ({center_x:.3f}, {center_y:.3f}, {center_z:.3f})",
+                        "",
+                        "",
+                    ])
+                elif box_mode == "autobox" and autobox_ligand:
+                    log_lines.extend([
+                        "[ AUTODOCKING BOX ]",
+                        f"  Mode             : autobox from {Path(autobox_ligand).name}",
+                        "",
+                        "",
+                    ])
+                    if box_center_val is not None:
+                        log_lines.insert(-2, f"  Center (Å)       : ({box_center_val[0]:.3f}, {box_center_val[1]:.3f}, {box_center_val[2]:.3f})")
+                else:
+                    log_lines.extend([
+                        "[ DOCKING MODE ]",
+                        "  Mode             : blind docking (entire protein)",
+                        "",
+                        "",
+                    ])
+
+                log_lines.extend([
+                    "[ INPUT / OUTPUT FILES ]",
+                    f"  Receptor         : {receptor.resolve()}",
+                    f"  Ligand           : {ligand_input}",
+                    f"  Best pose SDF    : {best_dest.resolve()}",
+                    f"  All poses SDF    : {all_dest.resolve()}",
+                    f"  Log file         : {per_log_path.resolve()}",
+                    "",
+                    "",
+                    "[ SUMMARY ]",
+                    f"  Samples per ligand     : {n_samples}",
+                    f"  error_estimate_0 (Å)   : min={min(errs):.3f}, mean={float(np.mean(errs)):.3f}, max={max(errs):.3f}",
+                    f"  posebusters_fast checks: min={min(pb_counts)}/4, max={max(pb_counts)}/4",
+                    f"  Best sample            : rank={best_idx + 1}, error_estimate_0={errs[best_idx]:.3f}, posebusters_pass_fast={pb_counts[best_idx]}/4",
+                    f"  Filtered poses (pb_4/4): kept {kept_physical}/{total_samples}" + ("  [WARNING: none passed, keeping originals]" if physical_only and kept_physical == 0 else ""),
+                    "",
+                    "",
+                    "  Note: error_estimate_0 is a lower-is-better RMSD-like metric (Å).",
+                    "        Negative values indicate high model confidence, positive values indicate uncertainty.",
+                    "        Lower values = higher confidence in the predicted pose.",
+                    "",
+                    "",
+                    "  PoseBusters checks (4 boolean tests):",
+                    "    1. not_too_far_away   : ligand is close to protein (distance check)",
+                    "    2. no_internal_clash  : no bad bonds/angles in ligand geometry",
+                    "    3. no_clashes         : no inter-molecular clashes (ligand-protein)",
+                    "    4. no_volume_clash    : no vdW volume overlaps",
+                    "  Additional metric:",
+                    "    - buried_fraction     : fraction of ligand buried in protein (shown separately)",
+                    "",
+                    "[ POSE RANKING ]",
+                    "  mode  error_est_0(Å)  pb_4/4  not_far  no_int_clash  no_clash  no_vol_clash  buried_frac",
+                    "  --------------------------------------------------------------------------------------------",
+                ])
+                for mode, sample in ranked_samples:
+                    err = float(sample.get("error_estimate_0", float("inf")))
+                    pb_count_val = int(sample.get("posebusters_filters_passed_count_fast", 0))
+                    pb_flags = sample.get("posebusters_filters_fast", [])
+                    not_far = "✓" if len(pb_flags) > 0 and pb_flags[0] else "✗"
+                    no_int_clash = "✓" if len(pb_flags) > 1 and pb_flags[1] else "✗"
+                    no_clash = "✓" if len(pb_flags) > 2 and pb_flags[2] else "✗"
+                    no_vol_clash = "✓" if len(pb_flags) > 3 and pb_flags[3] else "✗"
+                    buried_frac = f"{pb_flags[4]:.2f}" if len(pb_flags) > 4 else "n/a"
+                    log_lines.append(
+                        f"  {mode:<3}     {err:>7.3f}       {pb_count_val}/4      {not_far:^4}     {no_int_clash:^8}     {no_clash:^5}     {no_vol_clash:^8}      {buried_frac:>6}"
+                    )
+
+                log_lines.extend([
+                    "",
+                    "Legend: ✓ = passed, ✗ = failed",
+                    "",
+                    "",
+                ])
+
+                if any(e > 0 for e in errs):
+                    log_lines.extend([
+                        "WARNING: Some poses have positive error_est_0 values.",
+                        "         This indicates reduced model confidence in those predictions.",
+                        "         Consider generating more samples or inspecting poses manually.",
+                        "",
+                        "",
+                    ])
+                if max(pb_counts) < 4:
+                    log_lines.extend([
+                        "WARNING: No poses passed all PoseBusters checks (pb_4/4).",
+                        "         Inspect poses or regenerate with more samples/box adjustments.",
+                        "",
+                        "",
+                    ])
+
+                log_lines.extend([
+                    "[ END ]",
+                    f"  Run finished at    : {datetime.now(timezone.utc).isoformat()}Z",
+                    f"  Total runtime      : {_format_runtime(runtime_local)}",
+                    f"  Workdir preserved  : {output_run_dir.resolve()}",
+                    "============================================================",
+                ])
+
+                per_log_path.write_text("\n".join(log_lines))
+
+                emit(ProgressEvent(
+                    type="batch_progress",
+                    progress=int(100 * (idx + 1) / total_ligands),
+                    ligand_index=idx,
+                    total_ligands=total_ligands,
+                    ligand_statuses=[ls.to_dict() for ls in ligand_statuses],
+                ))
+
+            # Batch summary log
+            end_time = datetime.now(timezone.utc)
+            runtime = (end_time - datetime.fromtimestamp(job_start_time, tz=timezone.utc)).total_seconds()
+            summary_log = output_run_dir / f"{run_name}.log"
+            command_parts = [
+                "matcha-tui",
+                "-r",
+                str(receptor.resolve()),
+                "--ligand-dir",
+                str(ligand_dir_path.resolve()),
+                "-o",
+                str(output_path.resolve()),
+                "--run-name",
+                run_name,
+                "--n-samples",
+                str(n_samples),
+            ]
+            if n_confs is not None:
+                command_parts.extend(["--n-confs", str(n_confs)])
+            if gpu is not None:
+                command_parts.extend(["--gpu", str(gpu)])
+            if checkpoints:
+                command_parts.extend(["--checkpoints", str(checkpoints)])
+            if physical_only:
+                command_parts.append("--physical-only")
+            if box_mode == "manual":
+                command_parts.extend([
+                    "--center-x", str(center_x),
+                    "--center-y", str(center_y),
+                    "--center-z", str(center_z),
+                ])
+            elif box_mode == "autobox" and autobox_ligand:
+                command_parts.extend(["--autobox-ligand", str(autobox_ligand)])
+
+            command_line = " ".join(command_parts)
+
+            log_lines = [
+                BANNER.rstrip("\n"),
+                "MATCHA DOCKING ENGINE  v0.1.0",
+                "============================================================",
+                "",
+                "",
+                "[ RUN INFO ]",
+                f"  Start time       : {job_start_dt.isoformat()}Z",
+                f"  Command          : {command_line}",
+                f"  Workdir          : {output_run_dir.resolve()}",
+                f"  Runtime          : {_format_runtime(runtime)}",
+                "",
+                "",
+                "[ INPUT FILES ]",
+                f"  Receptor         : {receptor.resolve()}",
+                f"  Ligands          : {ligand_dir_path.resolve()} ({len(molecule_uids)} molecules)",
+                f"  Output dir       : {output_run_dir.resolve()}",
+                "",
+                "",
+                "[ PROCESSING SUMMARY ]",
+                f"  Samples per molecule : {n_samples}",
+                f"  Total molecules      : {len(molecule_uids)}",
+                "",
+                "",
+                "[ RESULTS ]",
+            ]
+            for mol_uid in molecule_uids:
+                metrics_key = mol_uid if mol_uid in metrics else f"{mol_uid}_mol0"
+                if metrics_key not in metrics:
+                    log_lines.append(f"  {mol_uid}: No results")
+                    continue
+                mdata = metrics[metrics_key]
+                errs = np.array([float(s.get("error_estimate_0", float("inf"))) for s in mdata["sample_metrics"]])
+                pb_counts = np.array([int(s.get("posebusters_filters_passed_count_fast", 0)) for s in mdata["sample_metrics"]])
+                best_idx = _get_best_sample_idx(errs, pb_counts)
+                log_lines.append(f"  {mol_uid}: Best err={errs[best_idx]:.3f}, pb={pb_counts[best_idx]}/4")
+
+            log_lines.extend([
+                "",
+                "[ END ]",
+                f"  Run finished at    : {end_time.isoformat()}Z",
+                f"  Total runtime      : {_format_runtime(runtime)}",
+                f"  Workdir preserved  : {output_run_dir.resolve()}",
+                "============================================================",
+            ])
+            summary_log.write_text("\n".join(log_lines))
+
+            emit(ProgressEvent(
+                type="job_done",
+                stage="done",
+                output_path=str(output_run_dir),
+                poses=[],
+                total_ligands=total_ligands,
+                ligand_statuses=[ls.to_dict() for ls in ligand_statuses],
+            ))
+            return
+
+        # Single-ligand path
+        # Determine ligand list
+        ligands: list[Path] = []
+        if ligand_path:
+            ligands = [Path(ligand_path).expanduser().resolve()]
+
+        if not ligands:
+            emit(ProgressEvent(type="error", message="No ligand files found"))
+            return
+
+        total_ligands = len(ligands)
+        ligand_statuses = [
+            LigandStatus(name=lig.name, path=str(lig), status="pending")
+            for lig in ligands
+        ]
 
         if job.is_cancelled():
             emit(ProgressEvent(type="cancelled", message="Job cancelled"))
@@ -320,17 +913,7 @@ def run_docking(job: "DockingJob") -> None:
                 ligand_statuses=[ls.to_dict() for ls in ligand_statuses],
             ))
 
-            if is_batch:
-                completed = sum(1 for ls in ligand_statuses if ls.status in ("completed", "failed"))
-                emit(ProgressEvent(
-                    type="batch_progress",
-                    progress=int(100 * completed / total_ligands),
-                    ligand_index=idx + 1,
-                    total_ligands=total_ligands,
-                    ligand_statuses=[ls.to_dict() for ls in ligand_statuses],
-                ))
-
-        # Save batch summary
+        # Save summary
         output_run_dir = output_path / run_name
         output_run_dir.mkdir(parents=True, exist_ok=True)
 

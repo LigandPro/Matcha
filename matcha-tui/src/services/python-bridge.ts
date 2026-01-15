@@ -325,6 +325,7 @@ export class PythonBridge extends EventEmitter {
     name: string;
     path: string;
     files: Record<string, string>;
+    is_batch?: boolean;
     error?: string;
   }> {
     this.ensureReady();
