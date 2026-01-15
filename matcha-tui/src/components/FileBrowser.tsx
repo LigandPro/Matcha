@@ -5,7 +5,6 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
 import { Box, Text, useInput } from 'ink';
-import SelectInput from 'ink-select-input';
 import path from 'path';
 import { getBridge, initBridge } from '../services/index.js';
 import type { FileInfo } from '../services/python-bridge.js';
@@ -37,44 +36,6 @@ interface FileItem extends FileInfo {
   isValid?: boolean;
 }
 
-/**
- * FileItemComponent - Memoized component for rendering individual file/directory items.
- * Uses React.memo to prevent unnecessary re-renders during navigation.
- */
-interface FileItemProps {
-  item: FileItem;
-  isSelected: boolean;
-}
-
-const FileItemComponent = React.memo(({ item, isSelected }: FileItemProps) => {
-  // Determine prefix based on item type
-  let prefix = '  ';
-  if (item.name === '..') {
-    prefix = '← ';
-  } else if (item.is_dir) {
-    prefix = '/ ';
-  }
-
-  // Determine color based on selection and validity
-  let color: string;
-  let dimmed = false;
-
-  if (isSelected) {
-    color = 'cyan';
-  } else if (item.name === '..') {
-    color = 'gray';
-  } else if (item.is_dir) {
-    color = 'blue';
-  } else if (item.isValid === false) {
-    color = 'gray';
-    dimmed = true;
-  } else {
-    color = 'green';  // Valid files are bright green
-  }
-
-  return <Text color={color} dimColor={dimmed}>{prefix}{item.name}</Text>;
-});
-
 export function FileBrowser({
   fieldType,
   initialPath,
@@ -85,6 +46,7 @@ export function FileBrowser({
 }: FileBrowserProps): React.ReactElement {
   const [currentDirectory, setCurrentDirectory] = useState(path.resolve(initialPath));
   const [items, setItems] = useState<FileItem[]>([]);
+  const [selectedIndex, setSelectedIndex] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
   const [isInitializing, setIsInitializing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -158,6 +120,7 @@ export function FileBrowser({
 
       setItems(withParent);
       setCurrentDirectory(resolvedPath);
+      setSelectedIndex(0); // Reset selection when directory changes
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Failed to load directory';
       if (debugMode) {
@@ -192,6 +155,23 @@ export function FileBrowser({
     }
   };
 
+  // Handle keyboard input for navigation
+  useInput((input, key) => {
+    if (isLoading || isInitializing) return; // Disable navigation while loading
+
+    if (key.upArrow) {
+      setSelectedIndex((i) => Math.max(0, i - 1));
+    } else if (key.downArrow) {
+      setSelectedIndex((i) => Math.min(items.length - 1, i + 1));
+    } else if (key.return) {
+      if (items[selectedIndex]) {
+        handleSelect(items[selectedIndex]);
+      }
+    } else if (key.escape) {
+      onCancel();
+    }
+  });
+
   // Truncate path for display
   const truncatePath = (pathStr: string, maxLength: number): string => {
     if (pathStr.length <= maxLength) return pathStr;
@@ -200,14 +180,16 @@ export function FileBrowser({
     return `${parts[0]}${path.sep}...${path.sep}${parts[parts.length - 1]}`;
   };
 
-  // Prepare items for SelectInput (memoized for performance)
-  const selectItems = useMemo(
-    () => items.map((item) => ({
-      label: item.name,
-      value: item,
-    })),
-    [items]
-  );
+  // Calculate visible items for virtualization (show 20 items at a time)
+  const VISIBLE_ITEMS = 20;
+  const visibleItems = useMemo(() => {
+    const startIdx = Math.max(0, selectedIndex - Math.floor(VISIBLE_ITEMS / 2));
+    const endIdx = Math.min(items.length, startIdx + VISIBLE_ITEMS);
+    return items.slice(startIdx, endIdx).map((item, offset) => ({
+      item,
+      actualIndex: startIdx + offset,
+    }));
+  }, [items, selectedIndex]);
 
   if (isLoading || isInitializing) {
     return (
@@ -260,19 +242,57 @@ export function FileBrowser({
         <Text color="gray">{'─'.repeat(50)}</Text>
       </Box>
 
-      {/* File list */}
-      <SelectInput
-        items={selectItems}
-        onSelect={(selected) => handleSelect(selected.value)}
-        indicatorComponent={({ isSelected }) => (
-          <Text color={isSelected ? 'cyan' : 'gray'}>
-            {isSelected ? '▸ ' : '  '}
+      {/* File list with virtualization */}
+      <Box flexDirection="column">
+        {visibleItems.map(({ item, actualIndex }) => {
+          const isSelected = actualIndex === selectedIndex;
+
+          // Determine prefix based on item type
+          let prefix = '  ';
+          if (item.name === '..') {
+            prefix = '← ';
+          } else if (item.is_dir) {
+            prefix = '/ ';
+          }
+
+          // Determine color based on selection and validity
+          let color: string;
+          let dimmed = false;
+
+          if (isSelected) {
+            color = 'cyan';
+          } else if (item.name === '..') {
+            color = 'gray';
+          } else if (item.is_dir) {
+            color = 'blue';
+          } else if (item.isValid === false) {
+            color = 'gray';
+            dimmed = true;
+          } else {
+            color = 'green';  // Valid files are bright green
+          }
+
+          return (
+            <Box key={actualIndex}>
+              <Text color={isSelected ? 'cyan' : 'gray'}>
+                {isSelected ? '▸ ' : '  '}
+              </Text>
+              <Text color={color} dimColor={dimmed}>
+                {prefix}{item.name}
+              </Text>
+            </Box>
+          );
+        })}
+      </Box>
+
+      {/* Scroll indicator */}
+      {items.length > VISIBLE_ITEMS && (
+        <Box marginTop={1}>
+          <Text color="gray" dimColor>
+            {selectedIndex + 1} / {items.length} files
           </Text>
-        )}
-        itemComponent={(props: any) => (
-          <FileItemComponent item={props.value} isSelected={props.isSelected} />
-        )}
-      />
+        </Box>
+      )}
 
       {/* Footer hints */}
       <Box marginTop={1}>
