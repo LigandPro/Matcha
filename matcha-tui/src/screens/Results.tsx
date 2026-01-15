@@ -127,8 +127,10 @@ export function ResultsScreen(): React.ReactElement {
         let tunnelOutput = '';
         let urlFound = false;
 
-        tunnelProcess.stderr?.on('data', (data) => {
-          tunnelOutput += data.toString();
+        // Listen to both stdout and stderr
+        const handleTunnelData = (data: Buffer) => {
+          const output = data.toString();
+          tunnelOutput += output;
 
           // Parse URL from output
           if (!urlFound) {
@@ -147,11 +149,20 @@ export function ResultsScreen(): React.ReactElement {
               setNotification('3D Viewer ready! Click URL to open.');
             }
           }
+        };
+
+        tunnelProcess.stdout?.on('data', handleTunnelData);
+        tunnelProcess.stderr?.on('data', handleTunnelData);
+
+        // Log error output for debugging
+        tunnelProcess.on('error', (err) => {
+          console.error('Tunnel process error:', err);
         });
 
         // Fallback if tunnel doesn't start
         setTimeout(() => {
           if (!urlFound) {
+            console.error('Tunnel timeout - no URL found in output:', tunnelOutput.substring(0, 500));
             tunnelProcess.kill();
             setViewer3DInfo({
               url: htmlPath,
@@ -160,7 +171,7 @@ export function ResultsScreen(): React.ReactElement {
             });
             setNotification('Tunnel failed. File path shown instead.');
           }
-        }, 15000);  // 15 seconds to connect
+        }, 30000);  // 30 seconds to connect (increased timeout)
       } else {
         // Local mode - try to open browser
         const command = process.platform === 'darwin'
@@ -258,9 +269,13 @@ export function ResultsScreen(): React.ReactElement {
 
       {/* 3D Viewer URL */}
       {viewer3DInfo && (
-        <Box marginTop={1}>
-          <Text color="cyan">3D Viewer: </Text>
-          <Text color="white">{viewer3DInfo.url}</Text>
+        <Box marginTop={1} flexDirection="column">
+          <Box>
+            <Text color="cyan">3D Viewer:</Text>
+          </Box>
+          <Box marginLeft={2}>
+            <Text color="white">{viewer3DInfo.url}</Text>
+          </Box>
         </Box>
       )}
 
