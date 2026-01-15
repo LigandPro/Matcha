@@ -200,12 +200,15 @@ export function RunningScreen(): React.ReactElement {
             setPoses(event.poses as PoseResult[]);
           } else if (event.type === 'job_done') {
             setRunning(false);
+            // Use event.poses from backend (aggregated data for all ligands)
+            // Local 'poses' state is only for displaying current ligand during execution
+            const finalPoses = (event.poses ?? []) as PoseResult[];
             setResults({
               runName: 'completed',
               runtime: (Date.now() - startTime) / 1000,
-              totalPoses: poses.length,
-              physicalPoses: poses.filter((p) => p.pbCount === 4).length,
-              poses,
+              totalPoses: finalPoses.length,
+              physicalPoses: finalPoses.filter((p) => p.pbCount === 4).length,
+              poses: finalPoses,
               bestPosePath: event.output_path ?? '',
               allPosesPath: '',
               logPath: '',

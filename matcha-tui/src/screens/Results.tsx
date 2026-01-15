@@ -4,6 +4,8 @@
 
 import React, { useState } from 'react';
 import { Box, Text, useInput } from 'ink';
+import { exec } from 'child_process';
+import path from 'path';
 import { useStore } from '../store/index.js';
 import { icons } from '../utils/colors.js';
 import { formatDuration } from '../utils/format.js';
@@ -15,6 +17,29 @@ export function ResultsScreen(): React.ReactElement {
   const results = useStore((s) => s.results);
   const [viewMode, setViewMode] = useState<'summary' | 'ligands'>('summary');
 
+  const openOutputFolder = () => {
+    const outputPath = results?.bestPosePath;
+    if (!outputPath) return;
+
+    // Get directory path from bestPosePath (remove filename if present)
+    const dirPath = outputPath.endsWith('.sdf')
+      ? path.dirname(outputPath)
+      : outputPath;
+
+    // Platform-specific file explorer commands
+    const command = process.platform === 'darwin'
+      ? `open "${dirPath}"`
+      : process.platform === 'win32'
+      ? `explorer "${dirPath}"`
+      : `xdg-open "${dirPath}"`;
+
+    exec(command, (error) => {
+      if (error) {
+        console.error('Failed to open folder:', error);
+      }
+    });
+  };
+
   useInput((input) => {
     if (input === 'n') {
       resetJobConfig();
@@ -23,6 +48,8 @@ export function ResultsScreen(): React.ReactElement {
       setScreen('welcome');
     } else if (input === 'l' && results?.ligandStatuses) {
       setViewMode(viewMode === 'summary' ? 'ligands' : 'summary');
+    } else if (input === 'o') {
+      openOutputFolder();
     }
   });
 
@@ -72,14 +99,14 @@ export function ResultsScreen(): React.ReactElement {
         <Box flexDirection="column" marginTop={1}>
           <Text bold color="white" underline>Best Pose</Text>
           <Box flexDirection="column" marginLeft={2} marginTop={1}>
-            <Box><Text color="gray">Error estimate: </Text><Text color="cyan">{bestPose.errorEstimate.toFixed(3)}</Text></Box>
-            <Box><Text color="gray">PoseBusters: </Text><Text color={bestPose.pbCount === 4 ? 'green' : 'yellow'}>{bestPose.pbCount}/4</Text></Box>
+            <Box><Text color="gray">Error estimate: </Text><Text color="cyan">{(bestPose.errorEstimate ?? 0).toFixed(3)}</Text></Box>
+            <Box><Text color="gray">PoseBusters: </Text><Text color={(bestPose.pbCount ?? 0) === 4 ? 'green' : 'yellow'}>{bestPose.pbCount ?? 0}/4</Text></Box>
             <Box>
               <Text color="gray">Checks: </Text>
-              <Text color={bestPose.checks.notTooFarAway ? 'green' : 'red'}>{bestPose.checks.notTooFarAway ? icons.check : icons.cross} </Text>
-              <Text color={bestPose.checks.noInternalClash ? 'green' : 'red'}>{bestPose.checks.noInternalClash ? icons.check : icons.cross} </Text>
-              <Text color={bestPose.checks.noClashes ? 'green' : 'red'}>{bestPose.checks.noClashes ? icons.check : icons.cross} </Text>
-              <Text color={bestPose.checks.noVolumeClash ? 'green' : 'red'}>{bestPose.checks.noVolumeClash ? icons.check : icons.cross}</Text>
+              <Text color={bestPose.checks?.notTooFarAway ? 'green' : 'red'}>{bestPose.checks?.notTooFarAway ? icons.check : icons.cross} </Text>
+              <Text color={bestPose.checks?.noInternalClash ? 'green' : 'red'}>{bestPose.checks?.noInternalClash ? icons.check : icons.cross} </Text>
+              <Text color={bestPose.checks?.noClashes ? 'green' : 'red'}>{bestPose.checks?.noClashes ? icons.check : icons.cross} </Text>
+              <Text color={bestPose.checks?.noVolumeClash ? 'green' : 'red'}>{bestPose.checks?.noVolumeClash ? icons.check : icons.cross}</Text>
             </Box>
           </Box>
         </Box>
@@ -136,13 +163,13 @@ export function ResultsScreen(): React.ReactElement {
             {results.poses.slice(0, 10).map((pose) => (
               <Box key={pose.rank}>
                 <Text color="white">{String(pose.rank).padEnd(6)}</Text>
-                <Text color="cyan">{pose.errorEstimate.toFixed(3).padEnd(10)}</Text>
-                <Text color={pose.pbCount === 4 ? 'green' : 'yellow'}>{`${pose.pbCount}/4`.padEnd(6)}</Text>
+                <Text color="cyan">{(pose.errorEstimate ?? 0).toFixed(3).padEnd(10)}</Text>
+                <Text color={(pose.pbCount ?? 0) === 4 ? 'green' : 'yellow'}>{`${pose.pbCount ?? 0}/4`.padEnd(6)}</Text>
                 <Text>
-                  {pose.checks.notTooFarAway ? icons.check : icons.cross}
-                  {pose.checks.noInternalClash ? icons.check : icons.cross}
-                  {pose.checks.noClashes ? icons.check : icons.cross}
-                  {pose.checks.noVolumeClash ? icons.check : icons.cross}
+                  {pose.checks?.notTooFarAway ? icons.check : icons.cross}
+                  {pose.checks?.noInternalClash ? icons.check : icons.cross}
+                  {pose.checks?.noClashes ? icons.check : icons.cross}
+                  {pose.checks?.noVolumeClash ? icons.check : icons.cross}
                 </Text>
               </Box>
             ))}
@@ -154,6 +181,7 @@ export function ResultsScreen(): React.ReactElement {
       <Box marginTop={2} gap={4}>
         <Text color="cyan">[n] New docking</Text>
         {isBatch && <Text color="yellow">[l] {viewMode === 'summary' ? 'All ligands' : 'Summary'}</Text>}
+        <Text color="magenta">[o] Open folder</Text>
         <Text color="gray">[h] Home</Text>
       </Box>
     </Box>
