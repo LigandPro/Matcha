@@ -2,7 +2,7 @@
  * Results Screen - display docking results with batch mode support.
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { exec } from 'child_process';
 import path from 'path';
@@ -27,17 +27,8 @@ export function ResultsScreen(): React.ReactElement {
     url: string;
     port: number;
     fileName: string;
-    tunnelPID?: number;
   } | null>(null);
 
-  // Cleanup tunnel process when leaving results screen
-  useEffect(() => {
-    return () => {
-      if (viewer3DInfo?.tunnelPID) {
-        exec(`kill ${viewer3DInfo.tunnelPID} 2>/dev/null`);
-      }
-    };
-  }, [viewer3DInfo]);
 
   const openOutputFolder = () => {
     const outputPath = results?.bestPosePath;
@@ -105,80 +96,13 @@ export function ResultsScreen(): React.ReactElement {
       );
 
       if (isSSH) {
-        // SSH mode - create public tunnel via localhost.run
-        const port = 8765;
-        const fileName = path.basename(htmlPath);
-
-        // 1. Start HTTP server
-        exec(`cd "${resultDir}" && python3 -m http.server ${port} > /dev/null 2>&1 &`, (error) => {
-          if (error) {
-            setError('Failed to start HTTP server');
-          }
+        // SSH mode - just show file path, user copies it however they want
+        setViewer3DInfo({
+          url: htmlPath,
+          port: 0,
+          fileName: path.basename(htmlPath),
         });
-
-        // 2. Start SSH tunnel
-        setNotification('Creating public tunnel...');
-
-        const tunnelProcess = exec(
-          `ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -R 80:localhost:${port} nokey@localhost.run 2>&1`,
-          { maxBuffer: 1024 * 1024 }
-        );
-
-        let tunnelOutput = '';
-        let urlFound = false;
-
-        // Listen to both stdout and stderr
-        const handleTunnelData = (data: Buffer) => {
-          const output = data.toString();
-          tunnelOutput += output;
-
-          // Log every chunk received for debugging
-          console.error('[TUNNEL] Received chunk:', output.substring(0, 100));
-
-          // Parse URL from output (matches https://SUBDOMAIN.lhr.life or similar)
-          if (!urlFound) {
-            const urlMatch = tunnelOutput.match(/https:\/\/[a-z0-9]+\.[a-z]+\.[a-z]+/i);
-            if (urlMatch) {
-              urlFound = true;
-              const publicUrl = urlMatch[0];
-
-              console.error('[TUNNEL] Found URL:', publicUrl);
-
-              setViewer3DInfo({
-                url: `${publicUrl}/${fileName}`,
-                port,
-                fileName,
-                tunnelPID: tunnelProcess.pid,
-              });
-
-              setNotification('3D Viewer ready! Click URL to open.');
-            }
-          }
-        };
-
-        tunnelProcess.stdout?.on('data', handleTunnelData);
-        tunnelProcess.stderr?.on('data', handleTunnelData);
-
-        console.error('[TUNNEL] Started tunnel process, waiting for URL...');
-
-        // Log error output for debugging
-        tunnelProcess.on('error', (err) => {
-          console.error('Tunnel process error:', err);
-        });
-
-        // Fallback if tunnel doesn't start
-        setTimeout(() => {
-          if (!urlFound) {
-            console.error('Tunnel timeout - no URL found in output:', tunnelOutput.substring(0, 500));
-            tunnelProcess.kill();
-            setViewer3DInfo({
-              url: htmlPath,
-              port: 0,
-              fileName,
-            });
-            setNotification('Tunnel failed. File path shown instead.');
-          }
-        }, 30000);  // 30 seconds to connect (increased timeout)
+        setNotification('3D viewer saved. Copy file to view locally.');
       } else {
         // Local mode - try to open browser
         const command = process.platform === 'darwin'
@@ -274,15 +198,18 @@ export function ResultsScreen(): React.ReactElement {
         <Text color="green" bold>{icons.check} Docking completed successfully!</Text>
       </Box>
 
-      {/* 3D Viewer URL */}
+      {/* 3D Viewer */}
       {viewer3DInfo && (
         <Box marginTop={1} flexDirection="column">
-          <Box>
-            <Text color="cyan">3D Viewer:</Text>
+          <Text bold color="white" underline>3D Viewer</Text>
+          <Box marginLeft={2} marginTop={1}>
+            <Text color="cyan">{viewer3DInfo.url}</Text>
           </Box>
-          <Box marginLeft={2}>
-            <Text color="white">{viewer3DInfo.url}</Text>
-          </Box>
+          {viewer3DInfo.port === 0 && (
+            <Box marginLeft={2} marginTop={1}>
+              <Text color="gray" dimColor>Copy via: scp, rsync, or VS Code Remote</Text>
+            </Box>
+          )}
         </Box>
       )}
 
