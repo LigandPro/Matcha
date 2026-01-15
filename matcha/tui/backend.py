@@ -9,6 +9,7 @@ import os
 import sys
 import signal
 import threading
+import shutil
 from pathlib import Path
 from typing import Any, Callable, Optional
 from datetime import datetime
@@ -325,21 +326,26 @@ class RPCHandler:
             return []
 
         runs: list[RunInfo] = []
+        run_with_times: list[tuple[RunInfo, float]] = []
+
         for item in p.iterdir():
             if item.is_dir():
                 log_files = list(item.glob("*.log")) + list(item.glob("**/*.log"))
                 if log_files or list(item.glob("*_best.sdf")):
                     stat = item.stat()
-                    runs.append(
-                        RunInfo(
-                            name=item.name,
-                            path=str(item),
-                            date=datetime.fromtimestamp(stat.st_mtime).isoformat(),
-                            status="completed" if list(item.glob("*_best.sdf")) else "unknown",
-                        )
+                    mtime = stat.st_mtime
+                    run_info = RunInfo(
+                        name=item.name,
+                        path=str(item),
+                        date=datetime.fromtimestamp(mtime).isoformat(),
+                        status="completed" if list(item.glob("*_best.sdf")) else "unknown",
                     )
+                    run_with_times.append((run_info, mtime))
 
-        runs.sort(key=lambda r: r.date, reverse=True)
+        # Sort by modification time descending (newest first)
+        run_with_times.sort(key=lambda x: x[1], reverse=True)
+        runs = [r for r, _ in run_with_times]
+
         return [r.to_dict() for r in runs]
 
     def get_run_details(self, run_path: str) -> dict:
@@ -393,8 +399,12 @@ class RPCHandler:
             data = np.load(metrics_files[0], allow_pickle=True).item()
             poses: list[PoseInfo] = []
 
-            for uid, samples in data.items():
-                for i, sample in enumerate(samples):
+            for uid, samples_dict in data.items():
+                # samples_dict contains {'sample_metrics': [...], 'orig_mol': ...}
+                if 'sample_metrics' not in samples_dict:
+                    continue
+
+                for i, sample in enumerate(samples_dict['sample_metrics']):
                     pb_filters = sample.get("posebusters_filters_fast", [False] * 5)
                     poses.append(
                         PoseInfo(
@@ -442,6 +452,32 @@ class RPCHandler:
             return {"available": False, "message": "PyTorch not installed"}
         except Exception as e:
             return {"available": False, "message": str(e)}
+
+    def delete_run(self, run_path: str) -> dict:
+        """Delete a docking run directory and all its contents.
+
+        Args:
+            run_path: Absolute path to the run directory
+
+        Returns:
+            dict with success status and message
+        """
+        try:
+            run_path_obj = Path(run_path)
+
+            # Verify path exists and is a directory
+            if not run_path_obj.exists():
+                return {"success": False, "error": f"Path does not exist: {run_path}"}
+
+            if not run_path_obj.is_dir():
+                return {"success": False, "error": f"Path is not a directory: {run_path}"}
+
+            # Delete the directory and all contents
+            shutil.rmtree(run_path)
+
+            return {"success": True, "message": f"Successfully deleted run: {run_path_obj.name}"}
+        except Exception as e:
+            return {"success": False, "error": f"Failed to delete run: {str(e)}"}
 
     def check_checkpoints(self, path: Optional[str] = None) -> dict:
         """Check if checkpoints are available."""

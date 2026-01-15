@@ -4,7 +4,6 @@
 
 import React, { useState } from 'react';
 import { Box, Text, useInput } from 'ink';
-import SelectInput from 'ink-select-input';
 import { exec } from 'child_process';
 import path from 'path';
 import * as fs from 'fs';
@@ -23,7 +22,6 @@ export function ResultsScreen(): React.ReactElement {
   const results = useStore((s) => s.results);
   const setError = useStore((s) => s.setError);
   const [viewMode, setViewMode] = useState<'summary' | 'ligands'>('summary');
-  const [useArrowNav, setUseArrowNav] = useState(false);
 
   const openOutputFolder = () => {
     const outputPath = results?.bestPosePath;
@@ -83,19 +81,49 @@ export function ResultsScreen(): React.ReactElement {
         title: `Matcha Docking - ${results.runName}`
       });
 
-      // Open in browser
-      const command = process.platform === 'darwin'
-        ? `open "${htmlPath}"`
-        : process.platform === 'win32'
-        ? `start "" "${htmlPath}"`
-        : `xdg-open "${htmlPath}"`;
+      // Check if running in SSH session
+      const isSSH = Boolean(
+        process.env.SSH_CONNECTION ||
+        process.env.SSH_TTY ||
+        process.env.SSH_CLIENT
+      );
 
-      exec(command, (error) => {
-        if (error) {
-          setError('Failed to open 3D viewer');
-          console.error('Failed to open viewer:', error);
-        }
-      });
+      if (isSSH) {
+        // SSH mode - start HTTP server and show URL
+        const port = 8765; // Fixed port for simplicity
+        const fileName = path.basename(htmlPath);
+
+        // Start simple HTTP server in background
+        exec(`cd "${resultDir}" && python3 -m http.server ${port} > /dev/null 2>&1 &`, (error) => {
+          if (error) {
+            console.error('Failed to start HTTP server:', error);
+          }
+        });
+
+        console.log('\n╭──────────────────────────────────────────────────╮');
+        console.log('│ 3D Viewer Ready                                  │');
+        console.log('├──────────────────────────────────────────────────┤');
+        console.log(`│ Server started on port ${port}                        │`);
+        console.log('│                                                  │');
+        console.log('│ Open in browser with SSH port forwarding:       │');
+        console.log(`│   ssh -L ${port}:localhost:${port} user@server              │`);
+        console.log(`│   Then open: http://localhost:${port}/${fileName.padEnd(16)}│`);
+        console.log('╰──────────────────────────────────────────────────╯\n');
+      } else {
+        // Local mode - try to open browser
+        const command = process.platform === 'darwin'
+          ? `open "${htmlPath}"`
+          : process.platform === 'win32'
+          ? `start "" "${htmlPath}"`
+          : `xdg-open "${htmlPath}"`;
+
+        exec(command, (error) => {
+          if (error) {
+            // Fallback - show path if browser opening fails
+            console.log(`\nCannot open browser automatically. Please open this file manually:\n${htmlPath}\n`);
+          }
+        });
+      }
     } catch (err) {
       setError(`Failed to generate 3D viewer: ${err}`);
     }
@@ -132,27 +160,29 @@ export function ResultsScreen(): React.ReactElement {
   };
 
   useInput((input, key) => {
-    // Toggle arrow navigation with Tab
-    if (key.tab) {
-      setUseArrowNav(!useArrowNav);
+    // Arrow key shortcuts
+    if (key.leftArrow) {
+      handleMenuAction('back');
+      return;
+    }
+    if (key.rightArrow) {
+      handleMenuAction('new');
       return;
     }
 
     // Keyboard shortcuts (always available)
-    if (!useArrowNav) {
-      if (input === 'n') {
-        handleMenuAction('new');
-      } else if (input === 'h') {
-        handleMenuAction('home');
-      } else if (input === 'b') {
-        handleMenuAction('back');
-      } else if (input === 'l' && results?.ligandStatuses) {
-        handleMenuAction('toggle');
-      } else if (input === 'o') {
-        handleMenuAction('open');
-      } else if (input === 'v') {
-        handleMenuAction('view3d');
-      }
+    if (input === 'n') {
+      handleMenuAction('new');
+    } else if (input === 'h') {
+      handleMenuAction('home');
+    } else if (input === 'b') {
+      handleMenuAction('back');
+    } else if (input === 'l' && results?.ligandStatuses) {
+      handleMenuAction('toggle');
+    } else if (input === 'o') {
+      handleMenuAction('open');
+    } else if (input === 'v') {
+      handleMenuAction('view3d');
     }
   });
 
@@ -281,34 +311,14 @@ export function ResultsScreen(): React.ReactElement {
       )}
 
       {/* Navigation */}
-      {useArrowNav ? (
-        <Box marginTop={2} flexDirection="column">
-          <Text color="gray" dimColor>Use ↑↓ to navigate, ⏎ to select</Text>
-          <SelectInput
-            items={[
-              { label: 'New docking', value: 'new' as MenuAction },
-              ...(isBatch ? [{ label: viewMode === 'summary' ? 'All ligands' : 'Summary', value: 'toggle' as MenuAction }] : []),
-              { label: 'View 3D', value: 'view3d' as MenuAction },
-              { label: 'Open folder', value: 'open' as MenuAction },
-              { label: `Back to ${previousScreen === 'history' ? 'History' : 'Home'}`, value: 'back' as MenuAction },
-              { label: 'Home', value: 'home' as MenuAction },
-            ]}
-            onSelect={(item) => handleMenuAction(item.value)}
-          />
-        </Box>
-      ) : (
-        <Box marginTop={2} gap={4}>
-          <Text color="cyan">[n] New docking</Text>
-          {isBatch && <Text color="yellow">[l] {viewMode === 'summary' ? 'All ligands' : 'Summary'}</Text>}
-          <Text color="magenta">[v] View 3D</Text>
-          <Text color="magenta">[o] Open folder</Text>
-          <Text color="gray">[b] Back to {previousScreen === 'history' ? 'History' : 'Home'}</Text>
-          <Text color="gray">[h] Home</Text>
-          <Box marginLeft={4}>
-            <Text color="gray" dimColor>[Tab] Arrow navigation</Text>
-          </Box>
-        </Box>
-      )}
+      <Box marginTop={2} gap={4}>
+        <Text color="cyan">[n or →] New docking</Text>
+        {isBatch && <Text color="yellow">[l] {viewMode === 'summary' ? 'All ligands' : 'Summary'}</Text>}
+        <Text color="magenta">[v] View 3D</Text>
+        <Text color="magenta">[o] Open folder</Text>
+        <Text color="gray">[b or ←] Back</Text>
+        <Text color="gray">[h] Home</Text>
+      </Box>
     </Box>
   );
 }
