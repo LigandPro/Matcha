@@ -19,6 +19,14 @@ interface RunInfo {
   status: string;
 }
 
+interface RunDetails {
+  name: string;
+  path: string;
+  files: Record<string, string>;
+  receptor?: string;
+  ligand?: string;
+}
+
 export function HistoryScreen(): React.ReactElement {
   const setScreen = useStore((s) => s.setScreen);
   const setError = useStore((s) => s.setError);
@@ -29,6 +37,7 @@ export function HistoryScreen(): React.ReactElement {
 
   const [runs, setRuns] = useState<RunInfo[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const [selectedDetails, setSelectedDetails] = useState<RunDetails | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingResults, setLoadingResults] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -69,6 +78,25 @@ export function HistoryScreen(): React.ReactElement {
 
     loadHistory();
   }, [jobConfig.params?.outputDir, setError]);
+
+  // Load details for selected run
+  useEffect(() => {
+    const loadDetails = async () => {
+      if (runs.length === 0 || !runs[selectedIndex]) {
+        setSelectedDetails(null);
+        return;
+      }
+
+      try {
+        const details = await getBridge().getRunDetails(runs[selectedIndex].path);
+        setSelectedDetails(details as RunDetails);
+      } catch (err) {
+        setSelectedDetails(null);
+      }
+    };
+
+    loadDetails();
+  }, [runs, selectedIndex]);
 
   // Load and view results for selected run
   const viewResults = async () => {
@@ -292,9 +320,22 @@ export function HistoryScreen(): React.ReactElement {
         })}
       </Box>
 
-      {runs[selectedIndex] && (
+      {runs[selectedIndex] && selectedDetails && (
         <Box flexDirection="column" marginTop={2} borderStyle="single" borderColor="gray" paddingX={1}>
           <Text bold color="white">{runs[selectedIndex].name}</Text>
+          <Box><Text color="gray">Date: </Text><Text color="white">{formatDate(runs[selectedIndex].date)}</Text></Box>
+          {selectedDetails.receptor && (
+            <Box>
+              <Text color="gray">Receptor: </Text>
+              <Text color="green">{path.basename(selectedDetails.receptor)}</Text>
+            </Box>
+          )}
+          {selectedDetails.ligand && (
+            <Box>
+              <Text color="gray">Ligand: </Text>
+              <Text color="green">{path.basename(selectedDetails.ligand)}</Text>
+            </Box>
+          )}
           <Box><Text color="gray">Path: </Text><Text color="blue">{runs[selectedIndex].path}</Text></Box>
         </Box>
       )}

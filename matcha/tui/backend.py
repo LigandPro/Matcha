@@ -370,7 +370,7 @@ class RPCHandler:
             if matches:
                 details["files"][key] = str(matches[0])
 
-        # Try to parse log for metrics
+        # Try to parse log for metrics and input files
         log_file = details["files"].get("log")
         if log_file:
             try:
@@ -379,6 +379,15 @@ class RPCHandler:
                     # Extract basic info from log
                     if "n-samples" in content.lower():
                         details["has_log"] = True
+
+                    # Extract receptor and ligand paths from log
+                    for line in content.split('\n'):
+                        if 'Receptor' in line and ':' in line:
+                            receptor_path = line.split(':', 1)[1].strip()
+                            details["receptor"] = receptor_path
+                        elif 'Ligand' in line and ':' in line and 'ligand' in line.lower():
+                            ligand_path = line.split(':', 1)[1].strip()
+                            details["ligand"] = ligand_path
             except Exception:
                 pass
 
