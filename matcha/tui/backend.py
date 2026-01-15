@@ -334,11 +334,28 @@ class RPCHandler:
                 if log_files or list(item.glob("*_best.sdf")):
                     stat = item.stat()
                     mtime = stat.st_mtime
+
+                    # Parse receptor and ligand from log if available
+                    receptor = None
+                    ligand = None
+                    if log_files:
+                        try:
+                            with open(log_files[0]) as f:
+                                for line in f:
+                                    if 'Receptor' in line and ':' in line:
+                                        receptor = line.split(':', 1)[1].strip()
+                                    elif 'Ligand' in line and ':' in line and 'ligand' in line.lower():
+                                        ligand = line.split(':', 1)[1].strip()
+                        except Exception:
+                            pass
+
                     run_info = RunInfo(
                         name=item.name,
                         path=str(item),
                         date=datetime.fromtimestamp(mtime).isoformat(),
                         status="completed" if list(item.glob("*_best.sdf")) else "unknown",
+                        receptor=receptor,
+                        ligand=ligand,
                     )
                     run_with_times.append((run_info, mtime))
 
