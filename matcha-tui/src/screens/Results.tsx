@@ -132,12 +132,17 @@ export function ResultsScreen(): React.ReactElement {
           const output = data.toString();
           tunnelOutput += output;
 
-          // Parse URL from output
+          // Log every chunk received for debugging
+          console.error('[TUNNEL] Received chunk:', output.substring(0, 100));
+
+          // Parse URL from output (matches https://SUBDOMAIN.lhr.life or similar)
           if (!urlFound) {
-            const urlMatch = tunnelOutput.match(/https:\/\/[a-z0-9]+\.[a-z]+\.[a-z]+/);
+            const urlMatch = tunnelOutput.match(/https:\/\/[a-z0-9]+\.[a-z]+\.[a-z]+/i);
             if (urlMatch) {
               urlFound = true;
               const publicUrl = urlMatch[0];
+
+              console.error('[TUNNEL] Found URL:', publicUrl);
 
               setViewer3DInfo({
                 url: `${publicUrl}/${fileName}`,
@@ -153,6 +158,8 @@ export function ResultsScreen(): React.ReactElement {
 
         tunnelProcess.stdout?.on('data', handleTunnelData);
         tunnelProcess.stderr?.on('data', handleTunnelData);
+
+        console.error('[TUNNEL] Started tunnel process, waiting for URL...');
 
         // Log error output for debugging
         tunnelProcess.on('error', (err) => {
