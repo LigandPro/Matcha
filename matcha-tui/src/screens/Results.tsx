@@ -7,6 +7,7 @@ import { Box, Text, useInput } from 'ink';
 import { exec } from 'child_process';
 import path from 'path';
 import * as fs from 'fs';
+import * as os from 'os';
 import { useStore } from '../store/index.js';
 import { icons } from '../utils/colors.js';
 import { formatDuration } from '../utils/format.js';
@@ -14,6 +15,20 @@ import { generateMolstarViewer } from '../utils/molstar-viewer.js';
 import type { BatchLigandStatus } from '../types/index.js';
 
 type MenuAction = 'new' | 'view3d' | 'open' | 'toggle' | 'back' | 'home';
+
+// Helper to make clickable links in terminal (OSC 8 escape codes)
+function makeClickableLink(url: string, text: string): string {
+  return `\x1b]8;;file://${url}\x1b\\${text}\x1b]8;;\x1b\\`;
+}
+
+// Helper to shorten path with ~ for home directory
+function shortenPath(fullPath: string): string {
+  const homeDir = os.homedir();
+  if (fullPath.startsWith(homeDir)) {
+    return fullPath.replace(homeDir, '~');
+  }
+  return fullPath;
+}
 
 export function ResultsScreen(): React.ReactElement {
   const setScreen = useStore((s) => s.setScreen);
@@ -202,14 +217,17 @@ export function ResultsScreen(): React.ReactElement {
       {viewer3DInfo && (
         <Box marginTop={1} flexDirection="column">
           <Text bold color="white" underline>3D Viewer</Text>
-          <Box marginLeft={2} marginTop={1}>
-            <Text color="cyan">{viewer3DInfo.url}</Text>
-          </Box>
-          {viewer3DInfo.port === 0 && (
-            <Box marginLeft={2} marginTop={1}>
-              <Text color="gray" dimColor>Copy via: scp, rsync, or VS Code Remote</Text>
+          <Box marginLeft={2} marginTop={1} flexDirection="column">
+            <Box>
+              <Text color="gray">File: </Text>
+              <Text color="cyan">{makeClickableLink(viewer3DInfo.url, shortenPath(viewer3DInfo.url))}</Text>
             </Box>
-          )}
+            {viewer3DInfo.port === 0 && (
+              <Box marginTop={1}>
+                <Text color="gray" dimColor>💡 Tip: Click to open or copy path</Text>
+              </Box>
+            )}
+          </Box>
         </Box>
       )}
 
