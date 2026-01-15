@@ -6,15 +6,19 @@ import React, { useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { exec } from 'child_process';
 import path from 'path';
+import * as fs from 'fs';
 import { useStore } from '../store/index.js';
 import { icons } from '../utils/colors.js';
 import { formatDuration } from '../utils/format.js';
+import { generateMolstarViewer } from '../utils/molstar-viewer.js';
 import type { BatchLigandStatus } from '../types/index.js';
 
 export function ResultsScreen(): React.ReactElement {
   const setScreen = useStore((s) => s.setScreen);
   const resetJobConfig = useStore((s) => s.resetJobConfig);
+  const previousScreen = useStore((s) => s.previousScreen);
   const results = useStore((s) => s.results);
+  const setError = useStore((s) => s.setError);
   const [viewMode, setViewMode] = useState<'summary' | 'ligands'>('summary');
 
   const openOutputFolder = () => {
@@ -40,16 +44,72 @@ export function ResultsScreen(): React.ReactElement {
     });
   };
 
-  useInput((input) => {
+  const view3D = async () => {
+    if (!results) return;
+
+    try {
+      // Find paths to structure files
+      const resultDir = path.dirname(results.bestPosePath);
+      const proteinPath = path.join(resultDir, 'work/datasets/any_conf/sample_0/sample_0_protein.pdb');
+      const ligandPath = results.bestPosePath;
+
+      // Check if files exist
+      if (!fs.existsSync(proteinPath)) {
+        setError('Protein file not found');
+        return;
+      }
+
+      if (!fs.existsSync(ligandPath)) {
+        setError('Ligand file not found');
+        return;
+      }
+
+      // Generate HTML viewer
+      const htmlPath = path.join(resultDir, 'molstar_viewer.html');
+      await generateMolstarViewer({
+        proteinPath,
+        ligandPath,
+        outputHtmlPath: htmlPath,
+        title: `Matcha Docking - ${results.runName}`
+      });
+
+      // Open in browser
+      const command = process.platform === 'darwin'
+        ? `open "${htmlPath}"`
+        : process.platform === 'win32'
+        ? `start "" "${htmlPath}"`
+        : `xdg-open "${htmlPath}"`;
+
+      exec(command, (error) => {
+        if (error) {
+          setError('Failed to open 3D viewer');
+          console.error('Failed to open viewer:', error);
+        }
+      });
+    } catch (err) {
+      setError(`Failed to generate 3D viewer: ${err}`);
+    }
+  };
+
+  useInput((input, key) => {
     if (input === 'n') {
       resetJobConfig();
       setScreen('setup-files');
     } else if (input === 'h') {
       setScreen('welcome');
+    } else if (input === 'b' || key.escape) {
+      // Context-aware back navigation
+      if (previousScreen === 'history') {
+        setScreen('history');
+      } else {
+        setScreen('welcome');
+      }
     } else if (input === 'l' && results?.ligandStatuses) {
       setViewMode(viewMode === 'summary' ? 'ligands' : 'summary');
     } else if (input === 'o') {
       openOutputFolder();
+    } else if (input === 'v') {
+      view3D();
     }
   });
 
@@ -181,7 +241,9 @@ export function ResultsScreen(): React.ReactElement {
       <Box marginTop={2} gap={4}>
         <Text color="cyan">[n] New docking</Text>
         {isBatch && <Text color="yellow">[l] {viewMode === 'summary' ? 'All ligands' : 'Summary'}</Text>}
+        <Text color="magenta">[v] View 3D</Text>
         <Text color="magenta">[o] Open folder</Text>
+        <Text color="gray">[b] Back to {previousScreen === 'history' ? 'History' : 'Home'}</Text>
         <Text color="gray">[h] Home</Text>
       </Box>
     </Box>

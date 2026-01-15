@@ -1,5 +1,5 @@
-import React from 'react';
-import { Box, Text } from 'ink';
+import React, { useState, useEffect } from 'react';
+import { Box, Text, useStdout } from 'ink';
 import { useStore } from '../store/index.js';
 import type { Screen } from '../types/index.js';
 
@@ -46,6 +46,7 @@ const SCREEN_SHORTCUTS: Record<Screen, Shortcut[]> = {
     { key: 'c', label: 'Cancel' },
   ],
   results: [
+    { key: 'v', label: 'View 3D' },
     { key: 'n', label: 'New docking' },
     { key: 'o', label: 'Open folder' },
     { key: 'Esc', label: 'Home' },
@@ -58,14 +59,43 @@ const SCREEN_SHORTCUTS: Record<Screen, Shortcut[]> = {
 };
 
 export function Footer({ screen, isRunning }: FooterProps): React.ReactElement {
+  const { stdout } = useStdout();
   const shortcuts = SCREEN_SHORTCUTS[screen] || [];
   const debugMode = useStore((s) => s.debugMode);
+
+  // Show background task indicator if docking is running but user is not on running screen
+  const hasBackgroundTask = isRunning && screen !== 'running';
+
+  // Get terminal width for separator line with resize tracking
+  const [terminalWidth, setTerminalWidth] = useState(stdout?.columns || 80);
+
+  // Update width on terminal resize
+  useEffect(() => {
+    const handleResize = () => {
+      setTerminalWidth(stdout?.columns || 80);
+    };
+
+    stdout?.on('resize', handleResize);
+    return () => {
+      stdout?.off('resize', handleResize);
+    };
+  }, [stdout]);
 
   return (
     <Box flexDirection="column" marginTop={1}>
       <Box>
-        <Text color="gray">{'─'.repeat(60)}</Text>
+        <Text color="gray">{'─'.repeat(terminalWidth)}</Text>
       </Box>
+
+      {/* Background task indicator */}
+      {hasBackgroundTask && (
+        <Box paddingX={1} paddingY={0}>
+          <Text color="yellow" bold>● Docking in progress </Text>
+          <Text color="cyan" bold>[r]</Text>
+          <Text color="white"> View progress</Text>
+        </Box>
+      )}
+
       <Box gap={2} paddingX={1}>
         {shortcuts.map(({ key, label, disabled }) => (
           <Box key={key}>
