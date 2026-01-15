@@ -2,12 +2,11 @@
  * Results Screen - display docking results with batch mode support.
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { exec } from 'child_process';
 import path from 'path';
 import * as fs from 'fs';
-import * as os from 'os';
 import { useStore } from '../store/index.js';
 import { icons } from '../utils/colors.js';
 import { formatDuration } from '../utils/format.js';
@@ -28,8 +27,17 @@ export function ResultsScreen(): React.ReactElement {
     url: string;
     port: number;
     fileName: string;
-    sshCommand?: string;
+    tunnelPID?: number;
   } | null>(null);
+
+  // Cleanup tunnel process when leaving results screen
+  useEffect(() => {
+    return () => {
+      if (viewer3DInfo?.tunnelPID) {
+        exec(`kill ${viewer3DInfo.tunnelPID} 2>/dev/null`);
+      }
+    };
+  }, [viewer3DInfo]);
 
   const openOutputFolder = () => {
     const outputPath = results?.bestPosePath;
@@ -97,27 +105,62 @@ export function ResultsScreen(): React.ReactElement {
       );
 
       if (isSSH) {
-        // SSH mode - start HTTP server and show URL
-        const port = 8765; // Fixed port for simplicity
+        // SSH mode - create public tunnel via localhost.run
+        const port = 8765;
         const fileName = path.basename(htmlPath);
-        const hostname = os.hostname();
 
-        // Start simple HTTP server in background
+        // 1. Start HTTP server
         exec(`cd "${resultDir}" && python3 -m http.server ${port} > /dev/null 2>&1 &`, (error) => {
           if (error) {
             setError('Failed to start HTTP server');
           }
         });
 
-        // Set viewer info to display in UI with SSH forwarding command
-        setViewer3DInfo({
-          url: `http://localhost:${port}/${fileName}`,
-          port,
-          fileName,
-          sshCommand: `ssh -L ${port}:localhost:${port} user@${hostname}`,
+        // 2. Start SSH tunnel
+        setNotification('Creating public tunnel...');
+
+        const tunnelProcess = exec(
+          `ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -R 80:localhost:${port} nokey@localhost.run 2>&1`,
+          { maxBuffer: 1024 * 1024 }
+        );
+
+        let tunnelOutput = '';
+        let urlFound = false;
+
+        tunnelProcess.stderr?.on('data', (data) => {
+          tunnelOutput += data.toString();
+
+          // Parse URL from output
+          if (!urlFound) {
+            const urlMatch = tunnelOutput.match(/https:\/\/[a-z0-9]+\.[a-z]+\.[a-z]+/);
+            if (urlMatch) {
+              urlFound = true;
+              const publicUrl = urlMatch[0];
+
+              setViewer3DInfo({
+                url: `${publicUrl}/${fileName}`,
+                port,
+                fileName,
+                tunnelPID: tunnelProcess.pid,
+              });
+
+              setNotification('3D Viewer ready! Click URL to open.');
+            }
+          }
         });
 
-        setNotification('3D Viewer server started! Use SSH port forwarding.');
+        // Fallback if tunnel doesn't start
+        setTimeout(() => {
+          if (!urlFound) {
+            tunnelProcess.kill();
+            setViewer3DInfo({
+              url: htmlPath,
+              port: 0,
+              fileName,
+            });
+            setNotification('Tunnel failed. File path shown instead.');
+          }
+        }, 15000);  // 15 seconds to connect
       } else {
         // Local mode - try to open browser
         const command = process.platform === 'darwin'
@@ -215,17 +258,9 @@ export function ResultsScreen(): React.ReactElement {
 
       {/* 3D Viewer URL */}
       {viewer3DInfo && (
-        <Box flexDirection="column" marginTop={1}>
-          {viewer3DInfo.sshCommand && (
-            <Box>
-              <Text color="gray">SSH forward: </Text>
-              <Text color="yellow">{viewer3DInfo.sshCommand}</Text>
-            </Box>
-          )}
-          <Box>
-            <Text color="cyan">3D Viewer: </Text>
-            <Text color="white">{viewer3DInfo.url}</Text>
-          </Box>
+        <Box marginTop={1}>
+          <Text color="cyan">3D Viewer: </Text>
+          <Text color="white">{viewer3DInfo.url}</Text>
         </Box>
       )}
 
