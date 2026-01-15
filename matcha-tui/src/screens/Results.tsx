@@ -165,12 +165,6 @@ export function ResultsScreen(): React.ReactElement {
   };
 
   useInput((input, key) => {
-    // Close 3D viewer instructions
-    if (input === 'c' && viewer3DInfo) {
-      setViewer3DInfo(null);
-      return;
-    }
-
     // Arrow key shortcuts
     if (key.leftArrow) {
       handleMenuAction('back');
@@ -215,29 +209,11 @@ export function ResultsScreen(): React.ReactElement {
         <Text color="green" bold>{icons.check} Docking completed successfully!</Text>
       </Box>
 
-      {/* 3D Viewer SSH Instructions */}
+      {/* 3D Viewer URL */}
       {viewer3DInfo && (
-        <Box flexDirection="column" marginTop={1} borderStyle="round" borderColor="cyan" paddingX={1} paddingY={1}>
-          <Text bold color="cyan">🔬 3D Viewer Ready (SSH Mode)</Text>
-          <Box marginTop={1}>
-            <Text color="gray">Server started on port: </Text>
-            <Text color="white">{viewer3DInfo.port}</Text>
-          </Box>
-          <Box marginTop={1} flexDirection="column">
-            <Text color="magenta" bold>Setup SSH port forwarding:</Text>
-            <Box marginLeft={2} marginTop={1}>
-              <Text color="white">ssh -L {viewer3DInfo.port}:localhost:{viewer3DInfo.port} user@server</Text>
-            </Box>
-          </Box>
-          <Box marginTop={1} flexDirection="column">
-            <Text color="magenta" bold>Then open in your browser:</Text>
-            <Box marginLeft={2} marginTop={1}>
-              <Text color="cyan">{viewer3DInfo.url}</Text>
-            </Box>
-          </Box>
-          <Box marginTop={1}>
-            <Text color="gray" dimColor>[Press 'c' to close this message]</Text>
-          </Box>
+        <Box marginTop={1}>
+          <Text color="cyan">3D Viewer: </Text>
+          <Text color="white">{viewer3DInfo.url}</Text>
         </Box>
       )}
 
