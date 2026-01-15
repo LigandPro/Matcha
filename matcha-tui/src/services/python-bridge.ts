@@ -351,6 +351,18 @@ export class PythonBridge extends EventEmitter {
   }
 
   /**
+   * Delete a docking run.
+   */
+  async deleteRun(runPath: string): Promise<{
+    success: boolean;
+    message?: string;
+    error?: string;
+  }> {
+    this.ensureReady();
+    return this.client!.call('delete_run', { run_path: runPath });
+  }
+
+  /**
    * Check GPU availability.
    */
   async checkGPU(): Promise<GPUInfo> {

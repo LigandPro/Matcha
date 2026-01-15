@@ -1,24 +1,17 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { Box, Text, useInput } from 'ink';
-import SelectInput from 'ink-select-input';
 import { useStore } from '../store/index.js';
 import type { Screen } from '../types/index.js';
 
 const menuItems = [
-  { label: 'New docking job', value: 'setup' as const },
-  { label: 'Job history', value: 'history' as const },
-  { label: 'Quit', value: 'quit' as const },
+  { label: 'New docking job', value: 'setup' as const, key: 'n' },
+  { label: 'Job history', value: 'history' as const, key: 'h' },
+  { label: 'Quit', value: 'quit' as const, key: 'q' },
 ];
 
 export function Welcome(): React.ReactElement {
   const { setScreen, history } = useStore();
-
-  const handleSelect = (item: { label: string; value: string }) => {
-    if (item.value === 'quit') {
-      process.exit(0);
-    }
-    setScreen(item.value as Screen);
-  };
+  const [selectedIndex, setSelectedIndex] = useState(0);
 
   useInput((input, key) => {
     if (input === 'q' || key.escape) {
@@ -30,6 +23,19 @@ export function Welcome(): React.ReactElement {
     if (input === 'h') {
       setScreen('history');
     }
+    if (key.upArrow) {
+      setSelectedIndex((i) => Math.max(0, i - 1));
+    }
+    if (key.downArrow) {
+      setSelectedIndex((i) => Math.min(menuItems.length - 1, i + 1));
+    }
+    if (key.return) {
+      const item = menuItems[selectedIndex];
+      if (item.value === 'quit') {
+        process.exit(0);
+      }
+      setScreen(item.value as Screen);
+    }
   });
 
   const recentJobs = history.slice(0, 5);
@@ -40,21 +46,21 @@ export function Welcome(): React.ReactElement {
         <Text color="white" bold>
           Quick Actions
         </Text>
-        <Box marginTop={1}>
-          <SelectInput
-            items={menuItems}
-            onSelect={handleSelect}
-            indicatorComponent={({ isSelected }) => (
-              <Text color={isSelected ? 'cyan' : 'gray'}>
-                {isSelected ? '▸ ' : '  '}
-              </Text>
-            )}
-            itemComponent={({ isSelected, label }) => (
-              <Text color={isSelected ? 'cyan' : 'white'} bold={isSelected}>
-                {label}
-              </Text>
-            )}
-          />
+        <Box marginTop={1} flexDirection="column">
+          {menuItems.map((item, index) => {
+            const isSelected = index === selectedIndex;
+            return (
+              <Box key={item.value}>
+                <Text color={isSelected ? 'cyan' : 'gray'}>
+                  {isSelected ? '▸ ' : '  '}
+                </Text>
+                <Text color={isSelected ? 'cyan' : 'white'} bold={isSelected}>
+                  {item.label}
+                </Text>
+                <Text color="gray"> [{item.key}]</Text>
+              </Box>
+            );
+          })}
         </Box>
       </Box>
 

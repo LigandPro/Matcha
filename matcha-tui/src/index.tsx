@@ -14,8 +14,13 @@ async function main(): Promise<void> {
   process.env.MATCHA_ROOT = process.env.MATCHA_ROOT ?? process.cwd();
 
   try {
-    // Render app without clearing console
-    const { waitUntilExit } = render(<App />);
+    // Clear terminal before rendering
+    process.stdout.write('\x1b[2J\x1b[0f');
+
+    // Render app with patchConsole to hide previous output
+    const { waitUntilExit } = render(<App />, {
+      patchConsole: true,
+    });
 
     // Wait for the app to exit
     await waitUntilExit();

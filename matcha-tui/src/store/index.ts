@@ -15,6 +15,8 @@ interface AppState {
   // Navigation
   screen: Screen;
   setScreen: (screen: Screen) => void;
+  previousScreen: Screen | null;
+  setPreviousScreen: (screen: Screen | null) => void;
 
   // Current job configuration
   jobConfig: Partial<JobConfig>;
@@ -43,6 +45,10 @@ interface AppState {
   // UI state
   error: string | null;
   setError: (error: string | null) => void;
+  notification: string | null;
+  setNotification: (notification: string | null) => void;
+  modalOpen: boolean;
+  setModalOpen: (open: boolean) => void;
 
   // Debug mode
   debugMode: boolean;
@@ -70,6 +76,8 @@ export const useStore = create<AppState>((set) => ({
   // Navigation
   screen: 'welcome',
   setScreen: (screen) => set({ screen }),
+  previousScreen: null,
+  setPreviousScreen: (screen) => set({ previousScreen: screen }),
 
   // Job configuration
   jobConfig: { ...initialJobConfig },
@@ -110,6 +118,10 @@ export const useStore = create<AppState>((set) => ({
   // UI
   error: null,
   setError: (error) => set({ error }),
+  notification: null,
+  setNotification: (notification) => set({ notification }),
+  modalOpen: false,
+  setModalOpen: (open) => set({ modalOpen: open }),
 
   // Debug mode
   debugMode: process.env.MATCHA_DEBUG === '1',

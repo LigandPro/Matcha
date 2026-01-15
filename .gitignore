@@ -208,3 +208,9 @@ marimo/_lsp/
 __marimo__/
 
 outputs/
+results/
+
+# Matcha TUI
+matcha-tui/results/
+matcha-tui/dist/
+matcha-tui/node_modules/

@@ -339,6 +339,13 @@ def run_docking(job: "DockingJob") -> None:
                     pose["ligand"] = result["ligand"]
                 all_poses.extend(result["poses"])
 
+        # DEBUG: Log poses count and first pose
+        import sys
+        print(f"[DEBUG] all_results count: {len(all_results)}", file=sys.stderr)
+        print(f"[DEBUG] all_poses count: {len(all_poses)}", file=sys.stderr)
+        if all_poses:
+            print(f"[DEBUG] First pose: {all_poses[0]}", file=sys.stderr)
+
         # Create log file (like CLI does)
         log_path = output_run_dir / f"{run_name}.log"
         _write_log_file(

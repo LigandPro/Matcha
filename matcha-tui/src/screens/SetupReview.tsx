@@ -96,12 +96,9 @@ export function SetupReview(): React.ReactElement {
         </Box>
       </Box>
 
-      <Box marginY={1} flexDirection="column">
-        <Box borderStyle="round" borderColor="cyan" paddingX={2} paddingY={1}>
-          <Text color="cyan" bold>
-            Press Enter to start docking
-          </Text>
-        </Box>
+      <Box marginY={1} gap={2}>
+        <Text color="cyan" bold>[Enter] Start docking</Text>
+        <Text color="gray">[Esc] Back</Text>
       </Box>
 
       <Box marginY={1} flexDirection="column">

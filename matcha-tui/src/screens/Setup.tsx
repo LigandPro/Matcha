@@ -62,6 +62,10 @@ export function Setup(): React.ReactElement {
         </Box>
       </Box>
 
+      <Box marginTop={2}>
+        <Text color="gray">[Esc] Back to home</Text>
+      </Box>
+
       <Box marginY={1} flexDirection="column">
         <Text color="gray">
           ┌─ Progress ─────────────────────────────────────┐

@@ -4,10 +4,17 @@ import TextInput from 'ink-text-input';
 import { useStore } from '../store/index.js';
 import { truncatePath } from '../utils/format.js';
 import { logger } from '../utils/logger.js';
+import { FileBrowser } from '../components/FileBrowser.js';
 import * as fs from 'fs';
 import * as path from 'path';
 
 type Field = 'receptor' | 'ligand';
+type BrowseMode = 'input' | 'browse';
+
+interface FieldState {
+  mode: BrowseMode;
+  value: string;
+}
 
 // Default test files path (relative to matcha-tui directory)
 const DEFAULT_TEST_DIR = '../test';
@@ -15,15 +22,25 @@ const DEFAULT_RECEPTOR = `${DEFAULT_TEST_DIR}/1HVY_D16_protein_std.pdb`;
 const DEFAULT_LIGAND = `${DEFAULT_TEST_DIR}/1HVY_D16_ligand.sdf`;
 
 export function SetupFiles(): React.ReactElement {
-  const { setScreen, setJobConfig, jobConfig, debugMode } = useStore();
+  const { setScreen, setJobConfig, jobConfig, debugMode, setModalOpen } = useStore();
   const [activeField, setActiveField] = useState<Field>('receptor');
-  const [receptor, setReceptor] = useState(jobConfig.receptor || DEFAULT_RECEPTOR);
-  const [ligand, setLigand] = useState(
-    jobConfig.mode === 'batch' ? jobConfig.ligandDir || '' : jobConfig.ligand || DEFAULT_LIGAND
-  );
   const [error, setError] = useState<string | null>(null);
 
   const isBatch = jobConfig.mode === 'batch';
+
+  const [receptorState, setReceptorState] = useState<FieldState>({
+    mode: 'input',
+    value: jobConfig.receptor || DEFAULT_RECEPTOR
+  });
+
+  const [ligandState, setLigandState] = useState<FieldState>({
+    mode: 'input',
+    value: isBatch ? jobConfig.ligandDir || '' : jobConfig.ligand || DEFAULT_LIGAND
+  });
+
+  // Convenience getters
+  const receptor = receptorState.value;
+  const ligand = ligandState.value;
   const ligandLabel = isBatch ? 'Ligand file/directory' : 'Ligand file';
   const ligandHelp = isBatch
     ? 'Multi-SDF file or directory with .sdf files'
@@ -109,25 +126,54 @@ export function SetupFiles(): React.ReactElement {
   };
 
   useInput((input, key) => {
+    // Escape - back to setup screen or exit browse mode
     if (key.escape) {
+      // If in browse mode, exit to input mode
+      if (receptorState.mode === 'browse' || ligandState.mode === 'browse') {
+        if (activeField === 'receptor') {
+          setReceptorState(s => ({ ...s, mode: 'input' }));
+        } else {
+          setLigandState(s => ({ ...s, mode: 'input' }));
+        }
+        setModalOpen(false);
+        return;
+      }
+      // Otherwise go back to setup screen
       setScreen('setup');
       return;
     }
 
-    if (key.tab || (key.return && !key.shift)) {
-      if (activeField === 'receptor') {
-        setActiveField('ligand');
-      } else {
-        validateAndProceed();
+    // Space - toggle browse mode for active field (only in input mode)
+    if (input === ' ' && !key.ctrl && !key.meta) {
+      if (activeField === 'receptor' && receptorState.mode === 'input') {
+        setReceptorState(s => ({ ...s, mode: 'browse' }));
+        setModalOpen(true);
+        return;
       }
-      return;
+      if (activeField === 'ligand' && ligandState.mode === 'input') {
+        setLigandState(s => ({ ...s, mode: 'browse' }));
+        setModalOpen(true);
+        return;
+      }
     }
 
-    if (key.upArrow || (key.tab && key.shift)) {
-      setActiveField('receptor');
-    }
-    if (key.downArrow) {
-      setActiveField('ligand');
+    // Tab/Enter - navigate between fields (only in input mode)
+    if (receptorState.mode === 'input' && ligandState.mode === 'input') {
+      if (key.tab || (key.return && !key.shift)) {
+        if (activeField === 'receptor') {
+          setActiveField('ligand');
+        } else {
+          validateAndProceed();
+        }
+        return;
+      }
+
+      if (key.upArrow || (key.tab && key.shift)) {
+        setActiveField('receptor');
+      }
+      if (key.downArrow) {
+        setActiveField('ligand');
+      }
     }
   });
 
@@ -139,15 +185,36 @@ export function SetupFiles(): React.ReactElement {
             {activeField === 'receptor' ? '▸ ' : '  '}Receptor (.pdb)
           </Text>
           <Box marginLeft={2}>
-            {activeField === 'receptor' ? (
-              <TextInput
-                value={receptor}
-                onChange={(value) => {
-                  setReceptor(value);
+            {receptorState.mode === 'browse' ? (
+              <FileBrowser
+                fieldType="receptor"
+                initialPath={process.cwd()}
+                allowDirectories={false}
+                validExtensions={['.pdb']}
+                onSelect={(selectedPath) => {
+                  setReceptorState({ mode: 'input', value: selectedPath });
+                  setModalOpen(false);
                   setError(null);
                 }}
-                placeholder="Enter path to protein .pdb file"
+                onCancel={() => {
+                  setReceptorState(s => ({ ...s, mode: 'input' }));
+                  setModalOpen(false);
+                }}
               />
+            ) : activeField === 'receptor' ? (
+              <Box flexDirection="column">
+                <TextInput
+                  value={receptorState.value}
+                  onChange={(value) => {
+                    setReceptorState(s => ({ ...s, value }));
+                    setError(null);
+                  }}
+                  placeholder="Enter path to protein .pdb file"
+                />
+                <Box marginTop={1}>
+                  <Text color="gray">Press [Space] to browse files</Text>
+                </Box>
+              </Box>
             ) : (
               <Text color="gray">
                 {receptor ? truncatePath(receptor, 50) : '(not set)'}
@@ -161,15 +228,36 @@ export function SetupFiles(): React.ReactElement {
             {activeField === 'ligand' ? '▸ ' : '  '}{ligandLabel}
           </Text>
           <Box marginLeft={2}>
-            {activeField === 'ligand' ? (
-              <TextInput
-                value={ligand}
-                onChange={(value) => {
-                  setLigand(value);
+            {ligandState.mode === 'browse' ? (
+              <FileBrowser
+                fieldType="ligand"
+                initialPath={process.cwd()}
+                allowDirectories={isBatch}
+                validExtensions={isBatch ? ['.sdf'] : ['.sdf', '.mol', '.mol2', '.pdb']}
+                onSelect={(selectedPath) => {
+                  setLigandState({ mode: 'input', value: selectedPath });
+                  setModalOpen(false);
                   setError(null);
                 }}
-                placeholder={ligandHelp}
+                onCancel={() => {
+                  setLigandState(s => ({ ...s, mode: 'input' }));
+                  setModalOpen(false);
+                }}
               />
+            ) : activeField === 'ligand' ? (
+              <Box flexDirection="column">
+                <TextInput
+                  value={ligandState.value}
+                  onChange={(value) => {
+                    setLigandState(s => ({ ...s, value }));
+                    setError(null);
+                  }}
+                  placeholder={ligandHelp}
+                />
+                <Box marginTop={1}>
+                  <Text color="gray">Press [Space] to browse files</Text>
+                </Box>
+              </Box>
             ) : (
               <Text color="gray">
                 {ligand ? truncatePath(ligand, 50) : '(not set)'}
@@ -187,6 +275,17 @@ export function SetupFiles(): React.ReactElement {
           <Text color="red">Error: {error}</Text>
         </Box>
       )}
+
+      <Box marginTop={2} gap={2}>
+        {receptorState.mode === 'input' && ligandState.mode === 'input' && (
+          <>
+            <Text color="cyan">[Space] Browse files</Text>
+            <Text color="gray">[Tab] Switch field</Text>
+            <Text color="cyan">[Enter] Continue</Text>
+          </>
+        )}
+        <Text color="gray">[Esc] {receptorState.mode === 'browse' || ligandState.mode === 'browse' ? 'Cancel' : 'Back'}</Text>
+      </Box>
 
       <Box marginY={1} flexDirection="column">
         <Text color="gray">

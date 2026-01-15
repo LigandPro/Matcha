@@ -2,8 +2,8 @@
  * Main application component with screen navigation.
  */
 
-import React, { useEffect, useCallback } from 'react';
-import { Box, Text, useApp, useInput } from 'ink';
+import React, { useEffect, useCallback, useState } from 'react';
+import { Box, Text, useApp, useInput, useStdout } from 'ink';
 import { useStore } from './store/index.js';
 import { Header } from './components/Header.js';
 import { Footer } from './components/Footer.js';
@@ -37,25 +37,51 @@ const SCREEN_TITLES: Record<Screen, { title: string; subtitle?: string }> = {
 
 export function App(): React.ReactElement {
   const { exit } = useApp();
+  const { stdout } = useStdout();
   const screen = useStore((s) => s.screen);
   const setScreen = useStore((s) => s.setScreen);
+  const setPreviousScreen = useStore((s) => s.setPreviousScreen);
   const isRunning = useStore((s) => s.isRunning);
   const error = useStore((s) => s.error);
   const setError = useStore((s) => s.setError);
+  const notification = useStore((s) => s.notification);
+  const setNotification = useStore((s) => s.setNotification);
   const debugMode = useStore((s) => s.debugMode);
   const trackNavigation = useStore((s) => s.trackNavigation);
+  const modalOpen = useStore((s) => s.modalOpen);
+
+  // Get terminal dimensions for full-screen mode with resize tracking
+  const [terminalHeight, setTerminalHeight] = useState(stdout?.rows || 24);
+
+  // Update dimensions on terminal resize
+  useEffect(() => {
+    const handleResize = () => {
+      setTerminalHeight(stdout?.rows || 24);
+    };
+
+    stdout?.on('resize', handleResize);
+    return () => {
+      stdout?.off('resize', handleResize);
+    };
+  }, [stdout]);
 
   // Navigation wrapper with tracking
   const navigateTo = useCallback(
     (newScreen: Screen) => {
       const oldScreen = screen;
+
+      // Save previous screen for context-aware back navigation
+      if (newScreen === 'results') {
+        setPreviousScreen(oldScreen);
+      }
+
       if (debugMode) {
         logger.info('navigation', `${oldScreen} → ${newScreen}`);
         trackNavigation(oldScreen, newScreen);
       }
       setScreen(newScreen);
     },
-    [screen, debugMode, setScreen, trackNavigation]
+    [screen, debugMode, setScreen, trackNavigation, setPreviousScreen]
   );
 
   // Global keyboard shortcuts
@@ -63,6 +89,12 @@ export function App(): React.ReactElement {
     // Quit on 'q' (unless running or in input mode)
     if (input === 'q' && !isRunning && screen !== 'setup-files') {
       exit();
+      return;
+    }
+
+    // Return to running screen if background task exists
+    if (input === 'r' && isRunning && screen !== 'running') {
+      navigateTo('running');
       return;
     }
 
@@ -81,6 +113,11 @@ export function App(): React.ReactElement {
 
   // Handle back navigation
   const handleBack = useCallback(() => {
+    // Don't handle back if modal is open (e.g., file browser)
+    if (modalOpen) {
+      return;
+    }
+
     const backMap: Partial<Record<Screen, Screen>> = {
       'setup-files': 'welcome',
       'setup-box': 'setup-files',
@@ -97,7 +134,7 @@ export function App(): React.ReactElement {
       }
       navigateTo(prevScreen);
     }
-  }, [screen, isRunning, debugMode, navigateTo]);
+  }, [screen, isRunning, debugMode, navigateTo, modalOpen]);
 
   // Clear error after 5 seconds
   useEffect(() => {
@@ -107,33 +144,57 @@ export function App(): React.ReactElement {
     }
   }, [error, setError]);
 
+  // Clear notification after 10 seconds
+  useEffect(() => {
+    if (notification) {
+      const timer = setTimeout(() => setNotification(null), 10000);
+      return () => clearTimeout(timer);
+    }
+  }, [notification, setNotification]);
+
   const screenInfo = SCREEN_TITLES[screen];
+  const hasBackgroundTask = isRunning && screen !== 'running';
 
   return (
-    <Box flexDirection="column" width="100%" minHeight={24}>
+    <Box flexDirection="column" width="100%" height={terminalHeight}>
       {/* Header */}
-      <Header
-        showLogo={screen === 'welcome'}
-        title={screenInfo.title}
-        subtitle={screenInfo.subtitle}
-      />
+      <Box flexShrink={0}>
+        <Header
+          showLogo={screen === 'welcome'}
+          title={screenInfo.title}
+          subtitle={screenInfo.subtitle}
+          showBackgroundTask={hasBackgroundTask}
+        />
+      </Box>
 
       {/* Error banner */}
       {error && (
-        <Box marginY={1} paddingX={2}>
+        <Box marginY={1} paddingX={2} flexShrink={0}>
           <Text color="red" bold>
             Error: {error}
           </Text>
         </Box>
       )}
 
+      {notification && (
+        <Box marginY={1} paddingX={2} flexShrink={0}>
+          <Text color="green" bold>
+            {notification}
+          </Text>
+        </Box>
+      )}
+
       {/* Main content */}
-      <Box flexGrow={1} flexDirection="column" paddingX={1}>
+      <Box flexGrow={1} flexShrink={1} minHeight={0} flexDirection="column" paddingX={1}>
         <ScreenRouter screen={screen} />
       </Box>
 
-      {/* Footer */}
-      <Footer screen={screen} isRunning={isRunning} />
+      {/* Footer - hide when modal is open */}
+      {!modalOpen && (
+        <Box flexShrink={0}>
+          <Footer screen={screen} isRunning={isRunning} />
+        </Box>
+      )}
     </Box>
   );
 }

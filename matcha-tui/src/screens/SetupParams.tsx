@@ -161,6 +161,11 @@ export function SetupParams(): React.ReactElement {
         </Box>
       )}
 
+      <Box marginTop={2} gap={2}>
+        <Text color="cyan">[Enter] Continue</Text>
+        <Text color="gray">[Esc] Back</Text>
+      </Box>
+
       <Box marginY={1} flexDirection="column">
         <Text color="gray">
           ┌─ Progress ─────────────────────────────────────┐
