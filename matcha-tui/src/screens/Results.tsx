@@ -2,7 +2,7 @@
  * Results Screen - display docking results with batch mode support.
  */
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { exec } from 'child_process';
 import path from 'path';
@@ -13,9 +13,10 @@ import { icons } from '../utils/colors.js';
 import { formatDuration, truncatePath } from '../utils/format.js';
 import { generateMolstarViewer } from '../utils/molstar-viewer.js';
 import { isKey } from '../utils/keyboard.js';
+import { FileBrowser } from '../components/FileBrowser.js';
 import type { BatchLigandStatus } from '../types/index.js';
 
-type MenuAction = 'new' | 'view3d' | 'open' | 'toggle' | 'back' | 'home';
+type MenuAction = 'new' | 'view3d' | 'toggle' | 'back' | 'home';
 
 // Helper to make clickable links in terminal (OSC 8 escape codes)
 function makeClickableLink(url: string, text: string): string {
@@ -38,60 +39,20 @@ export function ResultsScreen(): React.ReactElement {
   const results = useStore((s) => s.results);
   const setError = useStore((s) => s.setError);
   const setNotification = useStore((s) => s.setNotification);
-  const [viewMode, setViewMode] = useState<'summary' | 'ligands' | 'ligand-detail'>('summary');
+  const [viewMode, setViewMode] = useState<'summary' | 'ligands' | 'ligand-detail' | 'browse'>('summary');
   const [selectedTopIndex, setSelectedTopIndex] = useState(0);
   const [selectedLigandIndex, setSelectedLigandIndex] = useState(0);
   const [detailReturnView, setDetailReturnView] = useState<'summary' | 'ligands'>('summary');
   const [activeLigandIndex, setActiveLigandIndex] = useState<number | null>(null);
+  const [initialViewSet, setInitialViewSet] = useState(false);
+  const [browseRoot, setBrowseRoot] = useState<string | null>(null);
+  const [browseReturnView, setBrowseReturnView] = useState<'summary' | 'ligands' | 'ligand-detail'>('summary');
   const [viewer3DInfo, setViewer3DInfo] = useState<{
     url: string;
     port: number;
     fileName: string;
   } | null>(null);
 
-
-  const openOutputFolder = () => {
-    const outputPath = results?.bestPosePath;
-    if (!outputPath) return;
-
-    // Get directory path from bestPosePath (remove filename if present)
-    let dirPath = outputPath.endsWith('.sdf')
-      ? path.dirname(outputPath)
-      : outputPath;
-    const baseName = path.basename(dirPath);
-    if (baseName === 'best_poses' || baseName === 'all_poses') {
-      dirPath = path.dirname(dirPath);
-    }
-
-    if (!fs.existsSync(dirPath)) {
-      setError(`Output directory not found: ${dirPath}`);
-      return;
-    }
-
-    const isSSH = Boolean(
-      process.env.SSH_CONNECTION ||
-      process.env.SSH_TTY ||
-      process.env.SSH_CLIENT
-    );
-    if (isSSH) {
-      setNotification(`Output directory: ${dirPath}`);
-      return;
-    }
-
-    // Platform-specific file explorer commands
-    const command = process.platform === 'darwin'
-      ? `open "${dirPath}"`
-      : process.platform === 'win32'
-      ? `explorer "${dirPath}"`
-      : `xdg-open "${dirPath}"`;
-
-    exec(command, (error) => {
-      if (error) {
-        setNotification(`Could not open folder automatically. Path: ${dirPath}`);
-        console.error('Failed to open folder:', error);
-      }
-    });
-  };
 
   const view3D = async () => {
     if (!results) return;
@@ -193,9 +154,6 @@ export function ResultsScreen(): React.ReactElement {
       case 'view3d':
         view3D();
         break;
-      case 'open':
-        openOutputFolder();
-        break;
       case 'toggle':
         setViewMode(viewMode === 'summary' ? 'ligands' : 'summary');
         break;
@@ -215,19 +173,47 @@ export function ResultsScreen(): React.ReactElement {
   };
 
   const ligandList = results?.ligandStatuses ?? [];
+  const bestBase = results?.bestPosePath ? path.basename(results.bestPosePath) : '';
+  const allBase = results?.allPosesPath ? path.basename(results.allPosesPath) : '';
+  const hasBatchDirs = bestBase === 'best_poses' || allBase === 'all_poses';
   const isBatch =
+    hasBatchDirs ||
     (results?.ligandStatuses && results.ligandStatuses.length > 0) ||
     (results?.totalLigands ?? 0) > 1;
+  const batchRunDir = isBatch
+    ? (bestBase === 'best_poses' && results?.bestPosePath
+        ? path.dirname(results.bestPosePath)
+        : results?.bestPosePath ?? '')
+    : '';
   const topLigands = ligandList
     .map((ligand, index) => ({ ligand, index }))
     .filter((item) => item.ligand.status === 'completed' && item.ligand.error_estimate !== undefined)
     .sort((a, b) => (a.ligand.error_estimate ?? 999) - (b.ligand.error_estimate ?? 999))
     .slice(0, 10);
 
+  useEffect(() => {
+    if (initialViewSet) return;
+    if (results && isBatch) {
+      setViewMode('ligands');
+      setInitialViewSet(true);
+    } else if (results) {
+      setInitialViewSet(true);
+    }
+  }, [initialViewSet, results, isBatch]);
+
   useInput((input, key) => {
+    if (viewMode === 'browse') {
+      return;
+    }
     if (isBatch && viewMode === 'ligand-detail') {
       if (key.escape || isKey(input, 'b') || key.leftArrow) {
         setViewMode(detailReturnView);
+        return;
+      }
+      if (key.return && activeLigandIndex !== null && results?.ligandStatuses?.[activeLigandIndex]) {
+        setBrowseRoot(batchRunDir);
+        setBrowseReturnView('ligand-detail');
+        setViewMode('browse');
         return;
       }
     }
@@ -293,8 +279,6 @@ export function ResultsScreen(): React.ReactElement {
       } else if (viewMode === 'ligands') {
         setViewMode('summary');
       }
-    } else if (isKey(input, 'o')) {
-      handleMenuAction('open');
     } else if (isKey(input, 'v')) {
       handleMenuAction('view3d');
     }
@@ -316,6 +300,45 @@ export function ResultsScreen(): React.ReactElement {
       <Box>
         <Text color="green" bold>{icons.check} Docking completed successfully!</Text>
       </Box>
+
+      {viewMode === 'browse' && browseRoot && (
+        <Box flexDirection="column" marginTop={1}>
+          <Text bold color="white" underline>Browse Files</Text>
+          <Box marginTop={1} flexDirection="column">
+            <FileBrowser
+              fieldType="ligand"
+              initialPath={browseRoot}
+              allowDirectories={true}
+              validExtensions={['.sdf', '.log', '.pdb', '.json', '.txt']}
+              onSelect={(selectedPath) => {
+                setNotification(selectedPath);
+                setViewMode(browseReturnView);
+              }}
+              onCancel={() => {
+                setViewMode(browseReturnView);
+              }}
+            />
+            <Box marginTop={1}>
+              <Text color="gray">Enter: open file / directory · Esc: back</Text>
+            </Box>
+          </Box>
+        </Box>
+      )}
+
+      {viewMode === 'browse' && (
+        <Box marginTop={1}>
+          <Text color="gray">Tip: use Enter to navigate into folders and select files.</Text>
+        </Box>
+      )}
+
+      {viewMode === 'browse' && (
+        <Box marginTop={1} gap={4}>
+          <Text color="gray">[Esc] Back</Text>
+        </Box>
+      )}
+
+      {viewMode !== 'browse' && (
+        <>
 
       {/* 3D Viewer */}
       {viewer3DInfo && (
@@ -386,7 +409,7 @@ export function ResultsScreen(): React.ReactElement {
               <Box><Text color="gray">Receptor: </Text><Text color="green">{path.basename(results.receptor)}</Text></Box>
             )}
             {results.ligand && (
-              <Box><Text color="gray">Ligand: </Text><Text color="green">{path.basename(results.ligand)}</Text></Box>
+              <Box><Text color="gray">{isBatch ? 'Ligands: ' : 'Ligand: '}</Text><Text color="green">{path.basename(results.ligand)}</Text></Box>
             )}
           </Box>
         </Box>
@@ -401,25 +424,25 @@ export function ResultsScreen(): React.ReactElement {
               <Box>
                 <Text color="gray">Run dir:</Text>
                 <Text> </Text>
-                <Text color="blue">{path.dirname(results.bestPosePath)}</Text>
+                <Text color="blue">{truncatePath(batchRunDir, 60)}</Text>
               </Box>
               <Box>
                 <Text color="gray">Best poses:</Text>
                 <Text> </Text>
-                <Text color="blue">{results.bestPosePath}</Text>
+                <Text color="blue">{truncatePath(results.bestPosePath, 60)}</Text>
               </Box>
               {results.allPosesPath && (
                 <Box>
                   <Text color="gray">All poses:</Text>
                   <Text> </Text>
-                  <Text color="blue">{results.allPosesPath}</Text>
+                  <Text color="blue">{truncatePath(results.allPosesPath, 60)}</Text>
                 </Box>
               )}
               {results.logPath && (
                 <Box>
                   <Text color="gray">Log file:</Text>
                   <Text> </Text>
-                  <Text color="blue">{results.logPath}</Text>
+                  <Text color="blue">{truncatePath(results.logPath, 60)}</Text>
                 </Box>
               )}
             </>
@@ -428,20 +451,20 @@ export function ResultsScreen(): React.ReactElement {
               <Box>
                 <Text color="gray">Best pose:</Text>
                 <Text> </Text>
-                <Text color="blue">{results.bestPosePath}</Text>
+                <Text color="blue">{truncatePath(results.bestPosePath, 60)}</Text>
               </Box>
               {results.allPosesPath && (
                 <Box>
                   <Text color="gray">All poses:</Text>
                   <Text> </Text>
-                  <Text color="blue">{results.allPosesPath}</Text>
+                  <Text color="blue">{truncatePath(results.allPosesPath, 60)}</Text>
                 </Box>
               )}
               {results.logPath && (
                 <Box>
                   <Text color="gray">Log file:</Text>
                   <Text> </Text>
-                  <Text color="blue">{results.logPath}</Text>
+                  <Text color="blue">{truncatePath(results.logPath, 60)}</Text>
                 </Box>
               )}
             </>
@@ -520,19 +543,19 @@ export function ResultsScreen(): React.ReactElement {
             <Box marginTop={1}>
               <Text color="gray">Best pose: </Text>
               <Text color="blue">
-                {truncatePath(path.join(results.bestPosePath, 'best_poses', `${results.ligandStatuses[activeLigandIndex].name}.sdf`), 60)}
+                {truncatePath(path.join(batchRunDir, 'best_poses', `${results.ligandStatuses[activeLigandIndex].name}.sdf`), 60)}
               </Text>
             </Box>
             <Box>
               <Text color="gray">All poses: </Text>
               <Text color="blue">
-                {truncatePath(path.join(results.bestPosePath, 'all_poses', `${results.ligandStatuses[activeLigandIndex].name}_poses.sdf`), 60)}
+                {truncatePath(path.join(batchRunDir, 'all_poses', `${results.ligandStatuses[activeLigandIndex].name}_poses.sdf`), 60)}
               </Text>
             </Box>
             <Box>
               <Text color="gray">Log: </Text>
               <Text color="blue">
-                {truncatePath(path.join(results.bestPosePath, 'logs', `${results.ligandStatuses[activeLigandIndex].name}.log`), 60)}
+                {truncatePath(path.join(batchRunDir, 'logs', `${results.ligandStatuses[activeLigandIndex].name}.log`), 60)}
               </Text>
             </Box>
           </Box>
@@ -573,14 +596,17 @@ export function ResultsScreen(): React.ReactElement {
       {/* Navigation */}
       <Box marginTop={2} gap={4}>
         <Text color="cyan">[n or →] New docking</Text>
-        {isBatch && viewMode !== 'ligand-detail' && <Text color="yellow">[l] {viewMode === 'summary' ? 'All ligands' : 'Summary'}</Text>}
+        {isBatch && viewMode !== 'ligand-detail' && <Text color="gray">[↑↓] Select</Text>}
         {isBatch && viewMode !== 'ligand-detail' && <Text color="gray">[Enter] View ligand</Text>}
+        {isBatch && viewMode !== 'ligand-detail' && <Text color="yellow">[l] {viewMode === 'summary' ? 'All ligands' : 'Summary'}</Text>}
+        {isBatch && viewMode === 'ligand-detail' && <Text color="gray">[Enter] Browse files</Text>}
         {isBatch && viewMode === 'ligand-detail' && <Text color="gray">[b or Esc] Back to list</Text>}
         <Text color="magenta">[v] View 3D</Text>
-        <Text color="magenta">[o] Open folder</Text>
         {viewMode !== 'ligand-detail' && <Text color="gray">[b or ←] Back</Text>}
         <Text color="gray">[h] Home</Text>
       </Box>
+        </>
+      )}
     </Box>
   );
 }

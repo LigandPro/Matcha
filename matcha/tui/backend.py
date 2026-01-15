@@ -385,11 +385,19 @@ class RPCHandler:
         for pattern, key in [
             ("*_best.sdf", "best_pose"),
             ("*_poses.sdf", "all_poses"),
-            ("*.log", "log"),
         ]:
             matches = list(p.glob(pattern))
             if matches:
                 details["files"][key] = str(matches[0])
+
+        # Prefer summary log in run root if present
+        root_log = p / f"{p.name}.log"
+        if root_log.exists():
+            details["files"]["log"] = str(root_log)
+        else:
+            matches = list(p.glob("*.log"))
+            if matches:
+                details["files"]["log"] = str(matches[0])
 
         batch_best_dir = p / "best_poses"
         batch_all_dir = p / "all_poses"

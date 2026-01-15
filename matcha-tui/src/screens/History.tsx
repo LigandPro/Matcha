@@ -244,6 +244,9 @@ export function HistoryScreen(): React.ReactElement {
             path: path.join(bestDir, file),
             status: 'completed',
           }));
+          if (!totalLigandsFromLog) {
+            totalLigandsFromLog = files.length;
+          }
         }
       }
 
