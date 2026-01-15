@@ -132,6 +132,8 @@ export interface JobResults {
   bestPosePath: string;
   allPosesPath: string;
   logPath: string;
+  receptor?: string;
+  ligand?: string;
   // Batch mode fields
   totalLigands?: number;
   ligandStatuses?: BatchLigandStatus[];

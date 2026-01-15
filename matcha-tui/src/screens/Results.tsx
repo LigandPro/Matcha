@@ -245,6 +245,21 @@ export function ResultsScreen(): React.ReactElement {
         </Box>
       )}
 
+      {/* Input files */}
+      {(results.receptor || results.ligand) && (
+        <Box flexDirection="column" marginTop={1}>
+          <Text bold color="white" underline>Input Files</Text>
+          <Box flexDirection="column" marginLeft={2} marginTop={1}>
+            {results.receptor && (
+              <Box><Text color="gray">Receptor: </Text><Text color="green">{path.basename(results.receptor)}</Text></Box>
+            )}
+            {results.ligand && (
+              <Box><Text color="gray">Ligand: </Text><Text color="green">{path.basename(results.ligand)}</Text></Box>
+            )}
+          </Box>
+        </Box>
+      )}
+
       {/* Output path */}
       <Box flexDirection="column" marginTop={1}>
         <Text bold color="white" underline>Output</Text>

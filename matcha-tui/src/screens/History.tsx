@@ -21,6 +21,14 @@ interface RunInfo {
   ligand?: string;
 }
 
+interface RunDetails {
+  name: string;
+  path: string;
+  files: Record<string, string>;
+  receptor?: string;
+  ligand?: string;
+}
+
 export function HistoryScreen(): React.ReactElement {
   const setScreen = useStore((s) => s.setScreen);
   const setError = useStore((s) => s.setError);
@@ -31,6 +39,7 @@ export function HistoryScreen(): React.ReactElement {
 
   const [runs, setRuns] = useState<RunInfo[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const [selectedDetails, setSelectedDetails] = useState<RunDetails | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingResults, setLoadingResults] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -71,6 +80,25 @@ export function HistoryScreen(): React.ReactElement {
 
     loadHistory();
   }, [jobConfig.params?.outputDir, setError]);
+
+  // Load details for selected run
+  useEffect(() => {
+    const loadDetails = async () => {
+      if (runs.length === 0 || !runs[selectedIndex]) {
+        setSelectedDetails(null);
+        return;
+      }
+
+      try {
+        const details = await getBridge().getRunDetails(runs[selectedIndex].path);
+        setSelectedDetails(details as RunDetails);
+      } catch (err) {
+        setSelectedDetails(null);
+      }
+    };
+
+    loadDetails();
+  }, [runs, selectedIndex]);
 
   // Load and view results for selected run
   const viewResults = async () => {
@@ -142,6 +170,8 @@ export function HistoryScreen(): React.ReactElement {
         bestPosePath: details.files?.best_pose || selectedRun.path,
         allPosesPath: details.files?.all_poses || '',
         logPath: details.files?.log || '',
+        receptor: selectedRun.receptor,
+        ligand: selectedRun.ligand,
       };
 
       // Set results and navigate to results screen
@@ -273,39 +303,43 @@ export function HistoryScreen(): React.ReactElement {
     <Box flexDirection="column" gap={1}>
       <Text bold color="white">Previous Runs ({runs.length})</Text>
 
-      <Box flexDirection="column" marginTop={1}>
+      <Box marginTop={1}>
+        <Text color="gray" bold>{'  '}{'Name'.padEnd(25)}{'Date'.padEnd(20)}Status</Text>
+      </Box>
+
+      <Box flexDirection="column">
         {runs.map((run, index) => {
           const isSelected = index === selectedIndex;
           const statusIcon = run.status === 'completed' ? icons.check : icons.pending;
           const statusColor = run.status === 'completed' ? 'green' : 'yellow';
 
-          const receptorName = run.receptor ? path.basename(run.receptor) : 'N/A';
-          const ligandName = run.ligand ? path.basename(run.ligand) : 'N/A';
-
           return (
-            <Box key={run.path} flexDirection="column" marginBottom={0}>
-              <Box>
-                <Text color={isSelected ? 'cyan' : 'white'}>{isSelected ? '▶ ' : '  '}</Text>
-                <Text color={isSelected ? 'cyan' : 'white'} bold={isSelected}>{run.name}</Text>
-                <Text color="gray"> · </Text>
-                <Text color="gray">{formatDate(run.date)}</Text>
-                <Text color="gray"> · </Text>
-                <Text color={statusColor}>{statusIcon} {run.status}</Text>
-              </Box>
-              <Box marginLeft={2}>
-                <Text color="gray">R: </Text>
-                <Text color="green">{receptorName.slice(0, 25)}</Text>
-                <Text color="gray"> · L: </Text>
-                <Text color="green">{ligandName.slice(0, 25)}</Text>
-              </Box>
+            <Box key={run.path}>
+              <Text color={isSelected ? 'cyan' : 'white'}>{isSelected ? '▶ ' : '  '}</Text>
+              <Text color={isSelected ? 'cyan' : 'white'} bold={isSelected}>{run.name.slice(0, 23).padEnd(25)}</Text>
+              <Text color="gray">{formatDate(run.date).padEnd(20)}</Text>
+              <Text color={statusColor}>{statusIcon} {run.status}</Text>
             </Box>
           );
         })}
       </Box>
 
-      {runs[selectedIndex] && (
+      {runs[selectedIndex] && selectedDetails && (
         <Box flexDirection="column" marginTop={2} borderStyle="single" borderColor="gray" paddingX={1}>
           <Text bold color="white">{runs[selectedIndex].name}</Text>
+          <Box><Text color="gray">Date: </Text><Text color="white">{formatDate(runs[selectedIndex].date)}</Text></Box>
+          {selectedDetails.receptor && (
+            <Box>
+              <Text color="gray">Receptor: </Text>
+              <Text color="green">{path.basename(selectedDetails.receptor)}</Text>
+            </Box>
+          )}
+          {selectedDetails.ligand && (
+            <Box>
+              <Text color="gray">Ligand: </Text>
+              <Text color="green">{path.basename(selectedDetails.ligand)}</Text>
+            </Box>
+          )}
           <Box><Text color="gray">Path: </Text><Text color="blue">{runs[selectedIndex].path}</Text></Box>
         </Box>
       )}

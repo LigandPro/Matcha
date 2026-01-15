@@ -30,10 +30,12 @@ interface LigandStatus {
 }
 
 export function RunningScreen(): React.ReactElement {
+  const screen = useStore((s) => s.screen);
   const setScreen = useStore((s) => s.setScreen);
   const setRunning = useStore((s) => s.setRunning);
   const setResults = useStore((s) => s.setResults);
   const setError = useStore((s) => s.setError);
+  const setNotification = useStore((s) => s.setNotification);
   const addLog = useStore((s) => s.addLog);
   const jobConfig = useStore((s) => s.jobConfig);
   const debugMode = useStore((s) => s.debugMode);
@@ -203,7 +205,14 @@ export function RunningScreen(): React.ReactElement {
             // Use event.poses from backend (aggregated data for all ligands)
             // Local 'poses' state is only for displaying current ligand during execution
             const finalPoses = (event.poses ?? []) as PoseResult[];
-            setResults({
+
+            // DEBUG: Log received poses
+            console.error('[DEBUG] job_done event.poses count:', finalPoses.length);
+            if (finalPoses.length > 0) {
+              console.error('[DEBUG] First pose:', JSON.stringify(finalPoses[0], null, 2));
+            }
+
+            const results = {
               runName: 'completed',
               runtime: (Date.now() - startTime) / 1000,
               totalPoses: finalPoses.length,
@@ -212,10 +221,21 @@ export function RunningScreen(): React.ReactElement {
               bestPosePath: event.output_path ?? '',
               allPosesPath: '',
               logPath: '',
+              receptor: jobConfig.receptor,
+              ligand: jobConfig.ligand,
               totalLigands: event.total_ligands,
               ligandStatuses: event.ligand_statuses as LigandStatus[] | undefined,
-            });
-            setScreen('results');
+            };
+
+            setResults(results);
+
+            // Check if user is still on running screen
+            // If they navigated away, show notification instead of auto-navigating
+            if (screen === 'running') {
+              setScreen('results');
+            } else {
+              setNotification('✓ Docking completed! View results in History.');
+            }
           } else if (event.type === 'error') {
             setError(event.message ?? 'Unknown error');
             setRunning(false);
@@ -241,18 +261,20 @@ export function RunningScreen(): React.ReactElement {
 
     startJob();
 
-    // Cleanup on unmount
-    return () => {
-      closeBridge().catch(() => {});
-    };
+    // No cleanup on unmount - allow background job to continue
+    // Backend will be cleaned up when app exits
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Progress events are now handled in the first useEffect (before startDocking)
 
-  useInput((input) => {
+  useInput((input, key) => {
     if (input === 'c' && bridgeReady) {
       getBridge().cancelJob().catch(() => {});
+    } else if (input === 'h' || key.escape) {
+      // Allow user to leave running screen and go back to home
+      // Job continues in background
+      setScreen('welcome');
     }
   });
 
@@ -330,8 +352,9 @@ export function RunningScreen(): React.ReactElement {
         </Box>
       )}
 
-      <Box marginTop={2}>
-        <Text color="gray">Press [c] to cancel</Text>
+      <Box marginTop={2} gap={2}>
+        <Text color="yellow">[c] Cancel</Text>
+        <Text color="cyan">[h] Go to Home (job continues in background)</Text>
       </Box>
     </Box>
   );
