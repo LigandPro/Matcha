@@ -12,6 +12,17 @@ export interface ViewerOptions {
   title?: string;
 }
 
+/**
+ * Parse multi-molecule SDF file into separate molecules
+ * @param sdfText SDF file content
+ * @returns Array of individual molecule SDF strings
+ */
+function parseSDF(sdfText: string): string[] {
+  return sdfText.split('\n$$$$\n')
+    .map(m => m.trim())
+    .filter(m => m.length > 0);
+}
+
 const HTML_TEMPLATE = `<!DOCTYPE html>
 <html>
 <head>
@@ -43,31 +54,56 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
   <div class="header">
     <h1>{{TITLE}}</h1>
   </div>
+
   <div id="viewer"></div>
+
   <script>
     const proteinData = \`{{PROTEIN_DATA}}\`;
-    const ligandData = \`{{LIGAND_DATA}}\`;
+    const ligandPosesData = {{LIGAND_POSES_DATA}};
 
-    molstar.Viewer.create('viewer', {
-      layoutIsExpanded: false,
-      layoutShowControls: true,
-      layoutShowRemoteState: false,
-      layoutShowSequence: true,
-      layoutShowLog: false,
-      layoutShowLeftPanel: true,
-      viewportShowExpand: true,
-      viewportShowSelectionMode: true,
-      viewportShowAnimation: false,
-    }).then(viewer => {
-      // Load protein first
-      viewer.loadStructureFromData(proteinData, 'pdb', false).then(() => {
-        console.log('Protein loaded');
-        // Then load ligand
-        viewer.loadStructureFromData(ligandData, 'sdf', false).then(() => {
-          console.log('Ligand loaded');
+    async function initViewer() {
+      try {
+        const viewer = await molstar.Viewer.create('viewer', {
+          layoutIsExpanded: false,
+          layoutShowControls: true,
+          layoutShowRemoteState: false,
+          layoutShowSequence: true,
+          layoutShowLog: false,
+          layoutShowLeftPanel: true,      // Enable left panel for structure visibility controls
+          viewportShowExpand: true,
+          viewportShowSelectionMode: true, // Enable selection mode for clicking structures
+          viewportShowAnimation: false,
         });
-      });
-    });
+
+        // Load protein
+        await viewer.loadStructureFromData(proteinData, 'pdb', false);
+        console.log('Protein loaded');
+
+        // Load all ligand poses as separate structures
+        const ligandStructures = [];
+        for (let i = 0; i < ligandPosesData.length; i++) {
+          const molData = ligandPosesData[i] + '\\n$$$$\\n';
+          const structure = await viewer.loadStructureFromData(molData, 'sdf', false);
+          ligandStructures.push(structure);
+          console.log(\`Ligand pose \${i + 1} loaded\`);
+        }
+
+        // Auto-focus camera on first ligand
+        if (ligandStructures.length > 0 && ligandStructures[0]?.cell) {
+          await viewer.managers.camera.focusLoci(ligandStructures[0].cell);
+          console.log('Camera focused on first ligand');
+        }
+
+        console.log('Viewer ready. Use left panel to toggle structure visibility.');
+
+      } catch (error) {
+        console.error('Failed to initialize viewer:', error);
+        document.body.innerHTML = '<div style="color: red; padding: 20px;">Failed to initialize viewer: ' + error.message + '</div>';
+      }
+    }
+
+    // Start when page loads
+    initViewer();
   </script>
 </body>
 </html>`;
@@ -84,11 +120,14 @@ export async function generateMolstarViewer(options: ViewerOptions): Promise<str
   const proteinData = fs.readFileSync(proteinPath, 'utf-8');
   const ligandData = fs.readFileSync(ligandPath, 'utf-8');
 
+  // Parse poses from SDF (handles both single-molecule and multi-molecule SDFs)
+  const ligandPoses = parseSDF(ligandData);
+
   // Generate HTML by replacing template placeholders
   const html = HTML_TEMPLATE
     .replace(/{{TITLE}}/g, title)
     .replace('{{PROTEIN_DATA}}', proteinData.replace(/`/g, '\\`'))
-    .replace('{{LIGAND_DATA}}', ligandData.replace(/`/g, '\\`'));
+    .replace('{{LIGAND_POSES_DATA}}', JSON.stringify(ligandPoses.map(p => p.replace(/`/g, '\\`'))));
 
   // Write HTML file
   fs.writeFileSync(outputHtmlPath, html, 'utf-8');

@@ -38,9 +38,11 @@ export function ResultsScreen(): React.ReactElement {
   const results = useStore((s) => s.results);
   const setError = useStore((s) => s.setError);
   const setNotification = useStore((s) => s.setNotification);
-  const [viewMode, setViewMode] = useState<'summary' | 'ligands'>('summary');
+  const [viewMode, setViewMode] = useState<'summary' | 'ligands' | 'ligand-detail'>('summary');
   const [selectedTopIndex, setSelectedTopIndex] = useState(0);
   const [selectedLigandIndex, setSelectedLigandIndex] = useState(0);
+  const [detailReturnView, setDetailReturnView] = useState<'summary' | 'ligands'>('summary');
+  const [activeLigandIndex, setActiveLigandIndex] = useState<number | null>(null);
   const [initialViewSet, setInitialViewSet] = useState(false);
   const [viewer3DInfo, setViewer3DInfo] = useState<{
     url: string;
@@ -70,15 +72,23 @@ export function ResultsScreen(): React.ReactElement {
 
       // Find paths to structure files
       const proteinPath = path.join(resultDir, 'work/datasets/any_conf/sample_0/sample_0_protein.pdb');
-      const ligandPath = path.join(resultDir, `${runName}_best.sdf`);
 
-      // Check if files exist
+      // Check if protein file exists
       if (!fs.existsSync(proteinPath)) {
         setError('Protein file not found');
         return;
       }
 
-      if (!fs.existsSync(ligandPath)) {
+      // Try to use poses.sdf first (all poses), fallback to best.sdf (single pose)
+      const posesPath = path.join(resultDir, `${runName}_poses.sdf`);
+      const bestPath = path.join(resultDir, `${runName}_best.sdf`);
+
+      let ligandPath: string;
+      if (fs.existsSync(posesPath)) {
+        ligandPath = posesPath;
+      } else if (fs.existsSync(bestPath)) {
+        ligandPath = bestPath;
+      } else {
         setError('Ligand file not found');
         return;
       }
@@ -173,12 +183,6 @@ export function ResultsScreen(): React.ReactElement {
     .sort((a, b) => (a.ligand.error_estimate ?? 999) - (b.ligand.error_estimate ?? 999))
     .slice(0, 10);
 
-  const activeLigandIndex = isBatch
-    ? (viewMode === 'summary'
-        ? (topLigands[selectedTopIndex]?.index ?? null)
-        : (ligandList[selectedLigandIndex] ? selectedLigandIndex : null))
-    : null;
-
   const activeLigand = activeLigandIndex !== null
     ? results?.ligandStatuses?.[activeLigandIndex] ?? null
     : null;
@@ -194,6 +198,13 @@ export function ResultsScreen(): React.ReactElement {
   }, [initialViewSet, results, isBatch]);
 
   useInput((input, key) => {
+    if (isBatch && viewMode === 'ligand-detail') {
+      if (key.escape || isKey(input, 'b') || key.leftArrow) {
+        setViewMode(detailReturnView);
+        return;
+      }
+    }
+
     if (isBatch && viewMode === 'summary') {
       if (key.upArrow && topLigands.length > 0) {
         setSelectedTopIndex((i) => Math.max(0, i - 1));
@@ -201,6 +212,12 @@ export function ResultsScreen(): React.ReactElement {
       }
       if (key.downArrow && topLigands.length > 0) {
         setSelectedTopIndex((i) => Math.min(topLigands.length - 1, i + 1));
+        return;
+      }
+      if (key.return && topLigands[selectedTopIndex]) {
+        setActiveLigandIndex(topLigands[selectedTopIndex].index);
+        setDetailReturnView('summary');
+        setViewMode('ligand-detail');
         return;
       }
     }
@@ -214,14 +231,20 @@ export function ResultsScreen(): React.ReactElement {
         setSelectedLigandIndex((i) => Math.min(ligandList.length - 1, i + 1));
         return;
       }
+      if (key.return && ligandList[selectedLigandIndex]) {
+        setActiveLigandIndex(selectedLigandIndex);
+        setDetailReturnView('ligands');
+        setViewMode('ligand-detail');
+        return;
+      }
     }
 
     // Arrow key shortcuts
-    if (key.leftArrow) {
+    if (key.leftArrow && viewMode !== 'ligand-detail') {
       handleMenuAction('back');
       return;
     }
-    if (key.rightArrow) {
+    if (key.rightArrow && viewMode !== 'ligand-detail') {
       handleMenuAction('new');
       return;
     }
@@ -231,7 +254,7 @@ export function ResultsScreen(): React.ReactElement {
       handleMenuAction('new');
     } else if (isKey(input, 'h')) {
       handleMenuAction('home');
-    } else if (isKey(input, 'b')) {
+    } else if (isKey(input, 'b') && viewMode !== 'ligand-detail') {
       handleMenuAction('back');
     } else if (isKey(input, 'l') && isBatch) {
       if (viewMode === 'summary') {
@@ -263,6 +286,16 @@ export function ResultsScreen(): React.ReactElement {
   const completed = results.ligandStatuses?.filter((l) => l.status === 'completed').length ?? 0;
   const failed = results.ligandStatuses?.filter((l) => l.status === 'failed').length ?? 0;
   const physical = results.ligandStatuses?.filter((l) => l.pb_count === 4).length ?? 0;
+  const showBatchDetail = Boolean(isBatch && viewMode === 'ligand-detail' && activeLigand);
+  const detailBestPosePath = showBatchDetail && activeLigand
+    ? path.join(batchRunDir, 'best_poses', `${activeLigand.name}.sdf`)
+    : '';
+  const detailAllPosesPath = showBatchDetail && activeLigand
+    ? path.join(batchRunDir, 'all_poses', `${activeLigand.name}_poses.sdf`)
+    : '';
+  const detailLogPath = showBatchDetail && activeLigand
+    ? path.join(batchRunDir, 'logs', `${activeLigand.name}.log`)
+    : '';
 
   return (
     <Box flexDirection="column" gap={1}>
@@ -289,247 +322,285 @@ export function ResultsScreen(): React.ReactElement {
         </Box>
       )}
 
-      {/* Summary section */}
-      <Box flexDirection="column" marginTop={1}>
-        <Text bold color="white" underline>Summary</Text>
-        <Box flexDirection="column" marginLeft={2} marginTop={1}>
-          <Box><Text color="gray">Runtime: </Text><Text color="white">{formatDuration(Math.round(results.runtime))}</Text></Box>
-          {isBatch ? (
-            <>
-              <Box><Text color="gray">Total ligands: </Text><Text color="white">{results.totalLigands}</Text></Box>
-              <Box><Text color="gray">Completed: </Text><Text color="green">{completed}</Text></Box>
-              {failed > 0 && (
-                <Box><Text color="gray">Failed: </Text><Text color="red">{failed}</Text></Box>
-              )}
-              <Box><Text color="gray">Physical (4/4): </Text><Text color="green">{physical}</Text></Box>
-            </>
-          ) : (
-            <>
-              <Box><Text color="gray">Total poses: </Text><Text color="white">{results.totalPoses}</Text></Box>
-              <Box><Text color="gray">Physical poses: </Text><Text color="white">{results.physicalPoses}</Text></Box>
-            </>
-          )}
-        </Box>
-      </Box>
-
-      {/* Best Pose (single mode) or Best Results (batch mode) */}
-      {!isBatch && bestPose && (
-        <Box flexDirection="column" marginTop={1}>
-          <Text bold color="white" underline>Best Pose</Text>
-          <Box flexDirection="column" marginLeft={2} marginTop={1}>
-            <Box><Text color="gray">Error estimate: </Text><Text color="cyan">{(bestPose.error_estimate ?? 0).toFixed(3)}</Text></Box>
-            <Box><Text color="gray">PoseBusters: </Text><Text color={(bestPose.pb_count ?? 0) === 4 ? 'green' : 'yellow'}>{bestPose.pb_count ?? 0}/4</Text></Box>
-            <Box>
-              <Text color="gray">Checks: </Text>
-              <Text color={bestPose.checks?.not_too_far_away ? 'green' : 'red'}>{bestPose.checks?.not_too_far_away ? icons.check : icons.cross} </Text>
-              <Text color={bestPose.checks?.no_internal_clash ? 'green' : 'red'}>{bestPose.checks?.no_internal_clash ? icons.check : icons.cross} </Text>
-              <Text color={bestPose.checks?.no_clashes ? 'green' : 'red'}>{bestPose.checks?.no_clashes ? icons.check : icons.cross} </Text>
-              <Text color={bestPose.checks?.no_volume_clash ? 'green' : 'red'}>{bestPose.checks?.no_volume_clash ? icons.check : icons.cross}</Text>
+      {showBatchDetail ? (
+        <>
+          {/* Summary (batch ligand detail) */}
+          <Box flexDirection="column" marginTop={1}>
+            <Text bold color="white" underline>Summary</Text>
+            <Box flexDirection="column" marginLeft={2} marginTop={1}>
+              <Box><Text color="gray">Ligand: </Text><Text color="white">{activeLigand?.name}</Text></Box>
+              <Box>
+                <Text color="gray">Status: </Text>
+                <Text color={activeLigand?.status === 'completed' ? 'green' : activeLigand?.status === 'failed' ? 'red' : 'yellow'}>
+                  {activeLigand?.status}
+                </Text>
+              </Box>
+              <Box><Text color="gray">Batch runtime: </Text><Text color="white">{formatDuration(Math.round(results.runtime))}</Text></Box>
             </Box>
           </Box>
-        </Box>
-      )}
 
-      {/* Input files */}
-      {(results.receptor || results.ligand) && (
-        <Box flexDirection="column" marginTop={1}>
-          <Text bold color="white" underline>Input Files</Text>
-          <Box flexDirection="column" marginLeft={2} marginTop={1}>
-            {results.receptor && (
-              <Box><Text color="gray">Receptor: </Text><Text color="green">{path.basename(results.receptor)}</Text></Box>
-            )}
-            {results.ligand && (
-              <Box><Text color="gray">{isBatch ? 'Ligands: ' : 'Ligand: '}</Text><Text color="green">{path.basename(results.ligand)}</Text></Box>
-            )}
+          {/* Best Pose (batch ligand detail) */}
+          <Box flexDirection="column" marginTop={1}>
+            <Text bold color="white" underline>Best Pose</Text>
+            <Box flexDirection="column" marginLeft={2} marginTop={1}>
+              <Box>
+                <Text color="gray">Error estimate: </Text>
+                <Text color="cyan">
+                  {activeLigand?.error_estimate !== undefined ? activeLigand.error_estimate.toFixed(3) : '—'}
+                </Text>
+              </Box>
+              <Box>
+                <Text color="gray">PoseBusters: </Text>
+                <Text color={activeLigand?.pb_count === 4 ? 'green' : 'yellow'}>
+                  {activeLigand?.pb_count !== undefined ? `${activeLigand.pb_count}/4` : '—'}
+                </Text>
+              </Box>
+              <Box>
+                <Text color="gray">Checks: </Text>
+                <Text color="gray" dimColor>Not available in batch summary</Text>
+              </Box>
+            </Box>
           </Box>
-        </Box>
-      )}
 
-      {/* Output path */}
-      <Box flexDirection="column" marginTop={1}>
-        <Text bold color="white" underline>Output</Text>
-        <Box flexDirection="column" marginLeft={2} marginTop={1}>
-          {isBatch ? (
-            <>
-              <Box>
-                <Text color="gray">Run dir:</Text>
-                <Text> </Text>
-                <Text color="blue">{truncatePath(batchRunDir, 60)}</Text>
+          {/* Input files */}
+          {(results.receptor || results.ligand) && (
+            <Box flexDirection="column" marginTop={1}>
+              <Text bold color="white" underline>Input Files</Text>
+              <Box flexDirection="column" marginLeft={2} marginTop={1}>
+                {results.receptor && (
+                  <Box><Text color="gray">Receptor: </Text><Text color="green">{path.basename(results.receptor)}</Text></Box>
+                )}
+                {results.ligand && (
+                  <Box><Text color="gray">Ligands: </Text><Text color="green">{path.basename(results.ligand)}</Text></Box>
+                )}
               </Box>
-              <Box>
-                <Text color="gray">Best poses:</Text>
-                <Text> </Text>
-                <Text color="blue">{truncatePath(results.bestPosePath, 60)}</Text>
-              </Box>
-              {results.allPosesPath && (
-                <Box>
-                  <Text color="gray">All poses:</Text>
-                  <Text> </Text>
-                  <Text color="blue">{truncatePath(results.allPosesPath, 60)}</Text>
-                </Box>
-              )}
-              {results.logPath && (
-                <Box>
-                  <Text color="gray">Log file:</Text>
-                  <Text> </Text>
-                  <Text color="blue">{truncatePath(results.logPath, 60)}</Text>
-                </Box>
-              )}
-            </>
-          ) : (
-            <>
+            </Box>
+          )}
+
+          {/* Output (batch ligand detail) */}
+          <Box flexDirection="column" marginTop={1}>
+            <Text bold color="white" underline>Output</Text>
+            <Box flexDirection="column" marginLeft={2} marginTop={1}>
               <Box>
                 <Text color="gray">Best pose:</Text>
                 <Text> </Text>
-                <Text color="blue">{truncatePath(results.bestPosePath, 60)}</Text>
+                <Text color="blue">{truncatePath(detailBestPosePath, 60)}</Text>
               </Box>
-              {results.allPosesPath && (
-                <Box>
-                  <Text color="gray">All poses:</Text>
-                  <Text> </Text>
-                  <Text color="blue">{truncatePath(results.allPosesPath, 60)}</Text>
-                </Box>
+              <Box>
+                <Text color="gray">All poses:</Text>
+                <Text> </Text>
+                <Text color="blue">{truncatePath(detailAllPosesPath, 60)}</Text>
+              </Box>
+              <Box>
+                <Text color="gray">Log file:</Text>
+                <Text> </Text>
+                <Text color="blue">{truncatePath(detailLogPath, 60)}</Text>
+              </Box>
+            </Box>
+          </Box>
+
+          {/* Top poses (batch ligand detail) */}
+          <Box flexDirection="column" marginTop={1}>
+            <Text bold color="white" underline>Top Poses</Text>
+            <Box flexDirection="column" marginLeft={2} marginTop={1}>
+              <Text color="gray">Pose list is not available in batch summary.</Text>
+              <Text color="gray">Open the SDF file from Output to inspect poses.</Text>
+            </Box>
+          </Box>
+        </>
+      ) : (
+        <>
+          {/* Summary section */}
+          <Box flexDirection="column" marginTop={1}>
+            <Text bold color="white" underline>Summary</Text>
+            <Box flexDirection="column" marginLeft={2} marginTop={1}>
+              <Box><Text color="gray">Runtime: </Text><Text color="white">{formatDuration(Math.round(results.runtime))}</Text></Box>
+              {isBatch ? (
+                <>
+                  <Box><Text color="gray">Total ligands: </Text><Text color="white">{results.totalLigands}</Text></Box>
+                  <Box><Text color="gray">Completed: </Text><Text color="green">{completed}</Text></Box>
+                  {failed > 0 && (
+                    <Box><Text color="gray">Failed: </Text><Text color="red">{failed}</Text></Box>
+                  )}
+                  <Box><Text color="gray">Physical (4/4): </Text><Text color="green">{physical}</Text></Box>
+                </>
+              ) : (
+                <>
+                  <Box><Text color="gray">Total poses: </Text><Text color="white">{results.totalPoses}</Text></Box>
+                  <Box><Text color="gray">Physical poses: </Text><Text color="white">{results.physicalPoses}</Text></Box>
+                </>
               )}
-              {results.logPath && (
+            </Box>
+          </Box>
+
+          {/* Best Pose (single mode) */}
+          {!isBatch && bestPose && (
+            <Box flexDirection="column" marginTop={1}>
+              <Text bold color="white" underline>Best Pose</Text>
+              <Box flexDirection="column" marginLeft={2} marginTop={1}>
+                <Box><Text color="gray">Error estimate: </Text><Text color="cyan">{(bestPose.error_estimate ?? 0).toFixed(3)}</Text></Box>
+                <Box><Text color="gray">PoseBusters: </Text><Text color={(bestPose.pb_count ?? 0) === 4 ? 'green' : 'yellow'}>{bestPose.pb_count ?? 0}/4</Text></Box>
                 <Box>
-                  <Text color="gray">Log file:</Text>
-                  <Text> </Text>
-                  <Text color="blue">{truncatePath(results.logPath, 60)}</Text>
+                  <Text color="gray">Checks: </Text>
+                  <Text color={bestPose.checks?.not_too_far_away ? 'green' : 'red'}>{bestPose.checks?.not_too_far_away ? icons.check : icons.cross} </Text>
+                  <Text color={bestPose.checks?.no_internal_clash ? 'green' : 'red'}>{bestPose.checks?.no_internal_clash ? icons.check : icons.cross} </Text>
+                  <Text color={bestPose.checks?.no_clashes ? 'green' : 'red'}>{bestPose.checks?.no_clashes ? icons.check : icons.cross} </Text>
+                  <Text color={bestPose.checks?.no_volume_clash ? 'green' : 'red'}>{bestPose.checks?.no_volume_clash ? icons.check : icons.cross}</Text>
                 </Box>
-              )}
-            </>
+              </Box>
+            </Box>
           )}
-        </Box>
-      </Box>
 
-      {/* View toggle for batch mode */}
-      {isBatch && viewMode === 'summary' && (
-        <Box flexDirection="column" marginTop={1}>
-          <Text bold color="white" underline>Top Ligands by Error Estimate</Text>
-          <Box flexDirection="column" marginTop={1}>
-            <Box>
-              <Text color="gray" bold>{'  '}{'Name'.padEnd(28)}{'Error'.padEnd(10)}{'PB'.padEnd(6)}Status</Text>
-            </Box>
-            {topLigands.map((item, idx) => (
-              <LigandResultRow
-                key={`${item.index}-${item.ligand.name}`}
-                ligand={item.ligand}
-                selected={idx === selectedTopIndex}
-              />
-            ))}
-          </Box>
-        </Box>
-      )}
-
-      {/* Full ligand list for batch mode */}
-      {isBatch && viewMode === 'ligands' && results.ligandStatuses && (
-        <Box flexDirection="column" marginTop={1}>
-          <Text bold color="white" underline>All Ligands</Text>
-          <Box flexDirection="column" marginTop={1} height={15}>
-            <Box>
-              <Text color="gray" bold>{'  '}{'Name'.padEnd(28)}{'Error'.padEnd(10)}{'PB'.padEnd(6)}Status</Text>
-            </Box>
-            {results.ligandStatuses.map((lig, idx) => (
-              <LigandResultRow key={idx} ligand={lig} selected={idx === selectedLigandIndex} />
-            ))}
-          </Box>
-        </Box>
-      )}
-
-      {isBatch && activeLigand && (
-        <Box flexDirection="column" marginTop={1}>
-          <Text bold color="white" underline>Selected Ligand</Text>
-          <Box flexDirection="column" marginTop={1} marginLeft={2}>
-            <Box>
-              <Text color="gray">Name: </Text>
-              <Text color="white">{activeLigand.name}</Text>
-            </Box>
-            <Box>
-              <Text color="gray">Status: </Text>
-              <Text color={activeLigand.status === 'completed' ? 'green' : activeLigand.status === 'failed' ? 'red' : 'yellow'}>
-                {activeLigand.status}
-              </Text>
-            </Box>
-            {activeLigand.error_estimate !== undefined && (
-              <Box>
-                <Text color="gray">Error estimate: </Text>
-                <Text color="cyan">{activeLigand.error_estimate?.toFixed(3)}</Text>
+          {/* Input files */}
+          {(results.receptor || results.ligand) && (
+            <Box flexDirection="column" marginTop={1}>
+              <Text bold color="white" underline>Input Files</Text>
+              <Box flexDirection="column" marginLeft={2} marginTop={1}>
+                {results.receptor && (
+                  <Box><Text color="gray">Receptor: </Text><Text color="green">{path.basename(results.receptor)}</Text></Box>
+                )}
+                {results.ligand && (
+                  <Box><Text color="gray">{isBatch ? 'Ligands: ' : 'Ligand: '}</Text><Text color="green">{path.basename(results.ligand)}</Text></Box>
+                )}
               </Box>
-            )}
-            {activeLigand.pb_count !== undefined && (
-              <Box>
-                <Text color="gray">PoseBusters: </Text>
-                <Text color={activeLigand.pb_count === 4 ? 'green' : 'yellow'}>
-                  {activeLigand.pb_count}/4
+            </Box>
+          )}
+
+          {/* Output path */}
+          <Box flexDirection="column" marginTop={1}>
+            <Text bold color="white" underline>Output</Text>
+            <Box flexDirection="column" marginLeft={2} marginTop={1}>
+              {isBatch ? (
+                <>
+                  <Box>
+                    <Text color="gray">Run dir:</Text>
+                    <Text> </Text>
+                    <Text color="blue">{truncatePath(batchRunDir, 60)}</Text>
+                  </Box>
+                  <Box>
+                    <Text color="gray">Best poses:</Text>
+                    <Text> </Text>
+                    <Text color="blue">{truncatePath(results.bestPosePath, 60)}</Text>
+                  </Box>
+                  {results.allPosesPath && (
+                    <Box>
+                      <Text color="gray">All poses:</Text>
+                      <Text> </Text>
+                      <Text color="blue">{truncatePath(results.allPosesPath, 60)}</Text>
+                    </Box>
+                  )}
+                  {results.logPath && (
+                    <Box>
+                      <Text color="gray">Log file:</Text>
+                      <Text> </Text>
+                      <Text color="blue">{truncatePath(results.logPath, 60)}</Text>
+                    </Box>
+                  )}
+                </>
+              ) : (
+                <>
+                  <Box>
+                    <Text color="gray">Best pose:</Text>
+                    <Text> </Text>
+                    <Text color="blue">{truncatePath(results.bestPosePath, 60)}</Text>
+                  </Box>
+                  {results.allPosesPath && (
+                    <Box>
+                      <Text color="gray">All poses:</Text>
+                      <Text> </Text>
+                      <Text color="blue">{truncatePath(results.allPosesPath, 60)}</Text>
+                    </Box>
+                  )}
+                  {results.logPath && (
+                    <Box>
+                      <Text color="gray">Log file:</Text>
+                      <Text> </Text>
+                      <Text color="blue">{truncatePath(results.logPath, 60)}</Text>
+                    </Box>
+                  )}
+                </>
+              )}
+            </Box>
+          </Box>
+
+          {/* View toggle for batch mode */}
+          {isBatch && viewMode === 'summary' && (
+            <Box flexDirection="column" marginTop={1}>
+              <Text bold color="white" underline>Top Ligands by Error Estimate</Text>
+              <Box flexDirection="column" marginTop={1}>
+                <Box>
+                  <Text color="gray" bold>{'  '}{'Name'.padEnd(28)}{'Error'.padEnd(10)}{'PB'.padEnd(6)}Status</Text>
+                </Box>
+                {topLigands.map((item, idx) => (
+                  <LigandResultRow
+                    key={`${item.index}-${item.ligand.name}`}
+                    ligand={item.ligand}
+                    selected={idx === selectedTopIndex}
+                  />
+                ))}
+              </Box>
+            </Box>
+          )}
+
+          {/* Full ligand list for batch mode */}
+          {isBatch && viewMode === 'ligands' && results.ligandStatuses && (
+            <Box flexDirection="column" marginTop={1}>
+              <Text bold color="white" underline>All Ligands</Text>
+              <Box flexDirection="column" marginTop={1} height={15}>
+                <Box>
+                  <Text color="gray" bold>{'  '}{'Name'.padEnd(28)}{'Error'.padEnd(10)}{'PB'.padEnd(6)}Status</Text>
+                </Box>
+                {results.ligandStatuses.map((lig, idx) => (
+                  <LigandResultRow key={idx} ligand={lig} selected={idx === selectedLigandIndex} />
+                ))}
+              </Box>
+            </Box>
+          )}
+
+          {/* Top poses table (single mode) */}
+          {!isBatch && results.poses.length > 0 && (
+            <Box flexDirection="column" marginTop={1}>
+              <Text bold color="white" underline>Top Poses</Text>
+              <Box flexDirection="column" marginTop={1}>
+                <Box><Text color="gray" bold>{'Rank'.padEnd(6)}{'Error'.padEnd(10)}{'PB'.padEnd(6)}Checks</Text></Box>
+                {results.poses.slice(0, 10).map((pose) => (
+                  <Box key={pose.rank}>
+                    <Text color="white">{String(pose.rank).padEnd(6)}</Text>
+                    <Text color="cyan">{(pose.error_estimate ?? 0).toFixed(3).padEnd(10)}</Text>
+                    <Text color={(pose.pb_count ?? 0) === 4 ? 'green' : 'yellow'}>{`${pose.pb_count ?? 0}/4`.padEnd(6)}</Text>
+                    <Text>
+                      {pose.checks?.not_too_far_away ? icons.check : icons.cross}
+                      {pose.checks?.no_internal_clash ? icons.check : icons.cross}
+                      {pose.checks?.no_clashes ? icons.check : icons.cross}
+                      {pose.checks?.no_volume_clash ? icons.check : icons.cross}
+                    </Text>
+                  </Box>
+                ))}
+              </Box>
+              <Box marginTop={1} flexDirection="column">
+                <Text color="gray" dimColor>
+                  Checks: 1=not too far away · 2=no internal clash
+                </Text>
+                <Text color="gray" dimColor>
+                  {'        '}3=no clashes · 4=no volume clash
                 </Text>
               </Box>
-            )}
-            {activeLigand.error_message && (
-              <Box>
-                <Text color="gray">Error: </Text>
-                <Text color="red">{activeLigand.error_message}</Text>
-              </Box>
-            )}
-            <Box marginTop={1}>
-              <Text color="gray">Best pose: </Text>
-              <Text color="blue">
-                {truncatePath(path.join(batchRunDir, 'best_poses', `${activeLigand.name}.sdf`), 60)}
-              </Text>
             </Box>
-            <Box>
-              <Text color="gray">All poses: </Text>
-              <Text color="blue">
-                {truncatePath(path.join(batchRunDir, 'all_poses', `${activeLigand.name}_poses.sdf`), 60)}
-              </Text>
-            </Box>
-            <Box>
-              <Text color="gray">Log: </Text>
-              <Text color="blue">
-                {truncatePath(path.join(batchRunDir, 'logs', `${activeLigand.name}.log`), 60)}
-              </Text>
-            </Box>
-          </Box>
-        </Box>
-      )}
-
-      {/* Top poses table (single mode) */}
-      {!isBatch && results.poses.length > 0 && (
-        <Box flexDirection="column" marginTop={1}>
-          <Text bold color="white" underline>Top Poses</Text>
-          <Box flexDirection="column" marginTop={1}>
-            <Box><Text color="gray" bold>{'Rank'.padEnd(6)}{'Error'.padEnd(10)}{'PB'.padEnd(6)}Checks</Text></Box>
-            {results.poses.slice(0, 10).map((pose) => (
-              <Box key={pose.rank}>
-                <Text color="white">{String(pose.rank).padEnd(6)}</Text>
-                <Text color="cyan">{(pose.error_estimate ?? 0).toFixed(3).padEnd(10)}</Text>
-                <Text color={(pose.pb_count ?? 0) === 4 ? 'green' : 'yellow'}>{`${pose.pb_count ?? 0}/4`.padEnd(6)}</Text>
-                <Text>
-                  {pose.checks?.not_too_far_away ? icons.check : icons.cross}
-                  {pose.checks?.no_internal_clash ? icons.check : icons.cross}
-                  {pose.checks?.no_clashes ? icons.check : icons.cross}
-                  {pose.checks?.no_volume_clash ? icons.check : icons.cross}
-                </Text>
-              </Box>
-            ))}
-          </Box>
-          <Box marginTop={1} flexDirection="column">
-            <Text color="gray" dimColor>
-              Checks: 1=not too far away · 2=no internal clash
-            </Text>
-            <Text color="gray" dimColor>
-              {'        '}3=no clashes · 4=no volume clash
-            </Text>
-          </Box>
-        </Box>
+          )}
+        </>
       )}
 
       {/* Navigation */}
       <Box marginTop={2} gap={4}>
         <Text color="cyan">[n or →] New docking</Text>
-        {isBatch && <Text color="gray">[↑↓] Select</Text>}
-        {isBatch && <Text color="yellow">[l] {viewMode === 'summary' ? 'All ligands' : 'Top ligands'}</Text>}
+        {isBatch && viewMode !== 'ligand-detail' && <Text color="gray">[↑↓] Select</Text>}
+        {isBatch && viewMode !== 'ligand-detail' && <Text color="gray">[Enter] View ligand</Text>}
+        {isBatch && viewMode !== 'ligand-detail' && (
+          <Text color="yellow">[l] {viewMode === 'summary' ? 'All ligands' : 'Top ligands'}</Text>
+        )}
+        {isBatch && viewMode === 'ligand-detail' && <Text color="gray">[b or Esc] Back to list</Text>}
         <Text color="magenta">[v] View 3D</Text>
-        <Text color="gray">[b or ←] Back</Text>
+        {viewMode !== 'ligand-detail' && <Text color="gray">[b or ←] Back</Text>}
         <Text color="gray">[h] Home</Text>
       </Box>
     </Box>
