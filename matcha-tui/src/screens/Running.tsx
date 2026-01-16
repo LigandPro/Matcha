@@ -328,6 +328,7 @@ export function RunningScreen(): React.ReactElement {
       // Allow user to leave running screen and go back to home
       // Job continues in background
       setScreen('welcome');
+      return;
     }
   });
 
