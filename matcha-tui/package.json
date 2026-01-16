@@ -1,6 +1,6 @@
 {
   "name": "matcha-tui",
-  "version": "1.5.0",
+  "version": "1.4.2",
   "description": "Production-level TUI for Matcha molecular docking",
   "type": "module",
   "main": "dist/index.js",
