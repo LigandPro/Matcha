@@ -8,6 +8,7 @@ import { useStore } from './store/index.js';
 import { Header } from './components/Header.js';
 import { Footer } from './components/Footer.js';
 import { logger } from './utils/logger.js';
+import { isKey } from './utils/keyboard.js';
 
 // Screen imports
 import { Welcome } from './screens/Welcome.js';
@@ -19,6 +20,7 @@ import { SetupReview } from './screens/SetupReview.js';
 import { RunningScreen as Running } from './screens/Running.js';
 import { ResultsScreen as Results } from './screens/Results.js';
 import { HistoryScreen as History } from './screens/History.js';
+import { JobsScreen as Jobs } from './screens/Jobs.js';
 
 import type { Screen } from './types/index.js';
 
@@ -33,6 +35,7 @@ const SCREEN_TITLES: Record<Screen, { title: string; subtitle?: string }> = {
   running: { title: 'Docking', subtitle: 'Processing...' },
   results: { title: 'Results', subtitle: 'Docking completed' },
   history: { title: 'History', subtitle: 'Previous runs' },
+  jobs: { title: 'Jobs', subtitle: 'Active jobs queue' },
 };
 
 export function App(): React.ReactElement {
@@ -49,6 +52,11 @@ export function App(): React.ReactElement {
   const debugMode = useStore((s) => s.debugMode);
   const trackNavigation = useStore((s) => s.trackNavigation);
   const modalOpen = useStore((s) => s.modalOpen);
+
+  // Multi-job support
+  const activeJobs = useStore((s) => s.activeJobs);
+  const getRunningJob = useStore((s) => s.getRunningJob);
+  const setCurrentJob = useStore((s) => s.setCurrentJob);
 
   // Get terminal dimensions for full-screen mode with resize tracking
   const [terminalHeight, setTerminalHeight] = useState(stdout?.rows || 24);
@@ -92,10 +100,30 @@ export function App(): React.ReactElement {
       return;
     }
 
-    // Return to running screen if background task exists
-    if (input === 'r' && isRunning && screen !== 'running') {
-      navigateTo('running');
+    // Quick home from running screen
+    if (screen === 'running' && (key.escape || isKey(input, 'h'))) {
+      navigateTo('welcome');
       return;
+    }
+
+    // Navigate to jobs screen
+    if (input === 'j' && activeJobs.size > 0 && screen !== 'jobs') {
+      navigateTo('jobs');
+      return;
+    }
+
+    // Return to running screen if background task exists
+    if (input === 'r') {
+      const runningJob = getRunningJob();
+      if (runningJob && screen !== 'running') {
+        setCurrentJob(runningJob.id);
+        navigateTo('running');
+        return;
+      } else if (isRunning && screen !== 'running') {
+        // Fallback for legacy single job
+        navigateTo('running');
+        return;
+      }
     }
 
     // Help on '?'
@@ -118,6 +146,11 @@ export function App(): React.ReactElement {
       return;
     }
 
+    if (screen === 'running') {
+      navigateTo('welcome');
+      return;
+    }
+
     const backMap: Partial<Record<Screen, Screen>> = {
       'setup-files': 'welcome',
       'setup-box': 'setup-files',
@@ -125,6 +158,7 @@ export function App(): React.ReactElement {
       'setup-review': 'setup-params',
       results: 'welcome',
       history: 'welcome',
+      jobs: 'welcome',
     };
 
     const prevScreen = backMap[screen];
@@ -203,6 +237,8 @@ function ScreenRouter({ screen }: { screen: Screen }): React.ReactElement {
       return <Results />;
     case 'history':
       return <History />;
+    case 'jobs':
+      return <Jobs />;
     default:
       return (
         <Box>

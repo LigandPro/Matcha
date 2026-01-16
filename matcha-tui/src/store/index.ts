@@ -1,7 +1,17 @@
 import { create } from 'zustand';
-import type { Screen, JobConfig, ProgressInfo, JobResults, StoredJob } from '../types/index.js';
+import type { Screen, JobConfig, ProgressInfo, JobResults, StoredJob, ActiveJob, JobStatus } from '../types/index.js';
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+export type ResultsViewMode = 'summary' | 'ligands' | 'ligand-detail';
+
+interface ResultsUIState {
+  viewMode: ResultsViewMode;
+  selectedTopIndex: number;
+  selectedLigandIndex: number;
+  activeLigandIndex: number | null;
+  detailReturnView: 'summary' | 'ligands';
+  runName: string | null;
+}
 
 export interface DebugLog {
   timestamp: string;
@@ -23,7 +33,7 @@ interface AppState {
   setJobConfig: (config: Partial<JobConfig>) => void;
   resetJobConfig: () => void;
 
-  // Running job state
+  // Running job state (legacy - kept for backward compatibility)
   isRunning: boolean;
   progress: ProgressInfo | null;
   logs: string[];
@@ -32,15 +42,33 @@ interface AppState {
   addLog: (log: string) => void;
   clearLogs: () => void;
 
+  // Multi-job queue state
+  activeJobs: Map<string, ActiveJob>;
+  currentJobId: string | null;
+  jobResults: Map<string, JobResults>;
+  jobLogs: Map<string, string[]>;
+  addJob: (job: ActiveJob) => void;
+  updateJobStatus: (id: string, status: JobStatus) => void;
+  updateJobProgress: (id: string, progress: ProgressInfo) => void;
+  removeJob: (id: string) => void;
+  setCurrentJob: (id: string | null) => void;
+  getRunningJob: () => ActiveJob | null;
+  getQueuedJobs: () => ActiveJob[];
+
   // Results
   results: JobResults | null;
   setResults: (results: JobResults | null) => void;
+  resultsUI: ResultsUIState;
+  setResultsUI: (partial: Partial<ResultsUIState>) => void;
+  resetResultsUI: (next?: Partial<ResultsUIState>) => void;
 
   // Job history
   history: StoredJob[];
   addToHistory: (job: StoredJob) => void;
   removeFromHistory: (id: string) => void;
   clearHistory: () => void;
+  historySelectedIndex: number;
+  setHistorySelectedIndex: (index: number) => void;
 
   // UI state
   error: string | null;
@@ -72,7 +100,16 @@ const initialJobConfig: Partial<JobConfig> = {
   },
 };
 
-export const useStore = create<AppState>((set) => ({
+const defaultResultsUI: ResultsUIState = {
+  viewMode: 'summary',
+  selectedTopIndex: 0,
+  selectedLigandIndex: 0,
+  activeLigandIndex: null,
+  detailReturnView: 'summary',
+  runName: null,
+};
+
+export const useStore = create<AppState>((set, get) => ({
   // Navigation
   screen: 'welcome',
   setScreen: (screen) => set({ screen }),
@@ -99,9 +136,70 @@ export const useStore = create<AppState>((set) => ({
     })),
   clearLogs: () => set({ logs: [] }),
 
+  // Multi-job queue
+  activeJobs: new Map(),
+  currentJobId: null,
+  jobResults: new Map(),
+  jobLogs: new Map(),
+
+  addJob: (job) =>
+    set((state) => {
+      const jobs = new Map(state.activeJobs);
+      jobs.set(job.id, job);
+      return { activeJobs: jobs };
+    }),
+
+  updateJobStatus: (id, status) =>
+    set((state) => {
+      const jobs = new Map(state.activeJobs);
+      const job = jobs.get(id);
+      if (job) {
+        jobs.set(id, { ...job, status });
+      }
+      return { activeJobs: jobs };
+    }),
+
+  updateJobProgress: (id, progress) =>
+    set((state) => {
+      const jobs = new Map(state.activeJobs);
+      const job = jobs.get(id);
+      if (job) {
+        jobs.set(id, { ...job, progress });
+      }
+      return { activeJobs: jobs };
+    }),
+
+  removeJob: (id) =>
+    set((state) => {
+      const jobs = new Map(state.activeJobs);
+      jobs.delete(id);
+      return { activeJobs: jobs };
+    }),
+
+  setCurrentJob: (id) => set({ currentJobId: id }),
+
+  getRunningJob: () => {
+    const jobs = Array.from(get().activeJobs.values());
+    return jobs.find((j) => j.status === 'running') || null;
+  },
+
+  getQueuedJobs: () => {
+    const jobs = Array.from(get().activeJobs.values());
+    return jobs.filter((j) => j.status === 'queued');
+  },
+
   // Results
   results: null,
   setResults: (results) => set({ results }),
+  resultsUI: { ...defaultResultsUI },
+  setResultsUI: (partial) =>
+    set((state) => ({
+      resultsUI: { ...state.resultsUI, ...partial },
+    })),
+  resetResultsUI: (next) =>
+    set({
+      resultsUI: { ...defaultResultsUI, ...(next ?? {}) },
+    }),
 
   // History
   history: [],
@@ -114,6 +212,8 @@ export const useStore = create<AppState>((set) => ({
       history: state.history.filter((j) => j.id !== id),
     })),
   clearHistory: () => set({ history: [] }),
+  historySelectedIndex: 0,
+  setHistorySelectedIndex: (index) => set({ historySelectedIndex: index }),
 
   // UI
   error: null,

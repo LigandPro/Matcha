@@ -42,6 +42,12 @@ export function RunningScreen(): React.ReactElement {
   const debugMode = useStore((s) => s.debugMode);
   const addDebugLog = useStore((s) => s.addDebugLog);
 
+  // Multi-job support
+  const currentJobId = useStore((s) => s.currentJobId);
+  const setCurrentJob = useStore((s) => s.setCurrentJob);
+  const activeJobs = useStore((s) => s.activeJobs);
+  const updateJobProgress = useStore((s) => s.updateJobProgress);
+
   // Initialize all stages with pending status to avoid race conditions
   const [stages, setStages] = useState<Record<string, StageStatus>>(() => {
     const initial: Record<string, StageStatus> = {};
@@ -191,6 +197,11 @@ export function RunningScreen(): React.ReactElement {
 
         // IMPORTANT: Subscribe to progress BEFORE starting docking!
         bridge.on('progress', (event: ProgressEvent) => {
+          // Filter events by job_id - only process events for current job
+          if (currentJobId && event.job_id !== currentJobId) {
+            return;
+          }
+
           addLog(JSON.stringify(event));
 
           // Batch events
@@ -302,7 +313,11 @@ export function RunningScreen(): React.ReactElement {
         setBridgeReady(true);
 
         // Start docking
-        await bridge.startDocking(config);
+        const { job_id } = await bridge.startDocking(config);
+
+        // Save job_id for tracking
+        setCurrentJob(job_id);
+        addLog(`Job started with ID: ${job_id}`);
       } catch (err) {
         const error = err as Error;
         addLog(`Error: ${error.message}`);
@@ -322,8 +337,8 @@ export function RunningScreen(): React.ReactElement {
   // Progress events are now handled in the first useEffect (before startDocking)
 
   useInput((input, key) => {
-    if (isKey(input, 'c') && bridgeReady) {
-      getBridge().cancelJob().catch(() => {});
+    if (isKey(input, 'c') && bridgeReady && currentJobId) {
+      getBridge().cancelJob(currentJobId).catch(() => {});
     } else if (isKey(input, 'h') || key.escape) {
       // Allow user to leave running screen and go back to home
       // Job continues in background

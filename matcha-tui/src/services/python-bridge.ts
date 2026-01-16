@@ -19,6 +19,7 @@ export interface BridgeOptions {
 }
 
 export interface ProgressEvent {
+  job_id: string;
   type: string;
   stage?: string;
   name?: string;
@@ -283,24 +284,39 @@ export class PythonBridge extends EventEmitter {
   }
 
   /**
-   * Get current job progress.
+   * Get progress of a specific job or the running job.
    */
-  async getProgress(): Promise<{
+  async getProgress(jobId?: string): Promise<{
     job_id?: string;
     status?: string;
     cancelled?: boolean;
     running?: boolean;
   }> {
     this.ensureReady();
-    return this.client!.call('get_progress');
+    return this.client!.call('get_progress', jobId ? { job_id: jobId } : undefined);
   }
 
   /**
-   * Cancel the current job.
+   * Cancel a specific job or the running job.
    */
-  async cancelJob(): Promise<{ status: string; job_id?: string }> {
+  async cancelJob(jobId?: string): Promise<{ status: string; job_id?: string }> {
     this.ensureReady();
-    return this.client!.call('cancel_job');
+    return this.client!.call('cancel_job', jobId ? { job_id: jobId } : undefined);
+  }
+
+  /**
+   * List all active jobs (running and queued).
+   */
+  async listJobs(): Promise<{
+    jobs: Array<{
+      job_id: string;
+      status: 'running' | 'queued';
+      config: Record<string, unknown>;
+      cancelled: boolean;
+    }>;
+  }> {
+    this.ensureReady();
+    return this.client!.call('list_jobs');
   }
 
   /**
@@ -335,7 +351,7 @@ export class PythonBridge extends EventEmitter {
   /**
    * Get poses from a completed run.
    */
-  async getPoses(runPath: string): Promise<
+  async getPoses(runPath: string, ligandName?: string): Promise<
     Array<{
       rank: number;
       error_estimate: number;
@@ -348,7 +364,10 @@ export class PythonBridge extends EventEmitter {
     }>
   > {
     this.ensureReady();
-    return this.client!.call('get_poses', { run_path: runPath });
+    const params = ligandName
+      ? { run_path: runPath, ligand_name: ligandName }
+      : { run_path: runPath };
+    return this.client!.call('get_poses', params);
   }
 
   /**

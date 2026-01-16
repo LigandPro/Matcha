@@ -29,7 +29,7 @@ export function Header({ showLogo = false, title, subtitle, showBackgroundTask =
           <Box>
             <Text color="gray">{'>_ '}</Text>
             <Text bold color="cyan">MATCHA DOCKING ENGINE</Text>
-            <Text color="gray"> v1.4.1</Text>
+            <Text color="gray"> v1.5.0</Text>
             {title && (
               <>
                 <Text color="gray"> │ </Text>

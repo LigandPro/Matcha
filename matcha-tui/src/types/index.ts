@@ -8,7 +8,8 @@ export type Screen =
   | 'setup-review'
   | 'running'
   | 'results'
-  | 'history';
+  | 'history'
+  | 'jobs';
 
 // Docking mode
 export type DockingMode = 'single' | 'batch';
@@ -17,7 +18,7 @@ export type DockingMode = 'single' | 'batch';
 export type BoxMode = 'blind' | 'manual' | 'autobox';
 
 // Job status
-export type JobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+export type JobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
 
 // Pipeline stage
 export type PipelineStage =
@@ -80,6 +81,17 @@ export interface JobConfig {
   params: DockingParams;
 }
 
+// Active job info (for job queue)
+export interface ActiveJob {
+  id: string;
+  config: JobConfig;
+  status: JobStatus;
+  startTime?: string;
+  endTime?: string;
+  progress?: ProgressInfo;
+  error?: string;
+}
+
 // Ligand status in batch mode
 export interface LigandStatus {
   uid: string;
@@ -91,6 +103,7 @@ export interface LigandStatus {
 
 // Progress info
 export interface ProgressInfo {
+  job_id: string;
   stage: PipelineStage;
   percent: number;
   eta?: number;

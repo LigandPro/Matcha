@@ -41,7 +41,8 @@ export function HistoryScreen(): React.ReactElement {
   const debugMode = useStore((s) => s.debugMode);
 
   const [runs, setRuns] = useState<RunInfo[]>([]);
-  const [selectedIndex, setSelectedIndex] = useState(0);
+  const selectedIndex = useStore((s) => s.historySelectedIndex);
+  const setHistorySelectedIndex = useStore((s) => s.setHistorySelectedIndex);
   const [selectedDetails, setSelectedDetails] = useState<RunDetails | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingResults, setLoadingResults] = useState(false);
@@ -87,6 +88,18 @@ export function HistoryScreen(): React.ReactElement {
 
     loadHistory();
   }, [jobConfig.params?.outputDir, setError]);
+
+  useEffect(() => {
+    if (runs.length === 0) {
+      if (selectedIndex !== 0) {
+        setHistorySelectedIndex(0);
+      }
+      return;
+    }
+    if (selectedIndex > runs.length - 1) {
+      setHistorySelectedIndex(runs.length - 1);
+    }
+  }, [runs.length, selectedIndex, setHistorySelectedIndex]);
 
   // Load details for selected run
   useEffect(() => {
@@ -298,7 +311,7 @@ export function HistoryScreen(): React.ReactElement {
 
         // Adjust selected index if needed
         if (selectedIndex >= newRuns.length && newRuns.length > 0) {
-          setSelectedIndex(newRuns.length - 1);
+          setHistorySelectedIndex(newRuns.length - 1);
         }
 
         setConfirmDelete(false);
@@ -327,11 +340,11 @@ export function HistoryScreen(): React.ReactElement {
     }
 
     // Normal mode
-    if (key.upArrow) setSelectedIndex((i) => Math.max(0, i - 1));
-    else if (key.downArrow) setSelectedIndex((i) => Math.min(runs.length - 1, i + 1));
+    if (key.upArrow) setHistorySelectedIndex(Math.max(0, selectedIndex - 1));
+    else if (key.downArrow) setHistorySelectedIndex(Math.min(runs.length - 1, selectedIndex + 1));
     else if (key.return) viewResults();
     else if (isKey(input, 'd') && runs.length > 0) setConfirmDelete(true);
-    else if (key.escape) setScreen('welcome');
+    else if (key.escape || key.leftArrow) setScreen('welcome');
   });
 
   if (loading) {
@@ -444,6 +457,7 @@ export function HistoryScreen(): React.ReactElement {
         <Text color="red">[d] Delete</Text>
         <Text color="gray">[↑/↓] Navigate</Text>
         <Text color="gray">[Esc] Back</Text>
+        <Text color="gray">[←] Back</Text>
       </Box>
     </Box>
   );

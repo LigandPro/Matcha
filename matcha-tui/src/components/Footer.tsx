@@ -57,6 +57,11 @@ const SCREEN_SHORTCUTS: Record<Screen, Shortcut[]> = {
     { key: 'Esc', label: 'Back' },
     { key: '←', label: 'Back' },
   ],
+  jobs: [
+    { key: '↑↓', label: 'Navigate' },
+    { key: 'Enter', label: 'View progress' },
+    { key: 'Esc', label: 'Back' },
+  ],
 };
 
 export function Footer({ screen, isRunning }: FooterProps): React.ReactElement {
@@ -66,7 +71,18 @@ export function Footer({ screen, isRunning }: FooterProps): React.ReactElement {
   const error = useStore((s) => s.error);
   const notification = useStore((s) => s.notification);
 
-  // Show background task indicator if docking is running but user is not on running screen
+  // Multi-job support
+  const activeJobs = useStore((s) => s.activeJobs);
+  const getRunningJob = useStore((s) => s.getRunningJob);
+  const getQueuedJobs = useStore((s) => s.getQueuedJobs);
+
+  const runningJob = getRunningJob();
+  const queuedJobs = getQueuedJobs();
+  const totalJobs = activeJobs.size;
+
+  // Show background task indicator if jobs exist and user is not on running/jobs screen
+  const hasBackgroundJobs = totalJobs > 0 && screen !== 'running' && screen !== 'jobs';
+  // Keep legacy indicator for backward compatibility
   const hasBackgroundTask = isRunning && screen !== 'running';
 
   // Get terminal width for separator line with resize tracking
@@ -90,8 +106,26 @@ export function Footer({ screen, isRunning }: FooterProps): React.ReactElement {
         <Text color="gray">{'─'.repeat(terminalWidth)}</Text>
       </Box>
 
-      {/* Background task indicator */}
-      {hasBackgroundTask && (
+      {/* Background jobs indicator (new multi-job system) */}
+      {hasBackgroundJobs && (
+        <Box paddingX={1} paddingY={0}>
+          <Text color="yellow" bold>● {totalJobs} job{totalJobs > 1 ? 's' : ''} </Text>
+          {runningJob && (
+            <Text color="green">({runningJob.progress?.percent || 0}% running)</Text>
+          )}
+          {queuedJobs.length > 0 && (
+            <Text color="gray"> +{queuedJobs.length} queued</Text>
+          )}
+          <Text> </Text>
+          <Text color="cyan" bold>[r]</Text>
+          <Text color="white"> View progress </Text>
+          <Text color="cyan" bold>[j]</Text>
+          <Text color="white"> All jobs</Text>
+        </Box>
+      )}
+
+      {/* Legacy background task indicator (fallback for old state) */}
+      {!hasBackgroundJobs && hasBackgroundTask && (
         <Box paddingX={1} paddingY={0}>
           <Text color="yellow" bold>● Docking in progress </Text>
           <Text color="cyan" bold>[r]</Text>

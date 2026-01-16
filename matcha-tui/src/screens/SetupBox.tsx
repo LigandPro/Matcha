@@ -5,6 +5,7 @@ import TextInput from 'ink-text-input';
 import { useStore } from '../store/index.js';
 import type { BoxMode } from '../types/index.js';
 import * as fs from 'fs';
+import { FileBrowser } from '../components/FileBrowser.js';
 
 const boxModeItems = [
   { label: 'Blind docking', value: 'blind' as BoxMode },
@@ -19,15 +20,24 @@ const boxModeDescriptions: Record<BoxMode, string> = {
 };
 
 type InputField = 'mode' | 'x' | 'y' | 'z' | 'autobox';
+type BrowseMode = 'input' | 'browse';
+
+interface FieldState {
+  mode: BrowseMode;
+  value: string;
+}
 
 export function SetupBox(): React.ReactElement {
-  const { setScreen, setJobConfig, jobConfig } = useStore();
+  const { setScreen, setJobConfig, jobConfig, setModalOpen } = useStore();
   const [mode, setMode] = useState<BoxMode>(jobConfig.box?.mode || 'blind');
   const [activeField, setActiveField] = useState<InputField>('mode');
   const [centerX, setCenterX] = useState(jobConfig.box?.centerX?.toString() || '');
   const [centerY, setCenterY] = useState(jobConfig.box?.centerY?.toString() || '');
   const [centerZ, setCenterZ] = useState(jobConfig.box?.centerZ?.toString() || '');
-  const [autoboxLigand, setAutoboxLigand] = useState(jobConfig.box?.autoboxLigand || '');
+  const [autoboxState, setAutoboxState] = useState<FieldState>({
+    mode: 'input',
+    value: jobConfig.box?.autoboxLigand || '',
+  });
   const [error, setError] = useState<string | null>(null);
 
   const validateAndProceed = () => {
@@ -45,9 +55,9 @@ export function SetupBox(): React.ReactElement {
         box: { mode: 'manual', centerX: x, centerY: y, centerZ: z },
       });
     } else if (mode === 'autobox') {
-      const ligandPath = autoboxLigand.startsWith('~')
-        ? autoboxLigand.replace('~', process.env.HOME || '')
-        : autoboxLigand;
+      const ligandPath = autoboxState.value.startsWith('~')
+        ? autoboxState.value.replace('~', process.env.HOME || '')
+        : autoboxState.value;
 
       if (!ligandPath.trim()) {
         setError('Autobox ligand path is required');
@@ -83,11 +93,26 @@ export function SetupBox(): React.ReactElement {
 
   useInput((input, key) => {
     if (key.escape) {
+      if (autoboxState.mode === 'browse' && activeField === 'autobox') {
+        setAutoboxState((s) => ({ ...s, mode: 'input' }));
+        setModalOpen(false);
+        return;
+      }
       setScreen('setup-files');
       return;
     }
 
     if (activeField === 'mode') return;
+
+    if (activeField === 'autobox' && autoboxState.mode === 'browse') {
+      return;
+    }
+
+    if (activeField === 'autobox' && input === ' ' && !key.ctrl && !key.meta) {
+      setAutoboxState((s) => ({ ...s, mode: 'browse' }));
+      setModalOpen(true);
+      return;
+    }
 
     if (key.return) {
       if (mode === 'manual') {
@@ -190,14 +215,35 @@ export function SetupBox(): React.ReactElement {
               Reference Ligand
             </Text>
             <Box marginLeft={2}>
-              {activeField === 'autobox' ? (
-                <TextInput
-                  value={autoboxLigand}
-                  onChange={(v) => { setAutoboxLigand(v); setError(null); }}
-                  placeholder="Path to reference ligand (.sdf/.mol/.pdb)"
+              {autoboxState.mode === 'browse' ? (
+                <FileBrowser
+                  fieldType="ligand"
+                  initialPath={process.cwd()}
+                  allowDirectories={false}
+                  validExtensions={['.sdf', '.mol', '.pdb']}
+                  onSelect={(selectedPath) => {
+                    setAutoboxState({ mode: 'input', value: selectedPath });
+                    setModalOpen(false);
+                    setError(null);
+                  }}
+                  onCancel={() => {
+                    setAutoboxState((s) => ({ ...s, mode: 'input' }));
+                    setModalOpen(false);
+                  }}
                 />
+              ) : activeField === 'autobox' ? (
+                <Box flexDirection="column">
+                  <TextInput
+                    value={autoboxState.value}
+                    onChange={(v) => { setAutoboxState((s) => ({ ...s, value: v })); setError(null); }}
+                    placeholder="Path to reference ligand (.sdf/.mol/.pdb)"
+                  />
+                  <Box marginTop={1}>
+                    <Text color="gray">Press [Space] to browse files</Text>
+                  </Box>
+                </Box>
               ) : (
-                <Text color="gray">{autoboxLigand || '(not set)'}</Text>
+                <Text color="gray">{autoboxState.value || '(not set)'}</Text>
               )}
             </Box>
           </Box>

@@ -13,7 +13,8 @@ import { icons } from '../utils/colors.js';
 import { formatDuration, truncatePath } from '../utils/format.js';
 import { generateMolstarViewer } from '../utils/molstar-viewer.js';
 import { isKey } from '../utils/keyboard.js';
-import type { BatchLigandStatus } from '../types/index.js';
+import { getBridge } from '../services/python-bridge.js';
+import type { BatchLigandStatus, PoseResult } from '../types/index.js';
 
 type MenuAction = 'new' | 'view3d' | 'toggle' | 'back' | 'home';
 
@@ -38,18 +39,23 @@ export function ResultsScreen(): React.ReactElement {
   const results = useStore((s) => s.results);
   const setError = useStore((s) => s.setError);
   const setNotification = useStore((s) => s.setNotification);
-  const [viewMode, setViewMode] = useState<'summary' | 'ligands' | 'ligand-detail'>('summary');
-  const [selectedTopIndex, setSelectedTopIndex] = useState(0);
-  const [selectedLigandIndex, setSelectedLigandIndex] = useState(0);
-  const [detailReturnView, setDetailReturnView] = useState<'summary' | 'ligands'>('summary');
-  const [activeLigandIndex, setActiveLigandIndex] = useState<number | null>(null);
-  const [initialViewSet, setInitialViewSet] = useState(false);
+  const resultsUI = useStore((s) => s.resultsUI);
+  const setResultsUI = useStore((s) => s.setResultsUI);
+  const resetResultsUI = useStore((s) => s.resetResultsUI);
+  const viewMode = resultsUI.viewMode;
+  const selectedTopIndex = resultsUI.selectedTopIndex;
+  const selectedLigandIndex = resultsUI.selectedLigandIndex;
+  const detailReturnView = resultsUI.detailReturnView;
+  const activeLigandIndex = resultsUI.activeLigandIndex;
   const [viewer3DInfo, setViewer3DInfo] = useState<{
     url: string;
     port: number;
     fileName: string;
   } | null>(null);
 
+  const [ligandPoses, setLigandPoses] = useState<PoseResult[]>([]);
+  const [ligandRuntime, setLigandRuntime] = useState(0);
+  const [loadingLigandPoses, setLoadingLigandPoses] = useState(false);
 
   const view3D = async () => {
     if (!results) return;
@@ -137,6 +143,67 @@ export function ResultsScreen(): React.ReactElement {
     }
   };
 
+  const loadLigandPoses = async (ligandName: string, runDir: string) => {
+    if (!ligandName || !runDir) return;
+
+    try {
+      setLoadingLigandPoses(true);
+
+      // Load poses using extended API
+      const poses = await getBridge().getPoses(runDir, ligandName);
+
+      // Transform to PoseResult
+      const transformedPoses: PoseResult[] = poses.map(p => ({
+        rank: p.rank,
+        error_estimate: p.error_estimate,
+        pb_count: p.pb_count,
+        checks: {
+          not_too_far_away: p.not_too_far_away,
+          no_internal_clash: p.no_internal_clash,
+          no_clashes: p.no_clashes,
+          no_volume_clash: p.no_volume_clash,
+        },
+        buried_fraction: p.buried_fraction,
+      }));
+
+      setLigandPoses(transformedPoses);
+
+      // Parse runtime from individual log
+      const ligandLogPath = path.join(runDir, 'logs', `${ligandName}.log`);
+      let runtime = 0;
+      if (fs.existsSync(ligandLogPath)) {
+        const logContent = fs.readFileSync(ligandLogPath, 'utf-8');
+        const match = logContent.match(/Total runtime\s*:\s*([^\n]+)/i);
+        if (match) {
+          const text = match[1].trim();
+          const secondsMatch = text.match(/^([\d.]+)\s*s?$/i);
+          if (secondsMatch) {
+            runtime = parseFloat(secondsMatch[1]);
+          } else {
+            // Parse "1d 2h 3m 4s" format (use History.tsx logic as reference)
+            const days = text.match(/(\d+)\s*d/i);
+            const hours = text.match(/(\d+)\s*h/i);
+            const minutes = text.match(/(\d+)\s*m(?!s)/i);
+            const secs = text.match(/(\d+)\s*s/i);
+            runtime =
+              (days ? parseInt(days[1], 10) * 86400 : 0) +
+              (hours ? parseInt(hours[1], 10) * 3600 : 0) +
+              (minutes ? parseInt(minutes[1], 10) * 60 : 0) +
+              (secs ? parseInt(secs[1], 10) : 0);
+          }
+        }
+      }
+      setLigandRuntime(runtime);
+
+    } catch (err) {
+      setError(`Failed to load ligand poses: ${err}`);
+      setLigandPoses([]);
+      setLigandRuntime(0);
+    } finally {
+      setLoadingLigandPoses(false);
+    }
+  };
+
   const handleMenuAction = (action: MenuAction) => {
     switch (action) {
       case 'new':
@@ -147,7 +214,7 @@ export function ResultsScreen(): React.ReactElement {
         view3D();
         break;
       case 'toggle':
-        setViewMode(viewMode === 'summary' ? 'ligands' : 'summary');
+        setResultsUI({ viewMode: viewMode === 'summary' ? 'ligands' : 'summary' });
         break;
       case 'back':
         if (previousScreen === 'history') {
@@ -187,54 +254,74 @@ export function ResultsScreen(): React.ReactElement {
     ? results?.ligandStatuses?.[activeLigandIndex] ?? null
     : null;
 
+  const showBatchDetail = Boolean(isBatch && viewMode === 'ligand-detail' && activeLigand);
+
   useEffect(() => {
-    if (initialViewSet) return;
-    if (results && isBatch) {
-      setViewMode('ligands');
-      setInitialViewSet(true);
-    } else if (results) {
-      setInitialViewSet(true);
+    if (!results) return;
+    if (resultsUI.runName !== results.runName) {
+      resetResultsUI({
+        runName: results.runName,
+        viewMode: isBatch ? 'ligands' : 'summary',
+        selectedTopIndex: 0,
+        selectedLigandIndex: 0,
+        activeLigandIndex: null,
+        detailReturnView: 'summary',
+      });
     }
-  }, [initialViewSet, results, isBatch]);
+  }, [results, resultsUI.runName, resetResultsUI, isBatch]);
+
+  // Load poses when entering ligand detail view
+  useEffect(() => {
+    if (showBatchDetail && activeLigand && batchRunDir) {
+      loadLigandPoses(activeLigand.name, batchRunDir);
+    } else {
+      setLigandPoses([]);
+      setLigandRuntime(0);
+    }
+  }, [activeLigand?.name, showBatchDetail, batchRunDir]);
 
   useInput((input, key) => {
     if (isBatch && viewMode === 'ligand-detail') {
       if (key.escape || isKey(input, 'b') || key.leftArrow) {
-        setViewMode(detailReturnView);
+        setResultsUI({ viewMode: detailReturnView });
         return;
       }
     }
 
     if (isBatch && viewMode === 'summary') {
       if (key.upArrow && topLigands.length > 0) {
-        setSelectedTopIndex((i) => Math.max(0, i - 1));
+        setResultsUI({ selectedTopIndex: Math.max(0, selectedTopIndex - 1) });
         return;
       }
       if (key.downArrow && topLigands.length > 0) {
-        setSelectedTopIndex((i) => Math.min(topLigands.length - 1, i + 1));
+        setResultsUI({ selectedTopIndex: Math.min(topLigands.length - 1, selectedTopIndex + 1) });
         return;
       }
       if (key.return && topLigands[selectedTopIndex]) {
-        setActiveLigandIndex(topLigands[selectedTopIndex].index);
-        setDetailReturnView('summary');
-        setViewMode('ligand-detail');
+        setResultsUI({
+          activeLigandIndex: topLigands[selectedTopIndex].index,
+          detailReturnView: 'summary',
+          viewMode: 'ligand-detail',
+        });
         return;
       }
     }
 
     if (isBatch && viewMode === 'ligands') {
       if (key.upArrow && ligandList.length > 0) {
-        setSelectedLigandIndex((i) => Math.max(0, i - 1));
+        setResultsUI({ selectedLigandIndex: Math.max(0, selectedLigandIndex - 1) });
         return;
       }
       if (key.downArrow && ligandList.length > 0) {
-        setSelectedLigandIndex((i) => Math.min(ligandList.length - 1, i + 1));
+        setResultsUI({ selectedLigandIndex: Math.min(ligandList.length - 1, selectedLigandIndex + 1) });
         return;
       }
       if (key.return && ligandList[selectedLigandIndex]) {
-        setActiveLigandIndex(selectedLigandIndex);
-        setDetailReturnView('ligands');
-        setViewMode('ligand-detail');
+        setResultsUI({
+          activeLigandIndex: selectedLigandIndex,
+          detailReturnView: 'ligands',
+          viewMode: 'ligand-detail',
+        });
         return;
       }
     }
@@ -245,7 +332,23 @@ export function ResultsScreen(): React.ReactElement {
       return;
     }
     if (key.rightArrow && viewMode !== 'ligand-detail') {
-      handleMenuAction('new');
+      // Treat right arrow as Enter for batch lists
+      if (isBatch && viewMode === 'summary' && topLigands[selectedTopIndex]) {
+        setResultsUI({
+          activeLigandIndex: topLigands[selectedTopIndex].index,
+          detailReturnView: 'summary',
+          viewMode: 'ligand-detail',
+        });
+        return;
+      }
+      if (isBatch && viewMode === 'ligands' && ligandList[selectedLigandIndex]) {
+        setResultsUI({
+          activeLigandIndex: selectedLigandIndex,
+          detailReturnView: 'ligands',
+          viewMode: 'ligand-detail',
+        });
+        return;
+      }
       return;
     }
 
@@ -260,16 +363,20 @@ export function ResultsScreen(): React.ReactElement {
       if (viewMode === 'summary') {
         const selected = topLigands[selectedTopIndex];
         if (selected) {
-          setSelectedLigandIndex(selected.index);
+          setResultsUI({ selectedLigandIndex: selected.index, viewMode: 'ligands' });
+          return;
         }
-        setViewMode('ligands');
+        setResultsUI({ viewMode: 'ligands' });
+        return;
       } else if (viewMode === 'ligands') {
         const current = selectedLigandIndex;
         const topIndex = topLigands.findIndex((item) => item.index === current);
         if (topIndex >= 0) {
-          setSelectedTopIndex(topIndex);
+          setResultsUI({ selectedTopIndex: topIndex, viewMode: 'summary' });
+          return;
         }
-        setViewMode('summary');
+        setResultsUI({ viewMode: 'summary' });
+        return;
       }
     } else if (isKey(input, 'v')) {
       handleMenuAction('view3d');
@@ -286,7 +393,6 @@ export function ResultsScreen(): React.ReactElement {
   const completed = results.ligandStatuses?.filter((l) => l.status === 'completed').length ?? 0;
   const failed = results.ligandStatuses?.filter((l) => l.status === 'failed').length ?? 0;
   const physical = results.ligandStatuses?.filter((l) => l.pb_count === 4).length ?? 0;
-  const showBatchDetail = Boolean(isBatch && viewMode === 'ligand-detail' && activeLigand);
   const detailBestPosePath = showBatchDetail && activeLigand
     ? path.join(batchRunDir, 'best_poses', `${activeLigand.name}.sdf`)
     : '';
@@ -335,7 +441,22 @@ export function ResultsScreen(): React.ReactElement {
                   {activeLigand?.status}
                 </Text>
               </Box>
-              <Box><Text color="gray">Batch runtime: </Text><Text color="white">{formatDuration(Math.round(results.runtime))}</Text></Box>
+              <Box>
+                <Text color="gray">Runtime: </Text>
+                <Text color="white">
+                  {loadingLigandPoses ? 'Loading...' : ligandRuntime > 0 ? formatDuration(Math.round(ligandRuntime)) : '—'}
+                </Text>
+              </Box>
+              <Box>
+                <Text color="gray">Total poses: </Text>
+                <Text color="white">{loadingLigandPoses ? 'Loading...' : ligandPoses.length}</Text>
+              </Box>
+              <Box>
+                <Text color="gray">Physical poses: </Text>
+                <Text color="white">
+                  {loadingLigandPoses ? 'Loading...' : ligandPoses.filter(p => p.pb_count === 4).length}
+                </Text>
+              </Box>
             </Box>
           </Box>
 
@@ -343,22 +464,39 @@ export function ResultsScreen(): React.ReactElement {
           <Box flexDirection="column" marginTop={1}>
             <Text bold color="white" underline>Best Pose</Text>
             <Box flexDirection="column" marginLeft={2} marginTop={1}>
-              <Box>
-                <Text color="gray">Error estimate: </Text>
-                <Text color="cyan">
-                  {activeLigand?.error_estimate !== undefined ? activeLigand.error_estimate.toFixed(3) : '—'}
-                </Text>
-              </Box>
-              <Box>
-                <Text color="gray">PoseBusters: </Text>
-                <Text color={activeLigand?.pb_count === 4 ? 'green' : 'yellow'}>
-                  {activeLigand?.pb_count !== undefined ? `${activeLigand.pb_count}/4` : '—'}
-                </Text>
-              </Box>
-              <Box>
-                <Text color="gray">Checks: </Text>
-                <Text color="gray" dimColor>Not available in batch summary</Text>
-              </Box>
+              {loadingLigandPoses ? (
+                <Text color="yellow">Loading pose data...</Text>
+              ) : ligandPoses.length > 0 ? (
+                <>
+                  <Box>
+                    <Text color="gray">Error estimate: </Text>
+                    <Text color="cyan">{ligandPoses[0].error_estimate.toFixed(3)}</Text>
+                  </Box>
+                  <Box>
+                    <Text color="gray">PoseBusters: </Text>
+                    <Text color={ligandPoses[0].pb_count === 4 ? 'green' : 'yellow'}>
+                      {ligandPoses[0].pb_count}/4
+                    </Text>
+                  </Box>
+                  <Box>
+                    <Text color="gray">Checks: </Text>
+                    <Text color={ligandPoses[0].checks.not_too_far_away ? 'green' : 'red'}>
+                      {ligandPoses[0].checks.not_too_far_away ? icons.check : icons.cross}{' '}
+                    </Text>
+                    <Text color={ligandPoses[0].checks.no_internal_clash ? 'green' : 'red'}>
+                      {ligandPoses[0].checks.no_internal_clash ? icons.check : icons.cross}{' '}
+                    </Text>
+                    <Text color={ligandPoses[0].checks.no_clashes ? 'green' : 'red'}>
+                      {ligandPoses[0].checks.no_clashes ? icons.check : icons.cross}{' '}
+                    </Text>
+                    <Text color={ligandPoses[0].checks.no_volume_clash ? 'green' : 'red'}>
+                      {ligandPoses[0].checks.no_volume_clash ? icons.check : icons.cross}
+                    </Text>
+                  </Box>
+                </>
+              ) : (
+                <Text color="gray" dimColor>No pose data available</Text>
+              )}
             </Box>
           </Box>
 
@@ -402,10 +540,48 @@ export function ResultsScreen(): React.ReactElement {
           {/* Top poses (batch ligand detail) */}
           <Box flexDirection="column" marginTop={1}>
             <Text bold color="white" underline>Top Poses</Text>
-            <Box flexDirection="column" marginLeft={2} marginTop={1}>
-              <Text color="gray">Pose list is not available in batch summary.</Text>
-              <Text color="gray">Open the SDF file from Output to inspect poses.</Text>
-            </Box>
+            {loadingLigandPoses ? (
+              <Box flexDirection="column" marginLeft={2} marginTop={1}>
+                <Text color="yellow">Loading poses...</Text>
+              </Box>
+            ) : ligandPoses.length > 0 ? (
+              <>
+                <Box flexDirection="column" marginTop={1}>
+                  <Box>
+                    <Text color="gray" bold>
+                      {'Rank'.padEnd(6)}{'Error'.padEnd(10)}{'PB'.padEnd(6)}Checks
+                    </Text>
+                  </Box>
+                  {ligandPoses.slice(0, 10).map((pose) => (
+                    <Box key={pose.rank}>
+                      <Text color="white">{String(pose.rank).padEnd(6)}</Text>
+                      <Text color="cyan">{pose.error_estimate.toFixed(3).padEnd(10)}</Text>
+                      <Text color={pose.pb_count === 4 ? 'green' : 'yellow'}>
+                        {`${pose.pb_count}/4`.padEnd(6)}
+                      </Text>
+                      <Text>
+                        {pose.checks.not_too_far_away ? icons.check : icons.cross}
+                        {pose.checks.no_internal_clash ? icons.check : icons.cross}
+                        {pose.checks.no_clashes ? icons.check : icons.cross}
+                        {pose.checks.no_volume_clash ? icons.check : icons.cross}
+                      </Text>
+                    </Box>
+                  ))}
+                </Box>
+                <Box marginTop={1} flexDirection="column">
+                  <Text color="gray" dimColor>
+                    Checks: 1=not too far away · 2=no internal clash
+                  </Text>
+                  <Text color="gray" dimColor>
+                    {'        '}3=no clashes · 4=no volume clash
+                  </Text>
+                </Box>
+              </>
+            ) : (
+              <Box flexDirection="column" marginLeft={2} marginTop={1}>
+                <Text color="gray">No poses available for this ligand.</Text>
+              </Box>
+            )}
           </Box>
         </>
       ) : (
@@ -526,14 +702,14 @@ export function ResultsScreen(): React.ReactElement {
           {/* View toggle for batch mode */}
           {isBatch && viewMode === 'summary' && (
             <Box flexDirection="column" marginTop={1}>
-              <Text bold color="white" underline>Top Ligands by Error Estimate</Text>
-              <Box flexDirection="column" marginTop={1}>
-                <Box>
-                  <Text color="gray" bold>{'  '}{'Name'.padEnd(28)}{'Error'.padEnd(10)}{'PB'.padEnd(6)}Status</Text>
-                </Box>
-                {topLigands.map((item, idx) => (
-                  <LigandResultRow
-                    key={`${item.index}-${item.ligand.name}`}
+          <Text bold color="white" underline>Top Ligands by Error Estimate</Text>
+          <Box flexDirection="column" marginTop={1}>
+            <Box>
+              <Text color="gray" bold>{'  '}{'Name'.padEnd(28)}{'Error'.padEnd(10)}{'PB'.padEnd(6)}Checks</Text>
+            </Box>
+            {topLigands.map((item, idx) => (
+              <LigandResultRow
+                key={`${item.index}-${item.ligand.name}`}
                     ligand={item.ligand}
                     selected={idx === selectedTopIndex}
                   />
@@ -545,14 +721,14 @@ export function ResultsScreen(): React.ReactElement {
           {/* Full ligand list for batch mode */}
           {isBatch && viewMode === 'ligands' && results.ligandStatuses && (
             <Box flexDirection="column" marginTop={1}>
-              <Text bold color="white" underline>All Ligands</Text>
-              <Box flexDirection="column" marginTop={1} height={15}>
-                <Box>
-                  <Text color="gray" bold>{'  '}{'Name'.padEnd(28)}{'Error'.padEnd(10)}{'PB'.padEnd(6)}Status</Text>
-                </Box>
-                {results.ligandStatuses.map((lig, idx) => (
-                  <LigandResultRow key={idx} ligand={lig} selected={idx === selectedLigandIndex} />
-                ))}
+          <Text bold color="white" underline>All Ligands</Text>
+          <Box flexDirection="column" marginTop={1} height={15}>
+            <Box>
+              <Text color="gray" bold>{'  '}{'Name'.padEnd(28)}{'Error'.padEnd(10)}{'PB'.padEnd(6)}Checks</Text>
+            </Box>
+            {results.ligandStatuses.map((lig, idx) => (
+              <LigandResultRow key={idx} ligand={lig} selected={idx === selectedLigandIndex} />
+            ))}
               </Box>
             </Box>
           )}
@@ -592,9 +768,9 @@ export function ResultsScreen(): React.ReactElement {
 
       {/* Navigation */}
       <Box marginTop={2} gap={4}>
-        <Text color="cyan">[n or →] New docking</Text>
+        <Text color="cyan">[n] New docking</Text>
         {isBatch && viewMode !== 'ligand-detail' && <Text color="gray">[↑↓] Select</Text>}
-        {isBatch && viewMode !== 'ligand-detail' && <Text color="gray">[Enter] View ligand</Text>}
+        {isBatch && viewMode !== 'ligand-detail' && <Text color="gray">[Enter or →] View ligand</Text>}
         {isBatch && viewMode !== 'ligand-detail' && (
           <Text color="yellow">[l] {viewMode === 'summary' ? 'All ligands' : 'Top ligands'}</Text>
         )}
@@ -614,19 +790,20 @@ function LigandResultRow({
   ligand: BatchLigandStatus;
   selected?: boolean;
 }): React.ReactElement {
-  const statusIcon = {
-    pending: icons.pending,
-    running: icons.running,
-    completed: icons.check,
-    failed: icons.error,
-  }[ligand.status];
-
   const statusColor = {
     pending: 'gray',
     running: 'yellow',
     completed: 'green',
     failed: 'red',
   }[ligand.status] as 'gray' | 'yellow' | 'green' | 'red';
+
+  const pbChecks = ligand.pb_count !== undefined
+    ? `${ligand.pb_count}/4`.padEnd(6)
+    : '-'.padEnd(6);
+  const pbIcons =
+    ligand.pb_count !== undefined
+      ? Array.from({ length: 4 }, (_, i) => (i < ligand.pb_count! ? icons.check : icons.cross)).join('')
+      : '----';
 
   return (
     <Box>
@@ -637,10 +814,8 @@ function LigandResultRow({
       <Text color="cyan" dimColor={!selected}>
         {ligand.error_estimate !== undefined ? ligand.error_estimate.toFixed(3).padEnd(10) : '-'.padEnd(10)}
       </Text>
-      <Text color={ligand.pb_count === 4 ? 'green' : 'yellow'} dimColor={!selected}>
-        {ligand.pb_count !== undefined ? `${ligand.pb_count}/4`.padEnd(6) : '-'.padEnd(6)}
-      </Text>
-      <Text color={statusColor} dimColor={!selected}>{statusIcon}</Text>
+      <Text color={ligand.pb_count === 4 ? 'green' : 'yellow'} dimColor={!selected}>{pbChecks}</Text>
+      <Text color={statusColor} dimColor={!selected}>{pbIcons}</Text>
       {ligand.status === 'failed' && ligand.error_message && (
         <Text color="red"> {ligand.error_message.substring(0, 20)}</Text>
       )}
