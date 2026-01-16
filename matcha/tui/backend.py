@@ -5,6 +5,7 @@ Communicates with the Node.js/Ink frontend via stdin/stdout.
 """
 
 import json
+import locale
 import os
 import sys
 import signal
@@ -27,6 +28,20 @@ from matcha.tui.protocol import (
     make_notification,
     ErrorCode,
 )
+
+# Force English locale for consistent output
+os.environ['LANG'] = 'en_US.UTF-8'
+os.environ['LC_ALL'] = 'en_US.UTF-8'
+os.environ['LANGUAGE'] = 'en_US:en'
+
+try:
+    locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
+except Exception:
+    # Fallback if locale not installed on system
+    try:
+        locale.setlocale(locale.LC_ALL, 'C.UTF-8')
+    except Exception:
+        pass  # Use system default as last resort
 
 # Global state
 _current_job: Optional["DockingJob"] = None

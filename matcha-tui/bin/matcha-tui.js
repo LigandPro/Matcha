@@ -7,6 +7,11 @@
  * It initializes the Python backend and starts the Ink frontend.
  */
 
+// Force English locale for consistent output
+process.env.LANG = 'en_US.UTF-8';
+process.env.LC_ALL = 'en_US.UTF-8';
+process.env.LANGUAGE = 'en_US:en';
+
 // Parse command line arguments for debug mode
 const args = process.argv.slice(2);
 const DEBUG = args.includes('--debug') || process.env.DEBUG?.includes('matcha');
