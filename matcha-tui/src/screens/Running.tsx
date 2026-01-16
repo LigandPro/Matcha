@@ -348,8 +348,8 @@ export function RunningScreen(): React.ReactElement {
           </>
         )}
         <Text color="gray" dimColor> • </Text>
-        <Text color="cyan" dimColor>Esc</Text>
-        <Text color="gray" dimColor> to home</Text>
+        <Text color="cyan" dimColor>h/Esc</Text>
+        <Text color="gray" dimColor> run in background</Text>
       </Box>
 
       {/* Batch progress (if batch mode) */}

@@ -44,18 +44,18 @@ const SCREEN_SHORTCUTS: Record<Screen, Shortcut[]> = {
   ],
   running: [
     { key: 'c', label: 'Cancel' },
-    { key: 'Esc', label: 'Home' },
+    { key: 'h/Esc', label: 'Background' },
   ],
   results: [
     { key: '←', label: 'Back' },
     { key: '→', label: 'New docking' },
     { key: 'v', label: 'View 3D' },
-    { key: 'o', label: 'Open folder' },
   ],
   history: [
     { key: 'Enter', label: 'View details' },
     { key: 'd', label: 'Delete' },
     { key: 'Esc', label: 'Back' },
+    { key: '←', label: 'Back' },
   ],
 };
 
