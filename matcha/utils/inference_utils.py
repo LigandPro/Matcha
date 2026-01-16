@@ -54,6 +54,10 @@ def get_data_for_buster(preds, dataset_data_dir, dataset_name):
             true_mol_path = get_ligand_path(
                 uid, dataset_name, dataset_data_dir)
             orig_mol = read_molecule(true_mol_path, sanitize=False)
+            try:
+                orig_mol = RemoveAllHs(orig_mol, sanitize=True)
+            except Exception as e:
+                orig_mol = RemoveAllHs(orig_mol, sanitize=False)
             if orig_mol is not None:
                 true_pos = np.copy(orig_mol.GetConformer().GetPositions())
             else:

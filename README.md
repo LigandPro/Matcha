@@ -139,12 +139,12 @@ To run inference:
 CUDA_VISIBLE_DEVICES=0 python scripts/run_inference_pipeline.py -c configs/base.yaml -p configs/paths/paths.yaml -n inference_folder_name --n_samples 40
 ```
 
-Then run `posebusters_unsupervised.py` to do fast unsupervised post-filtration and `save_preds_for_npbench.py` to get top-1 ranked pose. The top-ranked poses for each complex are stored in the `inference_results_folder/inference_folder_name/sdf_predictions`.
+Then run `posebusters_unsupervised.py` to do fast unsupervised post-filtration and `save_best_pred_to_sdf.py` to get top-1 ranked pose. The top-ranked poses for each complex are stored in the `inference_results_folder/inference_folder_name/sdf_predictions`.
 You need to provide the same `--n_samples`, as for the `run_inference_pipeline.py`.
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python scripts/posebusters_unsupervised.py -c configs/base.yaml -p configs/paths/paths.yaml -n inference_folder_name --n_samples 40
-python scripts/save_preds_for_npbench.py -p configs/paths/paths.yaml -n inference_folder_name
+python scripts/save_best_pred_to_sdf.py -p configs/paths/paths.yaml -n inference_folder_name
 ```
 
 ### Metrics computation <a name="metrics"></a>
