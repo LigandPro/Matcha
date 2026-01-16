@@ -164,11 +164,18 @@ export class PythonBridge extends EventEmitter {
       this.emit('error', err);
     });
 
-    // Collect stderr for error messages
+    // Collect stderr for error messages (with memory limit)
+    const MAX_STDERR_SIZE = 50000;
     let stderrOutput = '';
     this.process.stderr?.on('data', (data: Buffer) => {
       const text = data.toString();
       stderrOutput += text;
+
+      // Prevent memory leak by limiting buffer size
+      if (stderrOutput.length > MAX_STDERR_SIZE) {
+        // Keep last half of buffer
+        stderrOutput = stderrOutput.slice(-MAX_STDERR_SIZE / 2);
+      }
 
       // Output stderr in real-time during debug mode
       if (debugMode) {

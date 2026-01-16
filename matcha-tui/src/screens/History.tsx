@@ -8,9 +8,10 @@ import path from 'path';
 import * as fs from 'fs';
 import { useStore } from '../store/index.js';
 import { getBridge, initBridge } from '../services/index.js';
-import { icons } from '../utils/colors.js';
+import { icons, getStatusColor } from '../utils/colors.js';
 import { logger } from '../utils/logger.js';
 import { isKey } from '../utils/keyboard.js';
+import { parseRuntimeFromLog } from '../utils/runtime.js';
 import type { BatchLigandStatus, JobResults, PoseResult } from '../types/index.js';
 
 interface RunInfo {
@@ -177,24 +178,7 @@ export function HistoryScreen(): React.ReactElement {
       if (details.files?.log && fs.existsSync(details.files.log)) {
         try {
           logContent = fs.readFileSync(details.files.log, 'utf-8');
-          const runtimeMatch = logContent.match(/Total runtime\s*:\s*([^\n]+)/i);
-          if (runtimeMatch) {
-            const runtimeText = runtimeMatch[1].trim();
-            const secondsMatch = runtimeText.match(/^([\d.]+)\s*s?$/i);
-            if (secondsMatch) {
-              runtime = parseFloat(secondsMatch[1]);
-            } else {
-              const days = runtimeText.match(/(\d+)\s*d/i);
-              const hours = runtimeText.match(/(\d+)\s*h/i);
-              const minutes = runtimeText.match(/(\d+)\s*m(?!s)/i);
-              const secs = runtimeText.match(/(\d+)\s*s/i);
-              runtime =
-                (days ? parseInt(days[1], 10) * 86400 : 0) +
-                (hours ? parseInt(hours[1], 10) * 3600 : 0) +
-                (minutes ? parseInt(minutes[1], 10) * 60 : 0) +
-                (secs ? parseInt(secs[1], 10) : 0);
-            }
-          }
+          runtime = parseRuntimeFromLog(logContent);
         } catch (err) {
           // Log parsing failed, keep runtime as 0
         }
@@ -419,7 +403,7 @@ export function HistoryScreen(): React.ReactElement {
         {runs.map((run, index) => {
           const isSelected = index === selectedIndex;
           const statusIcon = run.status === 'completed' ? icons.check : icons.pending;
-          const statusColor = run.status === 'completed' ? 'green' : 'yellow';
+          const statusColor = run.status === 'completed' ? getStatusColor('completed') : getStatusColor('pending');
 
           return (
             <Box key={run.path}>

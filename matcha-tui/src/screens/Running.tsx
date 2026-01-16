@@ -8,7 +8,7 @@ import path from 'path';
 import { useStore } from '../store/index.js';
 import { getBridge, initBridge, closeBridge, type ProgressEvent } from '../services/index.js';
 import { ProgressBar } from '../components/ProgressBar.js';
-import { icons } from '../utils/colors.js';
+import { icons, getStageColor, getStatusColor } from '../utils/colors.js';
 import { PIPELINE_STAGES, type PipelineStage, type PoseResult } from '../types/index.js';
 import { formatDuration, generateRunName } from '../utils/format.js';
 import { isKey } from '../utils/keyboard.js';
@@ -432,7 +432,7 @@ export function RunningScreen(): React.ReactElement {
 
 function StageRow({ stage, status }: { stage: { id: PipelineStage; name: string }; status?: StageStatus }): React.ReactElement {
   const icon = status?.status === 'done' ? icons.check : status?.status === 'running' ? icons.running : icons.pending;
-  const color = status?.status === 'done' ? 'green' : status?.status === 'running' ? 'yellow' : 'gray';
+  const color = status?.status ? getStageColor(status.status as 'pending' | 'running' | 'done') : 'gray';
 
   return (
     <Box>
@@ -458,12 +458,7 @@ function LigandRow({ ligand, isCurrent }: { ligand: LigandStatus; isCurrent: boo
     failed: icons.error,
   }[ligand.status];
 
-  const statusColor = {
-    pending: 'gray',
-    running: 'yellow',
-    completed: 'green',
-    failed: 'red',
-  }[ligand.status] as 'gray' | 'yellow' | 'green' | 'red';
+  const statusColor = getStatusColor(ligand.status);
 
   return (
     <Box>

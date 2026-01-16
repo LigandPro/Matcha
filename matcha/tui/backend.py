@@ -29,6 +29,7 @@ from matcha.tui.protocol import (
     make_notification,
     ErrorCode,
 )
+from matcha.tui.utils import extract_pb_filters
 
 # Force English locale for consistent output
 os.environ['LANG'] = 'en_US.UTF-8'
@@ -44,11 +45,170 @@ except Exception:
     except Exception:
         pass  # Use system default as last resort
 
-# Global state - Job queue
-_jobs: Dict[str, "DockingJob"] = {}  # All jobs by ID
-_job_queue: deque = deque()  # Queue of job IDs (FIFO)
-_running_job_id: Optional[str] = None  # Currently running job ID
-_jobs_lock = threading.Lock()  # Thread-safe access
+class JobManager:
+    """Thread-safe manager for docking jobs."""
+
+    def __init__(self):
+        self._jobs: Dict[str, "DockingJob"] = {}
+        self._job_queue: deque = deque()
+        self._running_job_id: Optional[str] = None
+        self._lock = threading.Lock()
+
+    def add_job(self, job_id: str, job: "DockingJob") -> None:
+        """Add a job to the queue.
+
+        Args:
+            job_id: Unique job identifier
+            job: DockingJob instance
+        """
+        with self._lock:
+            self._jobs[job_id] = job
+            self._job_queue.append(job_id)
+            emit_debug("info", "backend", f"Job {job_id} added to queue (position: {len(self._job_queue)})")
+
+    def start_next(self) -> None:
+        """Start the next job from the queue (must be called WITHOUT holding lock)."""
+        with self._lock:
+            if len(self._job_queue) == 0:
+                return
+
+            job_id = self._job_queue.popleft()
+            job = self._jobs.get(job_id)
+
+            if not job:
+                return
+
+            self._running_job_id = job_id
+            emit_debug("info", "backend", f"Starting job from queue: {job_id}")
+
+        # Start thread OUTSIDE lock to avoid potential deadlocks
+        job.thread = threading.Thread(
+            target=self._run_job, args=(job_id,), daemon=False
+        )
+        job.thread.start()
+
+    def _run_job(self, job_id: str) -> None:
+        """Run a docking job in a separate thread."""
+        try:
+            job = self.get_job(job_id)
+            if not job:
+                emit_debug("error", "backend", f"Job not found: {job_id}")
+                return
+
+            emit_debug("info", "backend", f"Executing job: {job_id}")
+
+            # Import here to avoid circular dependency
+            from matcha.tui.docking_worker import run_docking
+
+            run_docking(job)
+
+        except Exception as e:
+            emit_debug("error", "backend", f"Job {job_id} failed: {e}")
+            # Send error notification
+            send_notification("job_error", {"job_id": job_id, "error": str(e)})
+        finally:
+            # Clean up and start next job
+            self.cleanup_job(job_id)
+
+    def cleanup_job(self, job_id: str) -> None:
+        """Clean up a completed job and start next in queue.
+
+        Args:
+            job_id: Job ID to clean up
+        """
+        # Perform cleanup inside lock
+        with self._lock:
+            if job_id in self._jobs:
+                del self._jobs[job_id]
+
+            if self._running_job_id == job_id:
+                self._running_job_id = None
+
+        # Start next job OUTSIDE lock to prevent deadlock
+        self.start_next()
+
+    def get_job(self, job_id: str) -> Optional["DockingJob"]:
+        """Get a job by ID (thread-safe).
+
+        Args:
+            job_id: Job identifier
+
+        Returns:
+            DockingJob instance or None if not found
+        """
+        with self._lock:
+            return self._jobs.get(job_id)
+
+    def get_running_job_id(self) -> Optional[str]:
+        """Get the currently running job ID (thread-safe).
+
+        Returns:
+            Job ID or None
+        """
+        with self._lock:
+            return self._running_job_id
+
+    def cancel_job(self, job_id: Optional[str] = None) -> tuple[bool, Optional[str]]:
+        """Cancel a specific job or the running job.
+
+        Args:
+            job_id: Job ID to cancel, or None for running job
+
+        Returns:
+            Tuple of (success, actual_job_id)
+        """
+        with self._lock:
+            target_id = job_id or self._running_job_id
+
+            if not target_id or target_id not in self._jobs:
+                return (False, None)
+
+            job = self._jobs[target_id]
+            emit_debug("info", "backend", f"Cancelling job: {target_id}")
+            job.cancel()
+            return (True, target_id)
+
+    def list_all_jobs(self) -> list[dict]:
+        """List all active jobs (running and queued).
+
+        Returns:
+            List of job info dictionaries
+        """
+        with self._lock:
+            jobs_list = []
+
+            # Add running job
+            if self._running_job_id and self._running_job_id in self._jobs:
+                job = self._jobs[self._running_job_id]
+                jobs_list.append({
+                    "job_id": self._running_job_id,
+                    "status": "running",
+                    "config": job.config,
+                    "cancelled": job.cancelled,
+                })
+
+            # Add queued jobs
+            for job_id in self._job_queue:
+                if job_id in self._jobs:
+                    job = self._jobs[job_id]
+                    jobs_list.append({
+                        "job_id": job_id,
+                        "status": "queued",
+                        "config": job.config,
+                        "cancelled": job.cancelled,
+                    })
+
+            return jobs_list
+
+    def cancel_all_jobs(self) -> None:
+        """Cancel all jobs (for shutdown)."""
+        with self._lock:
+            for job in self._jobs.values():
+                job.cancel()
+
+
+# Global job manager instance
+_job_manager = JobManager()
 _shutdown_event = threading.Event()
 
 
@@ -91,64 +251,6 @@ class DockingJob:
 
     def is_cancelled(self) -> bool:
         return self.cancelled
-
-
-def _start_next_job() -> None:
-    """Start the next job from the queue."""
-    global _running_job_id, _jobs, _job_queue
-
-    if len(_job_queue) == 0:
-        return
-
-    job_id = _job_queue.popleft()
-    job = _jobs.get(job_id)
-
-    if job:
-        _running_job_id = job_id
-        emit_debug("info", "backend", f"Starting job from queue: {job_id}")
-
-        # Import here to avoid circular dependency
-        from matcha.tui.docking_worker import run_docking
-
-        job.thread = threading.Thread(
-            target=_run_job, args=(job_id,), daemon=False
-        )
-        job.thread.start()
-
-
-def _run_job(job_id: str) -> None:
-    """Run a docking job in a separate thread."""
-    global _running_job_id, _jobs
-
-    try:
-        job = _jobs.get(job_id)
-        if not job:
-            emit_debug("error", "backend", f"Job not found: {job_id}")
-            return
-
-        emit_debug("info", "backend", f"Executing job: {job_id}")
-
-        # Import here to avoid circular dependency
-        from matcha.tui.docking_worker import run_docking
-
-        run_docking(job)
-
-    except Exception as e:
-        emit_debug("error", "backend", f"Job {job_id} failed: {e}")
-        # Send error notification
-        send_notification("job_error", {"job_id": job_id, "error": str(e)})
-    finally:
-        with _jobs_lock:
-            # Clean up completed job
-            if job_id in _jobs:
-                del _jobs[job_id]
-
-            # Reset running job ID if this was the running job
-            if _running_job_id == job_id:
-                _running_job_id = None
-
-            # Start next job in queue
-            _start_next_job()
 
 
 class RPCHandler:
@@ -349,8 +451,6 @@ class RPCHandler:
 
     def start_docking(self, config: dict) -> dict:
         """Start a docking job (adds to queue)."""
-        global _jobs, _job_queue, _running_job_id
-
         emit_debug("info", "backend", "Starting docking job", {"config": config})
 
         # Generate unique job ID with milliseconds
@@ -362,86 +462,47 @@ class RPCHandler:
             event_dict["job_id"] = job_id
             send_notification("progress", event_dict)
 
-        with _jobs_lock:
-            # Create job
-            job = DockingJob(job_id, config, progress_callback)
-            _jobs[job_id] = job
+        # Create and add job to manager
+        job = DockingJob(job_id, config, progress_callback)
+        _job_manager.add_job(job_id, job)
 
-            # Add to queue
-            _job_queue.append(job_id)
-
-            emit_debug("info", "backend", f"Job {job_id} added to queue (position: {len(_job_queue)})")
-
-            # If no job is running, start this one immediately
-            if _running_job_id is None:
-                _start_next_job()
+        # Start immediately if no job is running
+        if _job_manager.get_running_job_id() is None:
+            _job_manager.start_next()
 
         return {"job_id": job_id, "status": "queued"}
 
     def get_progress(self, job_id: Optional[str] = None) -> dict:
         """Get progress of a specific job or the running job."""
-        global _jobs, _running_job_id
+        # If no job_id specified, use running job
+        target_id = job_id or _job_manager.get_running_job_id()
 
-        with _jobs_lock:
-            # If no job_id specified, use running job
-            target_id = job_id or _running_job_id
+        if not target_id:
+            return {"status": "no_job"}
 
-            if not target_id or target_id not in _jobs:
-                return {"status": "no_job"}
+        job = _job_manager.get_job(target_id)
+        if not job:
+            return {"status": "no_job"}
 
-            job = _jobs[target_id]
-            return {
-                "job_id": job.job_id,
-                "cancelled": job.cancelled,
-                "running": job.thread.is_alive() if job.thread else False,
-            }
+        return {
+            "job_id": job.job_id,
+            "cancelled": job.cancelled,
+            "running": job.thread.is_alive() if job.thread else False,
+        }
 
     def cancel_job(self, job_id: Optional[str] = None) -> dict:
         """Cancel a specific job or the running job."""
-        global _jobs, _running_job_id
+        success, target_id = _job_manager.cancel_job(job_id)
 
-        with _jobs_lock:
-            # If no job_id specified, use running job
-            target_id = job_id or _running_job_id
+        if not success:
+            emit_debug("warn", "backend", "No job to cancel")
+            return {"status": "no_job"}
 
-            if not target_id or target_id not in _jobs:
-                emit_debug("warn", "backend", "No job to cancel")
-                return {"status": "no_job"}
-
-            job = _jobs[target_id]
-            emit_debug("info", "backend", f"Cancelling job: {target_id}")
-            job.cancel()
-            return {"status": "cancelled", "job_id": target_id}
+        return {"status": "cancelled", "job_id": target_id}
 
     def list_jobs(self) -> dict:
         """List all active jobs (running and queued)."""
-        global _jobs, _running_job_id, _job_queue
-
-        with _jobs_lock:
-            jobs_list = []
-
-            # Add running job
-            if _running_job_id and _running_job_id in _jobs:
-                job = _jobs[_running_job_id]
-                jobs_list.append({
-                    "job_id": _running_job_id,
-                    "status": "running",
-                    "config": job.config,
-                    "cancelled": job.cancelled,
-                })
-
-            # Add queued jobs
-            for job_id in _job_queue:
-                if job_id in _jobs:
-                    job = _jobs[job_id]
-                    jobs_list.append({
-                        "job_id": job_id,
-                        "status": "queued",
-                        "config": job.config,
-                        "cancelled": job.cancelled,
-                    })
-
-            return {"jobs": jobs_list}
+        return {"jobs": _job_manager.list_all_jobs()}
 
     def list_runs(self, output_dir: str) -> list[dict]:
         """List previous docking runs in a directory."""
@@ -473,8 +534,8 @@ class RPCHandler:
                                         receptor = line.split(':', 1)[1].strip()
                                     elif 'Ligand' in line and ':' in line and 'ligand' in line.lower():
                                         ligand = line.split(':', 1)[1].strip()
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            emit_debug("warn", "backend", f"Failed to parse log file for run info: {e}")
 
                     run_info = RunInfo(
                         name=item.name,
@@ -553,8 +614,8 @@ class RPCHandler:
                         elif 'Ligand' in line and ':' in line and 'ligand' in line.lower():
                             ligand_path = line.split(':', 1)[1].strip()
                             details["ligand"] = ligand_path
-            except Exception:
-                pass
+            except Exception as e:
+                emit_debug("warn", "backend", f"Failed to parse log file for run details: {e}")
 
         return details
 
@@ -592,17 +653,13 @@ class RPCHandler:
                     continue
 
                 for i, sample in enumerate(samples_dict['sample_metrics']):
-                    pb_filters = sample.get("posebusters_filters_fast", [False] * 5)
+                    pb_data = extract_pb_filters(sample)
                     poses.append(
                         PoseInfo(
                             rank=i + 1,
                             error_estimate=float(sample.get("error_estimate_0", 0)),
                             pb_count=int(sample.get("posebusters_filters_passed_count_fast", 0)),
-                            not_too_far_away=bool(pb_filters[0]) if len(pb_filters) > 0 else False,
-                            no_internal_clash=bool(pb_filters[1]) if len(pb_filters) > 1 else False,
-                            no_clashes=bool(pb_filters[2]) if len(pb_filters) > 2 else False,
-                            no_volume_clash=bool(pb_filters[3]) if len(pb_filters) > 3 else False,
-                            buried_fraction=float(pb_filters[4]) if len(pb_filters) > 4 else 0.0,
+                            **pb_data,
                         )
                     )
                 break  # Only first UID for now
@@ -707,11 +764,8 @@ def send_notification(method: str, params: dict) -> None:
 
 def handle_signal(signum: int, frame: Any) -> None:
     """Handle shutdown signals."""
-    global _jobs
     # Cancel all running and queued jobs
-    with _jobs_lock:
-        for job in _jobs.values():
-            job.cancel()
+    _job_manager.cancel_all_jobs()
     _shutdown_event.set()
 
 
@@ -755,10 +809,7 @@ def run_backend() -> None:
             send_notification("error", {"message": str(e)})
 
     # Cleanup - cancel all jobs
-    global _jobs
-    with _jobs_lock:
-        for job in _jobs.values():
-            job.cancel()
+    _job_manager.cancel_all_jobs()
 
 
 if __name__ == "__main__":

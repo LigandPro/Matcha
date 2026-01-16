@@ -6,7 +6,7 @@ import React, { useState, useEffect } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { useStore } from '../store/index.js';
 import { getBridge } from '../services/python-bridge.js';
-import { icons } from '../utils/colors.js';
+import { icons, getStatusColor } from '../utils/colors.js';
 import type { ActiveJob } from '../types/index.js';
 
 export function JobsScreen(): React.ReactElement {
@@ -99,7 +99,7 @@ export function JobsScreen(): React.ReactElement {
       {jobsList.map((job, idx) => {
         const isSelected = idx === selectedIndex;
         const statusIcon = job.status === 'running' ? '●' : '○';
-        const statusColor = job.status === 'running' ? 'green' : 'yellow';
+        const statusColor = job.status === 'running' ? getStatusColor('running') : getStatusColor('pending');
         const progress = job.progress?.percent ?? 0;
         const stage = job.progress?.stage ?? 'init';
 

@@ -79,6 +79,14 @@ export class RPCClient extends EventEmitter {
   private handleData(data: string): void {
     this.buffer += data;
 
+    // Prevent memory leak by limiting buffer size
+    const MAX_BUFFER_SIZE = 1024 * 1024; // 1MB
+    if (this.buffer.length > MAX_BUFFER_SIZE) {
+      this.emit('error', new Error('Buffer overflow: RPC message too large or malformed'));
+      this.buffer = '';
+      return;
+    }
+
     // Process complete lines
     let newlineIndex: number;
     while ((newlineIndex = this.buffer.indexOf('\n')) !== -1) {
@@ -161,7 +169,11 @@ export class RPCClient extends EventEmitter {
       });
 
       try {
-        this.process.stdin?.write(JSON.stringify(request) + '\n');
+        // Validate stdin is available before writing
+        if (!this.process.stdin || this.process.stdin.destroyed) {
+          throw new Error('Process stdin is not available');
+        }
+        this.process.stdin.write(JSON.stringify(request) + '\n');
       } catch (err) {
         clearTimeout(timeoutHandle);
         this.pending.delete(id);
@@ -180,7 +192,12 @@ export class RPCClient extends EventEmitter {
       params: params ?? {},
     };
 
-    this.process.stdin?.write(JSON.stringify(notification) + '\n');
+    // Validate stdin is available before writing
+    if (!this.process.stdin || this.process.stdin.destroyed) {
+      this.emit('error', new Error('Process stdin is not available'));
+      return;
+    }
+    this.process.stdin.write(JSON.stringify(notification) + '\n');
   }
 
   /**

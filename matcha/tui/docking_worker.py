@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from matcha.tui.protocol import ProgressEvent, LigandStatus
+from matcha.tui.utils import extract_pb_filters
 
 if TYPE_CHECKING:
     from matcha.tui.backend import DockingJob
@@ -1237,18 +1238,18 @@ def process_single_ligand(
             # uid_data is a dict with 'sample_metrics' and 'orig_mol' keys
             sample_metrics = uid_data.get('sample_metrics', [])
             for i, sample in enumerate(sample_metrics[:10]):
-                pb_filters = sample.get("posebusters_filters_fast", [False] * 5)
+                pb_data = extract_pb_filters(sample)
                 poses.append({
                     "rank": i + 1,
                     "error_estimate": float(sample.get("error_estimate_0", 0)),
                     "pb_count": int(sample.get("posebusters_filters_passed_count_fast", 0)),
                     "checks": {
-                        "not_too_far_away": bool(pb_filters[0]) if len(pb_filters) > 0 else False,
-                        "no_internal_clash": bool(pb_filters[1]) if len(pb_filters) > 1 else False,
-                        "no_clashes": bool(pb_filters[2]) if len(pb_filters) > 2 else False,
-                        "no_volume_clash": bool(pb_filters[3]) if len(pb_filters) > 3 else False,
+                        "not_too_far_away": pb_data["not_too_far_away"],
+                        "no_internal_clash": pb_data["no_internal_clash"],
+                        "no_clashes": pb_data["no_clashes"],
+                        "no_volume_clash": pb_data["no_volume_clash"],
                     },
-                    "buried_fraction": float(pb_filters[4]) if len(pb_filters) > 4 else 0.0,
+                    "buried_fraction": pb_data["buried_fraction"],
                 })
             break
 

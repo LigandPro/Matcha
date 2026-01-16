@@ -9,11 +9,12 @@ import path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { useStore } from '../store/index.js';
-import { icons } from '../utils/colors.js';
+import { icons, getStatusColor } from '../utils/colors.js';
 import { formatDuration, truncatePath } from '../utils/format.js';
 import { generateMolstarViewer } from '../utils/molstar-viewer.js';
 import { isKey } from '../utils/keyboard.js';
 import { getBridge } from '../services/python-bridge.js';
+import { parseRuntimeFromLog } from '../utils/runtime.js';
 import type { BatchLigandStatus, PoseResult } from '../types/index.js';
 
 type MenuAction = 'new' | 'view3d' | 'toggle' | 'back' | 'home';
@@ -173,25 +174,7 @@ export function ResultsScreen(): React.ReactElement {
       let runtime = 0;
       if (fs.existsSync(ligandLogPath)) {
         const logContent = fs.readFileSync(ligandLogPath, 'utf-8');
-        const match = logContent.match(/Total runtime\s*:\s*([^\n]+)/i);
-        if (match) {
-          const text = match[1].trim();
-          const secondsMatch = text.match(/^([\d.]+)\s*s?$/i);
-          if (secondsMatch) {
-            runtime = parseFloat(secondsMatch[1]);
-          } else {
-            // Parse "1d 2h 3m 4s" format (use History.tsx logic as reference)
-            const days = text.match(/(\d+)\s*d/i);
-            const hours = text.match(/(\d+)\s*h/i);
-            const minutes = text.match(/(\d+)\s*m(?!s)/i);
-            const secs = text.match(/(\d+)\s*s/i);
-            runtime =
-              (days ? parseInt(days[1], 10) * 86400 : 0) +
-              (hours ? parseInt(hours[1], 10) * 3600 : 0) +
-              (minutes ? parseInt(minutes[1], 10) * 60 : 0) +
-              (secs ? parseInt(secs[1], 10) : 0);
-          }
-        }
+        runtime = parseRuntimeFromLog(logContent);
       }
       setLigandRuntime(runtime);
 
@@ -437,7 +420,7 @@ export function ResultsScreen(): React.ReactElement {
               <Box><Text color="gray">Ligand: </Text><Text color="white">{activeLigand?.name}</Text></Box>
               <Box>
                 <Text color="gray">Status: </Text>
-                <Text color={activeLigand?.status === 'completed' ? 'green' : activeLigand?.status === 'failed' ? 'red' : 'yellow'}>
+                <Text color={activeLigand?.status ? getStatusColor(activeLigand.status) : 'yellow'}>
                   {activeLigand?.status}
                 </Text>
               </Box>
@@ -790,12 +773,7 @@ function LigandResultRow({
   ligand: BatchLigandStatus;
   selected?: boolean;
 }): React.ReactElement {
-  const statusColor = {
-    pending: 'gray',
-    running: 'yellow',
-    completed: 'green',
-    failed: 'red',
-  }[ligand.status] as 'gray' | 'yellow' | 'green' | 'red';
+  const statusColor = getStatusColor(ligand.status);
 
   const pbChecks = ligand.pb_count !== undefined
     ? `${ligand.pb_count}/4`.padEnd(6)
