@@ -36,6 +36,34 @@ interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (reason: Error) => void;
   timeout: NodeJS.Timeout;
+  method: string;
+}
+
+export class RPCError extends Error {
+  constructor(
+    public readonly code: number,
+    message: string,
+    public readonly data?: unknown,
+    public readonly methodName?: string
+  ) {
+    super(message);
+    this.name = 'RPCError';
+
+    // Preserve stack trace
+    if (Error.captureStackTrace) {
+      Error.captureStackTrace(this, RPCError);
+    }
+  }
+
+  toJSON() {
+    return {
+      name: this.name,
+      code: this.code,
+      message: this.message,
+      data: this.data,
+      methodName: this.methodName,
+    };
+  }
 }
 
 export class RPCClient extends EventEmitter {
@@ -132,7 +160,14 @@ export class RPCClient extends EventEmitter {
     this.pending.delete(response.id);
 
     if (response.error) {
-      pending.reject(new Error(`RPC Error ${response.error.code}: ${response.error.message}`));
+      pending.reject(
+        new RPCError(
+          response.error.code,
+          response.error.message,
+          response.error.data,
+          pending.method
+        )
+      );
     } else {
       pending.resolve(response.result);
     }
@@ -166,6 +201,7 @@ export class RPCClient extends EventEmitter {
         resolve: resolve as (value: unknown) => void,
         reject,
         timeout: timeoutHandle,
+        method,
       });
 
       try {

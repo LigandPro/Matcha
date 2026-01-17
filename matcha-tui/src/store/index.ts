@@ -4,6 +4,13 @@ import type { Screen, JobConfig, ProgressInfo, JobResults, StoredJob, ActiveJob,
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 export type ResultsViewMode = 'summary' | 'ligands' | 'ligand-detail';
 
+const STORE_CONFIG = {
+  MAX_LOGS: 500,
+  MAX_HISTORY: 50,
+  MAX_NAV_HISTORY: 100,
+  MAX_DEBUG_LOGS: 1000,
+} as const;
+
 interface ResultsUIState {
   viewMode: ResultsViewMode;
   selectedTopIndex: number;
@@ -18,7 +25,7 @@ export interface DebugLog {
   level: LogLevel;
   component: string;
   message: string;
-  data?: any;
+  data?: Record<string, unknown>;
 }
 
 interface AppState {
@@ -132,7 +139,7 @@ export const useStore = create<AppState>((set, get) => ({
   setProgress: (progress) => set({ progress }),
   addLog: (log) =>
     set((state) => ({
-      logs: [...state.logs.slice(-500), log], // Keep last 500 logs
+      logs: [...state.logs.slice(-STORE_CONFIG.MAX_LOGS), log],
     })),
   clearLogs: () => set({ logs: [] }),
 
@@ -205,7 +212,7 @@ export const useStore = create<AppState>((set, get) => ({
   history: [],
   addToHistory: (job) =>
     set((state) => ({
-      history: [job, ...state.history].slice(0, 50), // Keep last 50 jobs
+      history: [job, ...state.history].slice(0, STORE_CONFIG.MAX_HISTORY),
     })),
   removeFromHistory: (id) =>
     set((state) => ({
@@ -229,12 +236,12 @@ export const useStore = create<AppState>((set, get) => ({
   debugLogs: [],
   trackNavigation: (from, to) =>
     set((state) => ({
-      navigationHistory: [...state.navigationHistory, `${from} → ${to}`].slice(-100), // Keep last 100 transitions
+      navigationHistory: [...state.navigationHistory, `${from} → ${to}`].slice(-STORE_CONFIG.MAX_NAV_HISTORY),
     })),
   addDebugLog: (log) =>
     set((state) => ({
       debugLogs: [
-        ...state.debugLogs.slice(-1000), // Keep last 1000 debug logs
+        ...state.debugLogs.slice(-STORE_CONFIG.MAX_DEBUG_LOGS),
         {
           ...log,
           timestamp: new Date().toISOString(),

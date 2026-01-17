@@ -11,20 +11,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from matcha.tui.protocol import ProgressEvent, LigandStatus
-from matcha.tui.utils import extract_pb_filters
+from matcha.tui.utils import extract_pb_filters, LogFileGenerator, _get_best_sample_idx
 
 if TYPE_CHECKING:
     from matcha.tui.backend import DockingJob
-
-
-BANNER = r"""
-███╗   ███╗ █████╗ ████████╗ ██████╗██╗  ██╗ █████╗
-████╗ ████║██╔══██╗╚══██╔══╝██╔════╝██║  ██║██╔══██╗
-██╔████╔██║███████║   ██║   ██║     ███████║███████║
-██║╚██╔╝██║██╔══██║   ██║   ██║     ██╔══██║██╔══██║
-██║ ╚═╝ ██║██║  ██║   ██║   ╚██████╗██║  ██║██║  ██║
-╚═╝     ╚═╝╚═╝  ╚═╝   ╚═╝    ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝
-"""
 
 
 def find_ligands(ligand_dir: Path, extensions: tuple = (".sdf", ".mol", ".mol2")) -> list[Path]:
@@ -33,22 +23,6 @@ def find_ligands(ligand_dir: Path, extensions: tuple = (".sdf", ".mol", ".mol2")
     for ext in extensions:
         ligands.extend(ligand_dir.glob(f"*{ext}"))
     return sorted(ligands, key=lambda p: p.name.lower())
-
-
-def _format_runtime(seconds: float) -> str:
-    secs = int(round(seconds))
-    days, rem = divmod(secs, 86400)
-    hours, rem = divmod(rem, 3600)
-    minutes, rem = divmod(rem, 60)
-    parts = []
-    if days:
-        parts.append(f"{days}d")
-    if hours:
-        parts.append(f"{hours}h")
-    if minutes:
-        parts.append(f"{minutes}m")
-    parts.append(f"{rem}s")
-    return " ".join(parts)
 
 
 def _split_multi_sdf(sdf_path: Path) -> list[tuple[str, "Chem.Mol"]]:
@@ -172,13 +146,6 @@ def _save_all_poses_for_uid(
         writer.write(mol)
     writer.close()
     return ranked_to_use, len(ranked_filtered), len(ranked)
-
-
-def _get_best_sample_idx(errs, pb_counts) -> int:
-    best_pb_count = max(pb_counts)
-    pb_count_indices = [i for i, v in enumerate(pb_counts) if v == best_pb_count]
-    best_score_idx = min(pb_count_indices, key=lambda i: errs[i])
-    return best_score_idx
 
 
 def _write_log_file(
@@ -596,123 +563,64 @@ def run_docking(job: "DockingJob") -> None:
                 ligand_input = (run_workdir / "datasets" / "any_conf" / mol_uid / f"{mol_uid}_ligand.sdf").resolve()
                 per_log_path = logs_dir / f"{mol_uid}.log"
                 runtime_local = time.time() - job_start_time
-                log_lines = [
-                    BANNER.rstrip("\n"),
-                    "MATCHA DOCKING ENGINE  v0.1.0",
-                    "============================================================",
-                    "",
-                    "",
-                    "[ RUN INFO ]",
-                    f"  Start time       : {job_start_dt.isoformat()}Z",
-                    f"  Command          : batch run {run_name} (ligand {mol_uid})",
-                    f"  Workdir          : {output_run_dir.resolve()}",
-                    f"  Runtime          : {_format_runtime(runtime_local)}",
-                    "",
-                    "",
-                ]
+                log_lines = []
 
-                if box_mode == "manual":
-                    log_lines.extend([
-                        "[ AUTODOCKING BOX ]",
-                        "  Mode             : manual center",
-                        f"  Center (Å)       : ({center_x:.3f}, {center_y:.3f}, {center_z:.3f})",
-                        "",
-                        "",
-                    ])
-                elif box_mode == "autobox" and autobox_ligand:
-                    log_lines.extend([
-                        "[ AUTODOCKING BOX ]",
-                        f"  Mode             : autobox from {Path(autobox_ligand).name}",
-                        "",
-                        "",
-                    ])
-                    if box_center_val is not None:
-                        log_lines.insert(-2, f"  Center (Å)       : ({box_center_val[0]:.3f}, {box_center_val[1]:.3f}, {box_center_val[2]:.3f})")
-                else:
-                    log_lines.extend([
-                        "[ DOCKING MODE ]",
-                        "  Mode             : blind docking (entire protein)",
-                        "",
-                        "",
-                    ])
+                # Write banner
+                LogFileGenerator.write_banner(log_lines)
 
-                log_lines.extend([
-                    "[ INPUT / OUTPUT FILES ]",
-                    f"  Receptor         : {receptor.resolve()}",
-                    f"  Ligand           : {ligand_input}",
-                    f"  Best pose SDF    : {best_dest.resolve()}",
-                    f"  All poses SDF    : {all_dest.resolve()}",
-                    f"  Log file         : {per_log_path.resolve()}",
-                    "",
-                    "",
-                    "[ SUMMARY ]",
-                    f"  Samples per ligand     : {n_samples}",
-                    f"  error_estimate_0 (Å)   : min={min(errs):.3f}, mean={float(np.mean(errs)):.3f}, max={max(errs):.3f}",
-                    f"  posebusters_fast checks: min={min(pb_counts)}/4, max={max(pb_counts)}/4",
-                    f"  Best sample            : rank={best_idx + 1}, error_estimate_0={errs[best_idx]:.3f}, posebusters_pass_fast={pb_counts[best_idx]}/4",
-                    f"  Filtered poses (pb_4/4): kept {kept_physical}/{total_samples}" + ("  [WARNING: none passed, keeping originals]" if physical_only and kept_physical == 0 else ""),
-                    "",
-                    "",
-                    "  Note: error_estimate_0 is a lower-is-better RMSD-like metric (Å).",
-                    "        Negative values indicate high model confidence, positive values indicate uncertainty.",
-                    "        Lower values = higher confidence in the predicted pose.",
-                    "",
-                    "",
-                    "  PoseBusters checks (4 boolean tests):",
-                    "    1. not_too_far_away   : ligand is close to protein (distance check)",
-                    "    2. no_internal_clash  : no bad bonds/angles in ligand geometry",
-                    "    3. no_clashes         : no inter-molecular clashes (ligand-protein)",
-                    "    4. no_volume_clash    : no vdW volume overlaps",
-                    "  Additional metric:",
-                    "    - buried_fraction     : fraction of ligand buried in protein (shown separately)",
-                    "",
-                    "[ POSE RANKING ]",
-                    "  mode  error_est_0(Å)  pb_4/4  not_far  no_int_clash  no_clash  no_vol_clash  buried_frac",
-                    "  --------------------------------------------------------------------------------------------",
-                ])
-                for mode, sample in ranked_samples:
-                    err = float(sample.get("error_estimate_0", float("inf")))
-                    pb_count_val = int(sample.get("posebusters_filters_passed_count_fast", 0))
-                    pb_flags = sample.get("posebusters_filters_fast", [])
-                    not_far = "✓" if len(pb_flags) > 0 and pb_flags[0] else "✗"
-                    no_int_clash = "✓" if len(pb_flags) > 1 and pb_flags[1] else "✗"
-                    no_clash = "✓" if len(pb_flags) > 2 and pb_flags[2] else "✗"
-                    no_vol_clash = "✓" if len(pb_flags) > 3 and pb_flags[3] else "✗"
-                    buried_frac = f"{pb_flags[4]:.2f}" if len(pb_flags) > 4 else "n/a"
-                    log_lines.append(
-                        f"  {mode:<3}     {err:>7.3f}       {pb_count_val}/4      {not_far:^4}     {no_int_clash:^8}     {no_clash:^5}     {no_vol_clash:^8}      {buried_frac:>6}"
-                    )
+                # Write run info
+                LogFileGenerator.write_run_info(
+                    log_lines,
+                    start_time=job_start_dt,
+                    command=f"batch run {run_name} (ligand {mol_uid})",
+                    workdir=output_run_dir,
+                    runtime=runtime_local,
+                )
 
-                log_lines.extend([
-                    "",
-                    "Legend: ✓ = passed, ✗ = failed",
-                    "",
-                    "",
-                ])
+                # Write box info
+                box_center = (center_x, center_y, center_z) if box_mode == "manual" else box_center_val
+                LogFileGenerator.write_box_info(
+                    log_lines,
+                    box_mode=box_mode,
+                    center=box_center,
+                    autobox_ligand=autobox_ligand,
+                )
 
-                if any(e > 0 for e in errs):
-                    log_lines.extend([
-                        "WARNING: Some poses have positive error_est_0 values.",
-                        "         This indicates reduced model confidence in those predictions.",
-                        "         Consider generating more samples or inspecting poses manually.",
-                        "",
-                        "",
-                    ])
-                if max(pb_counts) < 4:
-                    log_lines.extend([
-                        "WARNING: No poses passed all PoseBusters checks (pb_4/4).",
-                        "         Inspect poses or regenerate with more samples/box adjustments.",
-                        "",
-                        "",
-                    ])
+                # Write input/output files
+                LogFileGenerator.write_input_output_files(
+                    log_lines,
+                    receptor=receptor,
+                    ligand_input=str(ligand_input),
+                    best_dest=best_dest,
+                    all_dest=all_dest,
+                    log_path=per_log_path,
+                )
 
-                log_lines.extend([
-                    "[ END ]",
-                    f"  Run finished at    : {datetime.now(timezone.utc).isoformat()}Z",
-                    f"  Total runtime      : {_format_runtime(runtime_local)}",
-                    f"  Workdir preserved  : {output_run_dir.resolve()}",
-                    "============================================================",
-                ])
+                # Write summary
+                LogFileGenerator.write_summary(
+                    log_lines,
+                    n_samples=n_samples,
+                    errs=errs.tolist(),
+                    pb_counts=pb_counts.tolist(),
+                    best_idx=best_idx,
+                    physical_only=physical_only,
+                    kept_physical=kept_physical,
+                    total_samples=total_samples,
+                )
+
+                # Write pose table
+                LogFileGenerator.write_pose_table(log_lines, ranked_samples)
+
+                # Write warnings
+                LogFileGenerator.write_warnings(log_lines, errs.tolist(), pb_counts.tolist())
+
+                # Write end
+                LogFileGenerator.write_end(
+                    log_lines,
+                    end_time=datetime.now(timezone.utc),
+                    runtime=runtime_local,
+                    workdir=output_run_dir,
+                )
 
                 per_log_path.write_text("\n".join(log_lines))
 
@@ -759,52 +667,51 @@ def run_docking(job: "DockingJob") -> None:
                 command_parts.extend(["--autobox-ligand", str(autobox_ligand)])
 
             command_line = " ".join(command_parts)
+            log_lines = []
 
-            log_lines = [
-                BANNER.rstrip("\n"),
-                "MATCHA DOCKING ENGINE  v0.1.0",
-                "============================================================",
-                "",
-                "",
-                "[ RUN INFO ]",
-                f"  Start time       : {job_start_dt.isoformat()}Z",
-                f"  Command          : {command_line}",
-                f"  Workdir          : {output_run_dir.resolve()}",
-                f"  Runtime          : {_format_runtime(runtime)}",
-                "",
-                "",
-                "[ INPUT FILES ]",
-                f"  Receptor         : {receptor.resolve()}",
-                f"  Ligands          : {ligand_dir_path.resolve()} ({len(molecule_uids)} molecules)",
-                f"  Output dir       : {output_run_dir.resolve()}",
-                "",
-                "",
-                "[ PROCESSING SUMMARY ]",
-                f"  Samples per molecule : {n_samples}",
-                f"  Total molecules      : {len(molecule_uids)}",
-                "",
-                "",
-                "[ RESULTS ]",
-            ]
-            for mol_uid in molecule_uids:
-                metrics_key = mol_uid if mol_uid in metrics else f"{mol_uid}_mol0"
-                if metrics_key not in metrics:
-                    log_lines.append(f"  {mol_uid}: No results")
-                    continue
-                mdata = metrics[metrics_key]
-                errs = np.array([float(s.get("error_estimate_0", float("inf"))) for s in mdata["sample_metrics"]])
-                pb_counts = np.array([int(s.get("posebusters_filters_passed_count_fast", 0)) for s in mdata["sample_metrics"]])
-                best_idx = _get_best_sample_idx(errs, pb_counts)
-                log_lines.append(f"  {mol_uid}: Best err={errs[best_idx]:.3f}, pb={pb_counts[best_idx]}/4")
+            # Write banner
+            LogFileGenerator.write_banner(log_lines)
 
-            log_lines.extend([
-                "",
-                "[ END ]",
-                f"  Run finished at    : {end_time.isoformat()}Z",
-                f"  Total runtime      : {_format_runtime(runtime)}",
-                f"  Workdir preserved  : {output_run_dir.resolve()}",
-                "============================================================",
-            ])
+            # Write run info
+            LogFileGenerator.write_run_info(
+                log_lines,
+                start_time=job_start_dt,
+                command=command_line,
+                workdir=output_run_dir,
+                runtime=runtime,
+            )
+
+            # Write batch input files
+            LogFileGenerator.write_batch_input_files(
+                log_lines,
+                receptor=receptor,
+                ligand_dir=ligand_dir_path,
+                output_dir=output_run_dir,
+                num_molecules=len(molecule_uids),
+            )
+
+            # Write batch summary
+            LogFileGenerator.write_batch_summary(
+                log_lines,
+                n_samples=n_samples,
+                num_molecules=len(molecule_uids),
+            )
+
+            # Write batch results
+            LogFileGenerator.write_batch_results(
+                log_lines,
+                molecule_uids=molecule_uids,
+                metrics=metrics,
+            )
+
+            # Write end
+            LogFileGenerator.write_end(
+                log_lines,
+                end_time=end_time,
+                runtime=runtime,
+                workdir=output_run_dir,
+            )
+
             summary_log.write_text("\n".join(log_lines))
 
             emit(ProgressEvent(
