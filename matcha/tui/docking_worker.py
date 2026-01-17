@@ -8,13 +8,29 @@ import shutil
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Callable, Any, Dict, Type
 
 from matcha.tui.protocol import ProgressEvent, LigandStatus
 from matcha.tui.utils import extract_pb_filters, LogFileGenerator, _get_best_sample_idx
 
 if TYPE_CHECKING:
     from matcha.tui.backend import DockingJob
+
+
+class DockingDefaults:
+    """Default configuration values for docking inference."""
+
+    SEED = 42
+    TR_STD = 5.0
+    DROPOUT_RATE = 0.0
+    NUM_KERNEL_POS_ENCODER = 128
+    LLM_EMB_DIM = 480
+    BATCH_SIZE = 32
+    NUM_INFERENCE_STEPS = 20
+
+    # PoseBusters thresholds
+    PB_FILTER_COUNT = 5
+    DEFAULT_PB_FILTERS = [False] * PB_FILTER_COUNT
 
 
 def find_ligands(ligand_dir: Path, extensions: tuple = (".sdf", ".mol", ".mol2")) -> list[Path]:
@@ -434,13 +450,13 @@ def run_docking(job: "DockingJob") -> None:
 
             # Build config (CLI-like)
             conf = OmegaConf.create({
-                "seed": 42,
-                "tr_std": 5.0,
+                "seed": DockingDefaults.SEED,
+                "tr_std": DockingDefaults.TR_STD,
                 "use_time": True,
-                "dropout_rate": 0.0,
-                "num_kernel_pos_encoder": 128,
+                "dropout_rate": DockingDefaults.DROPOUT_RATE,
+                "num_kernel_pos_encoder": DockingDefaults.NUM_KERNEL_POS_ENCODER,
                 "objective": "ranking",
-                "llm_emb_dim": 480,
+                "llm_emb_dim": DockingDefaults.LLM_EMB_DIM,
                 "use_all_chains": True,
                 "checkpoints_folder": str(checkpoint_path),
                 "cache_path": str(run_workdir / "cache"),
@@ -876,7 +892,7 @@ def run_docking(job: "DockingJob") -> None:
 
 def process_single_ligand(
     job: "DockingJob",
-    emit,
+    emit: Callable[["ProgressEvent"], None],
     receptor: Path,
     ligand: Path,
     run_workdir: Path,
@@ -893,13 +909,13 @@ def process_single_ligand(
     ligand_index: int,
     total_ligands: int,
     # Pre-imported modules
-    OmegaConf,
-    compute_sequences,
-    compute_esm_embeddings,
-    run_inference_pipeline,
-    compute_fast_filters,
-    save_best_pred_to_sdf,
-) -> Optional[dict]:
+    OmegaConf: Type,
+    compute_sequences: Callable[[Any], None],
+    compute_esm_embeddings: Callable[[Any], None],
+    run_inference_pipeline: Callable,
+    compute_fast_filters: Callable,
+    save_best_pred_to_sdf: Callable,
+) -> Optional[Dict[str, Any]]:
     """Process a single ligand through the docking pipeline."""
     from rdkit import Chem
 
@@ -959,13 +975,13 @@ def process_single_ligand(
 
     # Build config
     conf = OmegaConf.create({
-        "seed": 42,
-        "tr_std": 5.0,
+        "seed": DockingDefaults.SEED,
+        "tr_std": DockingDefaults.TR_STD,
         "use_time": True,
-        "dropout_rate": 0.0,
-        "num_kernel_pos_encoder": 128,
+        "dropout_rate": DockingDefaults.DROPOUT_RATE,
+        "num_kernel_pos_encoder": DockingDefaults.NUM_KERNEL_POS_ENCODER,
         "objective": "ranking",
-        "llm_emb_dim": 480,
+        "llm_emb_dim": DockingDefaults.LLM_EMB_DIM,
         "use_all_chains": True,
         "checkpoints_folder": str(checkpoint_path),
         "cache_path": str(run_workdir / "cache"),
