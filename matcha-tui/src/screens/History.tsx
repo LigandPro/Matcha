@@ -13,6 +13,7 @@ import { logger } from '../utils/logger.js';
 import { isKey } from '../utils/keyboard.js';
 import { parseRuntimeFromLog } from '../utils/runtime.js';
 import type { BatchLigandStatus, JobResults, PoseResult } from '../types/index.js';
+import { LoadingState, EmptyState } from '../components/index.js';
 
 interface RunInfo {
   name: string;
@@ -332,7 +333,7 @@ export function HistoryScreen(): React.ReactElement {
   });
 
   if (loading) {
-    return <Box><Text color="yellow">Loading history...</Text></Box>;
+    return <LoadingState message="Loading history..." />;
   }
 
   if (loadingResults) {
@@ -385,7 +386,7 @@ export function HistoryScreen(): React.ReactElement {
   if (runs.length === 0) {
     return (
       <Box flexDirection="column" gap={1}>
-        <Text color="gray">No previous runs found.</Text>
+        <EmptyState message="No previous runs found" hint="Run a docking job to see it here" />
         <Box marginTop={2}><Text color="cyan">[Esc] Back to home</Text></Box>
       </Box>
     );

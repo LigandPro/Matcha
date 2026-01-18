@@ -2,7 +2,7 @@
  * Running Screen - shows docking progress with batch monitoring support.
  */
 
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, useReducer } from 'react';
 import { Box, Text, useInput } from 'ink';
 import path from 'path';
 import { useStore } from '../store/index.js';
@@ -28,6 +28,64 @@ interface LigandStatus {
   error_estimate?: number;
   pb_count?: number;
   error_message?: string;
+}
+
+interface BatchState {
+  isBatch: boolean;
+  totalLigands: number;
+  currentLigandIndex: number;
+  currentLigand: string | null;
+  ligandStatuses: LigandStatus[];
+}
+
+type BatchAction =
+  | { type: 'BATCH_START'; totalLigands: number; ligandStatuses: LigandStatus[] }
+  | { type: 'BATCH_PROGRESS'; ligandIndex: number; ligandStatuses: LigandStatus[] }
+  | { type: 'LIGAND_START'; currentLigand: string; ligandIndex: number; totalLigands: number; ligandStatuses: LigandStatus[] }
+  | { type: 'LIGAND_DONE'; ligandStatuses: LigandStatus[] }
+  | { type: 'RESET' };
+
+const initialBatchState: BatchState = {
+  isBatch: false,
+  totalLigands: 1,
+  currentLigandIndex: 0,
+  currentLigand: null,
+  ligandStatuses: [],
+};
+
+function batchReducer(state: BatchState, action: BatchAction): BatchState {
+  switch (action.type) {
+    case 'BATCH_START':
+      return {
+        ...state,
+        isBatch: true,
+        totalLigands: action.totalLigands,
+        ligandStatuses: action.ligandStatuses,
+      };
+    case 'BATCH_PROGRESS':
+      return {
+        ...state,
+        currentLigandIndex: action.ligandIndex,
+        ligandStatuses: action.ligandStatuses,
+      };
+    case 'LIGAND_START':
+      return {
+        ...state,
+        currentLigand: action.currentLigand,
+        currentLigandIndex: action.ligandIndex,
+        totalLigands: action.totalLigands,
+        ligandStatuses: action.ligandStatuses,
+      };
+    case 'LIGAND_DONE':
+      return {
+        ...state,
+        ligandStatuses: action.ligandStatuses,
+      };
+    case 'RESET':
+      return initialBatchState;
+    default:
+      return state;
+  }
 }
 
 export function RunningScreen(): React.ReactElement {
@@ -63,11 +121,8 @@ export function RunningScreen(): React.ReactElement {
   const [bridgeReady, setBridgeReady] = useState(false);
 
   // Batch mode state
-  const [isBatch, setIsBatch] = useState(false);
-  const [totalLigands, setTotalLigands] = useState(1);
-  const [currentLigandIndex, setCurrentLigandIndex] = useState(0);
-  const [currentLigand, setCurrentLigand] = useState<string | null>(null);
-  const [ligandStatuses, setLigandStatuses] = useState<LigandStatus[]>([]);
+  const [batchState, dispatchBatch] = useReducer(batchReducer, initialBatchState);
+  const { isBatch, totalLigands, currentLigandIndex, currentLigand, ligandStatuses } = batchState;
   const [batchProgress, setBatchProgress] = useState(0);
   const stageOrder = ['init', 'checkpoints', 'dataset', 'esm', 'stage1', 'stage2', 'stage3', 'scoring', 'posebusters'] as const;
   const stageWeights: Record<string, number> = {
@@ -206,34 +261,33 @@ export function RunningScreen(): React.ReactElement {
 
           // Batch events
           if (event.type === 'batch_start') {
-            setIsBatch(true);
-            setTotalLigands(event.total_ligands ?? 1);
-            if (event.ligand_statuses) {
-              setLigandStatuses(event.ligand_statuses as LigandStatus[]);
-            }
+            dispatchBatch({
+              type: 'BATCH_START',
+              totalLigands: event.total_ligands ?? 1,
+              ligandStatuses: (event.ligand_statuses as LigandStatus[]) ?? [],
+            });
           } else if (event.type === 'batch_progress') {
-            setCurrentLigandIndex(event.ligand_index ?? 0);
-            if (event.ligand_statuses) {
-              setLigandStatuses(event.ligand_statuses as LigandStatus[]);
-            }
+            dispatchBatch({
+              type: 'BATCH_PROGRESS',
+              ligandIndex: event.ligand_index ?? 0,
+              ligandStatuses: (event.ligand_statuses as LigandStatus[]) ?? [],
+            });
           } else if (event.type === 'ligand_start') {
-            setCurrentLigand(event.current_ligand ?? null);
-            setCurrentLigandIndex(event.ligand_index ?? 0);
-            setTotalLigands(event.total_ligands ?? 1);
+            dispatchBatch({
+              type: 'LIGAND_START',
+              currentLigand: event.current_ligand ?? '',
+              ligandIndex: event.ligand_index ?? 0,
+              totalLigands: event.total_ligands ?? 1,
+              ligandStatuses: (event.ligand_statuses as LigandStatus[]) ?? [],
+            });
             // Reset stages for new ligand
             setStages({});
-            if (event.ligand_statuses) {
-              setLigandStatuses(event.ligand_statuses as LigandStatus[]);
-            }
           } else if (event.type === 'ligand_done') {
-            if (event.ligand_statuses) {
-              setLigandStatuses(event.ligand_statuses as LigandStatus[]);
-            }
+            dispatchBatch({
+              type: 'LIGAND_DONE',
+              ligandStatuses: (event.ligand_statuses as LigandStatus[]) ?? [],
+            });
           } else if (event.type === 'stage_start' && event.stage) {
-            // Update current ligand if provided
-            if (event.current_ligand) {
-              setCurrentLigand(event.current_ligand);
-            }
             setStages((prev) => ({
               ...prev,
               [event.stage!]: { status: 'running', progress: 0, message: event.name },

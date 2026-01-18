@@ -12,7 +12,7 @@ import signal
 import threading
 import shutil
 from pathlib import Path
-from typing import Any, Callable, Optional, Dict
+from typing import Any, Callable, Optional, Dict, TypedDict, List, Union
 from datetime import datetime
 from collections import deque
 
@@ -44,6 +44,42 @@ except Exception:
         locale.setlocale(locale.LC_ALL, 'C.UTF-8')
     except Exception:
         pass  # Use system default as last resort
+
+
+# TypedDict definitions for return types
+class GpuDeviceInfo(TypedDict):
+    """Information about a single GPU device."""
+    index: int
+    name: str
+    memory: int
+
+
+class GpuInfo(TypedDict, total=False):
+    """GPU availability information returned by check_gpu()."""
+    available: bool
+    count: int
+    devices: List[GpuDeviceInfo]
+    message: str
+
+
+class RunDetails(TypedDict, total=False):
+    """Details of a completed docking run returned by get_run_details()."""
+    name: str
+    path: str
+    files: Dict[str, str]
+    is_batch: bool
+    has_log: bool
+    receptor: str
+    ligand: str
+    error: str
+
+
+class DeleteResult(TypedDict, total=False):
+    """Result of deleting a run directory returned by delete_run()."""
+    success: bool
+    message: str
+    error: str
+
 
 class JobManager:
     """Thread-safe manager for docking jobs."""
@@ -504,7 +540,7 @@ class RPCHandler:
         """List all active jobs (running and queued)."""
         return {"jobs": _job_manager.list_all_jobs()}
 
-    def list_runs(self, output_dir: str) -> list[dict]:
+    def list_runs(self, output_dir: str) -> List[Dict[str, Any]]:
         """List previous docking runs in a directory."""
         p = Path(output_dir).expanduser().resolve()
         if not p.exists():
@@ -553,7 +589,7 @@ class RPCHandler:
 
         return [r.to_dict() for r in runs]
 
-    def get_run_details(self, run_path: str) -> dict:
+    def get_run_details(self, run_path: str) -> RunDetails:
         """Get details of a completed run."""
         p = Path(run_path).expanduser().resolve()
         if not p.exists():
@@ -673,7 +709,7 @@ class RPCHandler:
         except Exception as e:
             return [{"error": str(e)}]
 
-    def check_gpu(self) -> dict:
+    def check_gpu(self) -> GpuInfo:
         """Check GPU availability."""
         try:
             import torch
@@ -697,7 +733,7 @@ class RPCHandler:
         except Exception as e:
             return {"available": False, "message": str(e)}
 
-    def delete_run(self, run_path: str) -> dict:
+    def delete_run(self, run_path: str) -> DeleteResult:
         """Delete a docking run directory and all its contents.
 
         Args:
