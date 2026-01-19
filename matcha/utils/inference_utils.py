@@ -54,17 +54,23 @@ def get_data_for_buster(preds, dataset_data_dir, dataset_name):
             true_mol_path = get_ligand_path(
                 uid, dataset_name, dataset_data_dir)
             orig_mol = read_molecule(true_mol_path, sanitize=False)
-            try:
-                orig_mol = RemoveAllHs(orig_mol, sanitize=True)
-            except Exception as e:
-                orig_mol = RemoveAllHs(orig_mol, sanitize=False)
-            if orig_mol is not None:
-                true_pos = np.copy(orig_mol.GetConformer().GetPositions())
-            else:
-                print('Skip', uid)
+            if orig_mol is None:
+                print(f'Warning: Unable to read molecule for {uid}')
                 continue
-        except:
-            print('Skip', uid)
+
+            # Remove hydrogens for consistency with predictions
+            orig_mol_no_h = orig_mol
+            try:
+                orig_mol_no_h = RemoveAllHs(orig_mol, sanitize=True)
+            except Exception:
+                try:
+                    orig_mol_no_h = RemoveAllHs(orig_mol, sanitize=False)
+                except Exception:
+                    print(f'Warning: Unable to remove hydrogens for {uid}, using as-is')
+
+            true_pos = np.copy(orig_mol_no_h.GetConformer().GetPositions())
+        except Exception as e:
+            print(f'Error processing {uid}: {str(e)}')
             continue
 
         samples = pred_data['sample_metrics']
@@ -125,6 +131,21 @@ def compute_metrics_all(conf, inference_run_name):
         results_df, _, updated_metrics = get_simple_metrics_df(
             data_for_buster, compute_symm_rmsd=True,
             mol2isomorphisms=mol2isomorphisms, score_names=score_names_for_metrics)
+
+        # Save detailed information about skipped samples for debugging
+        if len(updated_metrics) != len(data_for_buster):
+            skipped_info = {
+                'dataset': dataset_name,
+                'inference_run': inference_run_name,
+                'total_structures': len(data_for_buster),
+                'processed_structures': len(updated_metrics),
+                'timestamp': str(pd.Timestamp.now()),
+            }
+            skipped_path = os.path.join(preds_path, f'{dataset_name}_computation_summary.json')
+            with open(skipped_path, 'w') as f:
+                json.dump(skipped_info, f, indent=2)
+            print(f'Saved computation summary to {skipped_path}')
+
         print('RMSD metrics for', dataset_name, inference_run_name)
         results_df.set_index('ranking', inplace=True)
         print(results_df.loc['error_estimate_0', [

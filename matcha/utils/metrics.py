@@ -233,6 +233,7 @@ def construct_output_dict(preds, dataset):
 
 def get_simple_metrics_df(all_real_rmsds, compute_symm_rmsd, mol2isomorphisms, score_names):
     full_results = {}
+    skipped_samples = []
     for uid, samples in tqdm(all_real_rmsds.items(), desc='Computing metrics'):
         samples_results = []
         failed_symm_rmsd_count = 0
@@ -242,8 +243,18 @@ def get_simple_metrics_df(all_real_rmsds, compute_symm_rmsd, mol2isomorphisms, s
             pred_pos = samples[idx]['transformed_orig']
 
             if true_pos.shape[0] != pred_pos.shape[0]:
-                print(
-                    f'{uid}_{idx:<8} true_pos.shape[0] != pred_pos.shape[0]', true_pos.shape, pred_pos.shape)
+                error_msg = (
+                    f'{uid}_{idx:<8} Atom count mismatch: '
+                    f'true_pos={true_pos.shape[0]} atoms, pred_pos={pred_pos.shape[0]} atoms. '
+                    f'This typically indicates hydrogens in true structure.'
+                )
+                print(error_msg)
+                skipped_samples.append({
+                    'uid': uid,
+                    'idx': idx,
+                    'true_atoms': int(true_pos.shape[0]),
+                    'pred_atoms': int(pred_pos.shape[0]),
+                })
                 continue
 
             tr_pred = pred_pos.mean(axis=0)
@@ -293,6 +304,31 @@ def get_simple_metrics_df(all_real_rmsds, compute_symm_rmsd, mol2isomorphisms, s
     if len(full_results) != len(all_real_rmsds):
         print('Initial length of test_names', len(all_real_rmsds))
         print('Length of full_results', len(full_results))
+
+        # Detailed summary
+        print('\n' + '='*80)
+        print('METRICS COMPUTATION SUMMARY')
+        print('='*80)
+        total_samples = sum(len(samples) for samples in all_real_rmsds.values())
+        total_processed = sum(len(result['sample_metrics']) for result in full_results.values())
+        print(f'Total samples: {total_samples}')
+        print(f'Successfully processed: {total_processed}')
+        print(f'Skipped: {total_samples - total_processed}')
+
+        if skipped_samples:
+            print(f'\nAtom count mismatches: {len(skipped_samples)}')
+            print('Common causes:')
+            print('  - True molecule SDF contains hydrogens, predictions do not')
+            print('  - Different protonation states')
+            print('  - Molecule preprocessing inconsistency')
+            print('\nFirst 5 examples:')
+            for i, sample in enumerate(skipped_samples[:5]):
+                print(f'  {i+1}. {sample["uid"]} (sample {sample["idx"]}): '
+                      f'{sample["true_atoms"]} atoms (true) vs {sample["pred_atoms"]} atoms (pred)')
+            if len(skipped_samples) > 5:
+                print(f'  ... and {len(skipped_samples) - 5} more')
+            print('\nRecommendation: Ensure SDF files contain only heavy atoms (no hydrogens)')
+        print('='*80 + '\n')
 
     rows_list, all_scored_results = get_final_results_for_df(
         full_results, score_names)
