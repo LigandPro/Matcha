@@ -11,8 +11,10 @@ from transformers import AutoTokenizer, AutoModelForMaskedLM
 
 from matcha.utils.paths import (get_dataset_path, get_protein_path,
                                 get_sequences_path, get_esm_embeddings_path)
+from matcha.utils.log import get_logger
 
 confProDy(verbosity='none')
+logger = get_logger(__name__)
 
 
 def get_structure_from_file(file_path):
@@ -36,34 +38,47 @@ def get_structure_from_file(file_path):
 
 def compute_sequences(conf):
     os.makedirs(conf.data_folder, exist_ok=True)
+    split_data = {
+        'test': conf.test_dataset_types,
+    }
 
-    for dataset_name in conf.test_dataset_types:
-        dataset_data_dir = get_dataset_path(dataset_name, conf)
-        save_id2seq_path = get_sequences_path(dataset_name, conf)
-        names = [name for name in os.listdir(
-            dataset_data_dir) if not name.startswith('.')]
+    for split, dataset_names in split_data.items():
+        for dataset_name in dataset_names:
+            logger.info(f'Computing sequences for {dataset_name} on {split} split')
+            dataset_data_dir = get_dataset_path(dataset_name, conf)
+            logger.info(f'dataset_data_dir: {dataset_data_dir}')
+            save_id2seq_path = get_sequences_path(dataset_name, conf)
+            logger.info(f'save_id2seq_path: {save_id2seq_path}')
+            names = [name for name in os.listdir(
+                dataset_data_dir) if not name.startswith('.')]
 
-        id2seq = {}
-        bad_ids = []
-        for name in tqdm(names, desc=f'Preparing {dataset_name} sequences'):
-            rec_path = get_protein_path(name, dataset_name, dataset_data_dir)
-            try:
-                l = get_structure_from_file(rec_path)
-            except Exception as e:
-                bad_ids.append(name)
-                continue
+            id2seq = {}
+            bad_ids = []
+            for name in tqdm(names, desc=f'Preparing {dataset_name} sequences'):
+                dataset_name_real = dataset_name
+                real_name = name
+                rec_path = get_protein_path(name, dataset_name_real, dataset_data_dir, 
+                                            crop_mol=False)
+                try:
+                    l = get_structure_from_file(rec_path)
+                except Exception as e:
+                    bad_ids.append(name)
+                    continue
 
-            for i, seq in enumerate(l):
-                id2seq[f'{name}_chain_{i}'] = seq
+                for i, seq in enumerate(l):
+                    id2seq[f'{real_name}_chain_{i}'] = seq
 
-        print(dataset_name, 'has', len(bad_ids), 'bad IDs')
-        save_json(id2seq, save_id2seq_path)
-        print(f'Saved sequences to {save_id2seq_path}')
-        print()
+            logger.info(f'{split}, {dataset_name} has {len(bad_ids)} bad IDs')
+            logger.info(f'total chains: {len(id2seq)}')
+            save_json(id2seq, save_id2seq_path)
+            logger.info(f'Saved sequences to {save_id2seq_path}')
+            logger.info("")
 
 
 def get_tokens(seqs, tokenizer):
-    tokens = tokenizer.batch_encode_plus(seqs)['input_ids']
+    # batch_encode_plus was deprecated in transformers; use __call__ instead
+    encoded = tokenizer(seqs, padding=False, truncation=True)
+    tokens = encoded['input_ids']
     return tokens
 
 
@@ -86,14 +101,14 @@ def save_dataset_embeddings(dataset_sequence_path, save_emb_path, model, tokeniz
                             reduce_to_unique_sequences=False):
 
     all_data = load(dataset_sequence_path)
-    print('Sequences loaded')
+    logger.info('Sequences loaded')
 
     if reduce_to_unique_sequences:
-        print('Reducing to unique sequences')
-        print('Number of sequences:', len(all_data))
+        logger.info('Reducing to unique sequences')
+        logger.info(f'Number of sequences: {len(all_data)}')
         prepared_sequences = list(
             set([''.join(seq) for seq in all_data.values()]))
-        print('Number of unique sequences:', len(prepared_sequences))
+        logger.info(f'Number of unique sequences: {len(prepared_sequences)}')
     else:
         prepared_sequences = [''.join(seq) for seq in all_data.values()]
 
@@ -106,17 +121,16 @@ def save_dataset_embeddings(dataset_sequence_path, save_emb_path, model, tokeniz
     else:
         names = all_data.keys()
 
-    print('Number of protein chains:', len(names))
+    logger.info(f'Number of protein chains: {len(names)}')
     save_data = {name: emb for name, emb in zip(names, embeddings)}
     torch.save(save_data, save_emb_path)
 
 
-def compute_esm_embeddings(conf):
+def compute_esm_embeddings(conf, model_type='hf_esm_12'):
     reduce_to_unique_sequences = False
-    model_type = 'hf_esm_12'
 
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-    print('Available device:', device)
+    logger.info(f'Available device: {device}')
 
     if model_type == 'hf_esm_6':
         model_checkpoint = 'facebook/esm2_t6_8M_UR50D'
@@ -125,13 +139,14 @@ def compute_esm_embeddings(conf):
     elif model_type == 'hf_esm_33':
         model_checkpoint = 'facebook/esm2_t33_650M_UR50D'
     else:
-        print(f'Model {model_type} not found')
+        logger.error(f'Model {model_type} not found')
+        raise ValueError(f'Model {model_type} not found')
 
     model = AutoModelForMaskedLM.from_pretrained(model_checkpoint)
     tokenizer = AutoTokenizer.from_pretrained(model_checkpoint)
     model.eval()
     model.to(device=device)
-    print('Model loaded')
+    logger.info('ESM model loaded')
 
     num_params_trainable = 0
     num_params_all = 0
@@ -140,14 +155,19 @@ def compute_esm_embeddings(conf):
             num_params_trainable += int(
                 torch.prod(torch.tensor(param.data.shape)))
         num_params_all += int(torch.prod(torch.tensor(param.data.shape)))
-    print('Trainable parameters:', num_params_trainable)
-    print('All parameters:', num_params_all)
+    logger.info(f'Trainable parameters: {num_params_trainable}')
+    logger.info(f'All parameters: {num_params_all}')
 
-    for dataset_name in conf.test_dataset_types:
-        dataset_sequence_path = get_sequences_path(dataset_name, conf)
-        save_emb_path = get_esm_embeddings_path(dataset_name, conf)
+    split_data = {
+        'test': conf.test_dataset_types,
+    }
 
-        save_dataset_embeddings(dataset_sequence_path, save_emb_path, model=model, tokenizer=tokenizer, device=device,
-                                reduce_to_unique_sequences=reduce_to_unique_sequences)
-        print(f'Saved embeddings to {save_emb_path}')
-        print()
+    for split, dataset_names in split_data.items():
+        for dataset_name in dataset_names:
+            dataset_sequence_path = get_sequences_path(dataset_name, conf, split)
+            save_emb_path = get_esm_embeddings_path(dataset_name, conf, split)
+
+            save_dataset_embeddings(dataset_sequence_path, save_emb_path, model=model, tokenizer=tokenizer, device=device,
+                                    reduce_to_unique_sequences=reduce_to_unique_sequences)
+            logger.info(f'Saved embeddings to {save_emb_path}')
+            logger.info("")

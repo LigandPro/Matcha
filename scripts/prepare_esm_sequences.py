@@ -4,7 +4,6 @@ from omegaconf import OmegaConf
 from matcha.utils.esm_utils import compute_sequences
 
 
-
 if __name__ == '__main__':
     parser = ArgumentParser(description="Read file form Command line.")
     parser.add_argument("-p", "--paths-config", dest="paths_config_filename",

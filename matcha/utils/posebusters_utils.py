@@ -1,9 +1,9 @@
+import torch
+from rdkit.Chem.rdchem import GetPeriodicTable
 from posebusters.modules.intermolecular_distance import _pairwise_distance
 import pandas as pd
 import numpy as np
-
-from copy import deepcopy
-
+from matcha.utils.preprocessing import allowable_features
 from rdkit.Chem.rdShapeHelpers import ShapeTverskyIndex
 from rdkit import Chem
 from copy import deepcopy
@@ -11,19 +11,9 @@ from rdkit.Chem import MolFromSmarts
 from rdkit.Chem.rdchem import Mol
 from rdkit.Chem.rdDistGeom import GetMoleculeBoundsMatrix
 from rdkit.Chem.rdmolops import SanitizeMol
+from matcha.utils.log import get_logger
 
-import torch
-from rdkit.Chem.rdchem import GetPeriodicTable
-
-from matcha.utils.preprocessing import allowable_features
-
-
-_periodic_table = GetPeriodicTable()
-# get all atoms from periodic table
-atoms_vocab = {_periodic_table.GetElementSymbol(
-    i+1): i for i in range(_periodic_table.GetMaxAtomicNumber())}
-vdw_radius = torch.tensor([_periodic_table.GetRvdw(_periodic_table.GetElementSymbol(
-    i+1)) for i in range(_periodic_table.GetMaxAtomicNumber())])
+logger = get_logger(__name__)
 
 col_lb = "lower_bound"
 col_ub = "upper_bound"
@@ -106,7 +96,7 @@ def symmetrize_conjugated_terminal_bonds(df: pd.DataFrame, mol: Mol) -> pd.DataF
     matched = df[df["atom_pair"].isin(matches)].copy()
     # min and max of lower and upper bounds
     grouped = matched.groupby("atom_types_sorted").agg(
-        {"lower_bound": np.amin, "upper_bound": np.amax})
+        {"lower_bound": "min", "upper_bound": "max"})
     # updating the matches dataframe and the original dataframe
     index_orig = matched.index
     matched = matched.set_index("atom_types_sorted")
@@ -162,83 +152,13 @@ def _is_hydrogen(mol: Mol, idx: int) -> bool:
     return mol.GetAtomWithIdx(int(idx)).GetAtomicNum() == 1
 
 
-def compute_shape_tversky_index(dist, pos_pred, pos_cond, radius_pred, radius_cond, maxVal=3, resolution=0.5, stepsize=0.25, alpha=1, beta=0, clash_cutoff=0.75):
-    device = pos_pred.device
+_periodic_table = GetPeriodicTable()
+# get all atoms from periodic table
+atoms_vocab = {_periodic_table.GetElementSymbol(
+    i+1): i for i in range(_periodic_table.GetMaxAtomicNumber())}
+vdw_radius = torch.tensor([_periodic_table.GetRvdw(_periodic_table.GetElementSymbol(
+    i+1)) for i in range(_periodic_table.GetMaxAtomicNumber())])
 
-    boxup = max(pos_pred.max().item(), pos_cond.max().item()) + \
-        maxVal * stepsize
-    boxdown = min(pos_pred.min().item(),
-                  pos_cond.min().item()) - maxVal * stepsize
-    line = torch.linspace(boxdown, boxup, int(
-        (boxup - boxdown) / resolution) + 1)
-
-    candidates = dist < (
-        (radius_pred[None, :, None] + radius_cond[None, None, :]) + 2 * maxVal * stepsize)
-    ids_pred = candidates.any(dim=(0, 2))
-    ids_cond = candidates.any(dim=(0, 1))
-    pos_pred_trunc = pos_pred[:, ids_pred]
-    pos_cond_trunc = pos_cond[ids_cond]
-    radius_pred_trunc = radius_pred[ids_pred]
-    radius_cond_trunc = radius_cond[ids_cond]
-
-    gradius_pred = radius_pred / resolution
-    gradius_cond = radius_cond / resolution
-    gradius_pred_trunc = radius_pred_trunc / resolution
-    gradius_cond_trunc = radius_cond_trunc / resolution
-    gstepsize = stepsize / resolution
-
-    pos_cond_ids = (pos_cond_trunc[..., None] -
-                    line[None, None, :]).argmin(dim=-1)
-    pos_pred_ids = (pos_pred_trunc[..., None] -
-                    line[None, None, None, :]).argmin(dim=-1)
-    max_radius_ids = (gradius_cond_trunc + maxVal *
-                      gstepsize).max().round().int().item()
-    small_grid = torch.stack([
-        torch.arange(-max_radius_ids, max_radius_ids+1, device=device)[
-            :, None, None].repeat(1, 2*max_radius_ids+1, 2*max_radius_ids+1),
-        torch.arange(-max_radius_ids, max_radius_ids+1, device=device)[
-            None, :, None].repeat(2*max_radius_ids+1, 1, 2*max_radius_ids+1),
-        torch.arange(-max_radius_ids, max_radius_ids+1, device=device)[
-            None, None, :].repeat(2*max_radius_ids+1, 2*max_radius_ids+1, 1),
-    ], dim=-1).reshape(-1, 3)
-    ids_grid = ((pos_cond_ids[:, None, :] + small_grid[None]).clamp(0,
-                line.size(0)-1)).reshape(-1, 3).unique(dim=0)  # [N,3]
-    grid_pred = (maxVal - (((ids_grid[None, :, None].float() - pos_pred_ids[:, None].float()).norm(
-        dim=-1) - gradius_pred_trunc[None, None, :]) / gstepsize).clamp(0, maxVal)).max(dim=-1)[0]  # [100,N]
-    grid_cond = (maxVal - (((ids_grid[:, None].float() - pos_cond_ids[None].float()).norm(
-        dim=-1) - gradius_cond_trunc[None, :]) / gstepsize).clamp(0, maxVal)).max(dim=-1)[0]  # [N]
-    diff = (grid_pred - grid_cond[None]).abs().sum(dim=-1)
-
-    max_radius_ids = (gradius_pred + maxVal *
-                      gstepsize).max().round().int().item()
-    ids_grid = torch.stack([
-        torch.arange(-max_radius_ids, max_radius_ids+1, device=device)[
-            :, None, None].repeat(1, 2*max_radius_ids+1, 2*max_radius_ids+1),
-        torch.arange(-max_radius_ids, max_radius_ids+1, device=device)[
-            None, :, None].repeat(2*max_radius_ids+1, 1, 2*max_radius_ids+1),
-        torch.arange(-max_radius_ids, max_radius_ids+1, device=device)[
-            None, None, :].repeat(2*max_radius_ids+1, 2*max_radius_ids+1, 1),
-    ], dim=-1).reshape(-1, 3)
-    grid_pred_all = (maxVal - (((ids_grid[:, None] - 0).float().norm(
-        dim=-1) - gradius_pred[None, :]) / gstepsize).clamp(0, maxVal)).sum()
-
-    max_radius_ids = (gradius_cond + maxVal *
-                      gstepsize).max().round().int().item()
-    ids_grid = torch.stack([
-        torch.arange(-max_radius_ids, max_radius_ids+1, device=device)[
-            :, None, None].repeat(1, 2*max_radius_ids+1, 2*max_radius_ids+1),
-        torch.arange(-max_radius_ids, max_radius_ids+1, device=device)[
-            None, :, None].repeat(2*max_radius_ids+1, 1, 2*max_radius_ids+1),
-        torch.arange(-max_radius_ids, max_radius_ids+1, device=device)[
-            None, None, :].repeat(2*max_radius_ids+1, 2*max_radius_ids+1, 1),
-    ], dim=-1).reshape(-1, 3)
-    grid_cond_all = (maxVal - (((ids_grid[:, None] - 0).float().norm(
-        dim=-1) - gradius_cond[None, :]) / gstepsize).clamp(0, maxVal)).sum()
-
-    inter = 0.5 * (grid_pred_all + grid_cond_all - diff)
-    res = ((inter / (alpha*(grid_pred_all-inter) + beta *
-           (grid_cond_all-inter) + inter)) < clash_cutoff).tolist()
-    return res
 
 
 def check_intermolecular_distance(  # noqa: PLR0913
@@ -339,6 +259,7 @@ def check_intermolecular_distance(  # noqa: PLR0913
         "is_buried_fraction": is_buried_fraction.tolist(),
         "no_internal_clash": check_geometry(mol_orig, coords_ligand, threshold_bad_bond_length=0.25, threshold_clash=0.3, threshold_bad_angle=0.25, bound_matrix_params=bound_matrix_params, ignore_hydrogens=True, sanitize=True, symmetrize_conjugated_terminal_groups=True),
     }
+
     return {"results": results}
 
 
@@ -416,52 +337,6 @@ def check_volume_overlap(  # noqa: PLR0913
     return {"results": results}
 
 
-def set_unique_conformer_from_coords(
-    mol: Chem.Mol,
-    coords: np.ndarray,
-    *,
-    inplace: bool = False
-) -> tuple[Chem.Mol, int]:
-    """
-    Replace ALL conformers with a single new one built from `coords`.
-
-    mol      : RDKit Mol (connectivity and chemistry are preserved)
-    coords   : NumPy array shape (N, 3) in Å, where N == mol.GetNumAtoms()
-    inplace  : If True, mutate `mol`; else return a copy
-
-    Returns  : (mol_with_one_conf, conf_id)
-    """
-    n = mol.GetNumAtoms()
-    arr = np.asarray(coords, dtype=float)
-    if arr.shape != (n, 3):
-        raise ValueError(f"coords shape {arr.shape} must be ({n}, 3)")
-
-    m = mol if inplace else Chem.Mol(mol)  # shallow copy: preserves chemistry
-
-    # Remove all existing conformers
-    if hasattr(m, "RemoveAllConformers"):
-        m.RemoveAllConformers()
-    else:
-        # Fallback for very old RDKit versions
-        for c in list(m.GetConformers()):
-            m.RemoveConformer(c.GetId())
-
-    # Create and attach the new conformer
-    conf = Chem.Conformer(n)
-    try:
-        conf.Set3D(True)  # mark as 3D if supported by your build
-    except Exception:
-        pass
-    # Vectorized position set from Nx3 array
-    conf.SetPositions(arr)
-
-    new_id = m.AddConformer(conf, assignId=True)
-    if new_id is None:  # some builds return None; grab from the conf object
-        new_id = conf.GetId()
-
-    return m, new_id
-
-
 def check_geometry(  # noqa: PLR0913, PLR0915
     mol_orig,
     pos_preds,
@@ -499,10 +374,10 @@ def check_geometry(  # noqa: PLR0913, PLR0915
     mol = deepcopy(mol_pred)
     results = _empty_results.copy()
     if mol.GetNumConformers() == 0:
-        print("Molecule does not have a conformer.")
+        logger.error("Molecule does not have a conformer.")
         return {"results": results}
     if mol.GetNumAtoms() == 1:
-        print(f"Molecule has only {mol.GetNumAtoms()} atoms.")
+        logger.error(f"Molecule has only {mol.GetNumAtoms()} atoms.")
         results[col_angles_result] = True
         results[col_bonds_result] = True
         results[col_clash_result] = True
@@ -519,7 +394,7 @@ def check_geometry(  # noqa: PLR0913, PLR0915
     angles = sorted(_get_angle_atom_indices(bond_set))  # triples
     angle_set = {(a[0], a[2]): a for a in angles}  # {tuples : triples}
     if len(bond_set) == 0:
-        print("Molecule has no bonds.")
+        logger.error("Molecule has no bonds.")
 
     # distance geometry bounds, lower triangle min distances, upper triangle max distances
     bounds = GetMoleculeBoundsMatrix(mol, **bound_matrix_params)
@@ -574,12 +449,7 @@ def calc_posebusters(pos_pred, pos_cond, atom_ids_pred, atom_names_cond, names, 
         assert len(pos_cond) == len(
             atom_names_cond), f"len(pos_cond[i]) = {len(pos_cond[0])} != len(atom_names_cond[i]) = {len(atom_names_cond)}"
     except Exception as e:
-        print(f"Error in {names}")
-        print(e)
-        with open("error.txt", "a") as f:
-            f.write(f"Error in {names}\n")
-            f.write(
-                f"len(pos_pred[i]) = {len(pos_pred[0])} != len(atom_names_pred[i]) = {len(atom_names_pred)}\n")
+        logger.error(f"Error in {names}: {e}")
         return None
     res1 = check_intermolecular_distance(
         lig_mol_for_posebusters, pos_pred, pos_cond, atom_names_pred, atom_names_cond)

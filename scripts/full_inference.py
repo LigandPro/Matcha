@@ -1,13 +1,14 @@
-import torch
 from argparse import ArgumentParser
-from omegaconf import OmegaConf
-import copy
 
-from matcha.utils.esm_utils import compute_sequences, compute_esm_embeddings
-from matcha.utils.inference_utils import (run_inference_pipeline,
-                                          compute_fast_filters,
-                                          save_best_pred_to_sdf,
-                                          compute_metrics_all)
+import torch
+from omegaconf import OmegaConf
+
+from matcha.utils.inference_utils import (
+    save_all_to_sdf,
+    load_and_merge_all_stages,
+)
+from matcha.utils.log import get_logger
+logger = get_logger(__name__)
 
 
 if __name__ == "__main__":
@@ -20,27 +21,17 @@ if __name__ == "__main__":
                         required=True, help="config file with paths")
     parser.add_argument("-n", "--name", dest="inference_run_name",
                         required=True, help="name and the folder of the inference run")
-    parser.add_argument("--n_samples", dest="n_preds_to_use",
-                        required=False, help="number of samples to generate for each ligand", default=40)
-    parser.add_argument("--compute_final_metrics", dest="compute_final_metrics",
-                        required=False, help="compute final metrics", default=False, action='store_true')
-    parser.add_argument("--no_compute_esm_embeddings", dest="no_compute_esm_embeddings",
-                        required=False, help="compute ESM embeddings", default=False, action='store_true')
+    parser.add_argument("--merge-stages", dest="merge_stages",
+                        required=False, help="merge stages", default=False, action='store_true')
     args = parser.parse_args()
 
     # Load main model config
+    default_conf = OmegaConf.load('configs/default.yaml')
     conf = OmegaConf.load(args.config_filename)
     paths_conf = OmegaConf.load(args.paths_config_filename)
-    conf = OmegaConf.merge(conf, paths_conf)
-    n_preds_to_use = int(args.n_preds_to_use)
-    if args.no_compute_esm_embeddings:
-        print('Assuming ESM embeddings are already computed')
-    else:
-        compute_sequences(conf)
-        compute_esm_embeddings(conf)
-    run_inference_pipeline(copy.deepcopy(
-        conf), args.inference_run_name, n_preds_to_use)
-    compute_fast_filters(conf, args.inference_run_name, n_preds_to_use)
-    save_best_pred_to_sdf(conf, args.inference_run_name)
-    if args.compute_final_metrics:
-        compute_metrics_all(conf, args.inference_run_name)
+    conf = OmegaConf.merge(default_conf, conf, paths_conf)
+
+    if args.merge_stages:
+        load_and_merge_all_stages(conf, args.inference_run_name)
+    
+    save_all_to_sdf(conf, args.inference_run_name, one_file=True, merge_stages=args.merge_stages)

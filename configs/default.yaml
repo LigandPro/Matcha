@@ -1,0 +1,18 @@
+seed: 777
+
+# Dataset settings
+std_protein_pos: 0.25
+std_lig_pos: 0.25
+ligand_mask_ratio: 0.15
+protein_mask_ratio: 0.15
+esm_emb_noise_std: 0.1
+batch_limit: 30000
+
+# Model settings
+predict_torsion_angles: true
+llm_emb_dim: 480
+num_kernel_pos_encoder: 128
+feature_dim: 320
+num_heads: 8
+num_transformer_blocks: 12
+dropout_rate: 0.

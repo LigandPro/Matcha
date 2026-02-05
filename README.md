@@ -2,30 +2,33 @@
 
 This is an official implementation of the paper [Matcha: Multi-Stage Riemannian Flow Matching for Accurate and Physically Valid Molecular Docking](https://arxiv.org/abs/2510.14586).
 
+## News
+
+We have updated the repository and the [Hugging Face checkpoints](https://huggingface.co/LigandPro/Matcha): the current code and weights correspond to the improved pipeline and **much better results**! The previous version, however, remains available as tag `v1` (`git checkout v1`).
+
 ## Overview
 
-Matcha, is a molecular docking pipeline that combines multi-stage flow matching with learned scoring and physical validity filtering. Our approach consists of three sequential stages applied consecutively
-to progressively refine docking predictions, each implemented as a flow matching model operating on appropriate geometric spaces (R^3, SO(3), and SO(2)).
-We enhance the prediction quality through a dedicated scoring model and apply
-unsupervised physical validity filters to eliminate unrealistic poses. 
+Matcha is a molecular docking pipeline that combines multi-stage flow matching with learned scoring and physical validity filtering. Our approach consists of three sequential stages applied consecutively to progressively refine docking predictions, each implemented as a flow matching model operating on appropriate geometric spaces (R³, SO(3), and SO(2)). We enhance the prediction quality through a dedicated scoring model and apply unsupervised physical validity filters to eliminate unrealistic poses.
+
 ![pipeline](data/img/matcha_pipeline.png)
 ![architecture](data/img/matcha_architecture.png)
 
-Compared to various approaches, Matcha demonstrates superior performance on Astex
-and PDBBind test sets in terms of docking success rate and physical plausibility.
-Moreover, our method works approximately 25× faster than modern large-scale
-co-folding models.
+Compared to various approaches, Matcha demonstrates superior performance on Astex and PDBBind test sets in terms of docking success rate and physical plausibility. Moreover, our method works approximately 31× faster than modern large-scale co-folding models.
 
 <img src="data/img/time.png" alt="results" width="500"/>
 
 ## Content
+
 - [Installation](#install)
 - [CLI usage](#cli)
 - [Datasets](#datasets)
   - [Existing datasets](#exist_datasets)
   - [Adding new dataset](#new_datasets)
 - [Preparing the config file](#config)
+- [Protein preprocessing (for GNINA)](#protein_preprocessing)
+- [Running training](#train)
 - [Running inference with one script](#inference)
+- [Full pipeline with GNINA](#full_pipeline)
 - [Running inference step-by-step](#inference_steps)
   - [Preprocessing](#preproc)
   - [Inference](#inf)
@@ -41,7 +44,15 @@ co-folding models.
 uv sync
 ```
 
+Or with pip:
+
+```bash
+pip install -e .
+```
+
 ## CLI usage <a name="cli"></a>
+
+The recommended way to run inference is via scripts (`full_inference.py`, `final_inference_pipeline.sh`). The `matcha` CLI is kept for compatibility but delegates to the same pipeline; for single-run inference use the scripts below.
 
 Run single ligand:
 
@@ -55,77 +66,70 @@ Run batch (multi-ligand file or directory):
 uv run matcha -r protein.pdb --ligand-dir ligands.sdf -o results/ --run-name batch --gpu 0
 ```
 
-Search space options:
-- Manual box: `--center-x/--center-y/--center-z FLOAT` (Å)
-- Autobox: `--autobox-ligand ref.sdf` (center from reference ligand)
-- If none provided: blind docking on the whole protein
-
-Key flags:
-- `--n-samples N` – poses per ligand (default: 20)
-- `--physical-only/--keep-all-poses` – keep only PoseBusters-passing poses (pb_4/4) or all (default keep all)
-- `--overwrite` – replace existing run folder `<out>/<run-name>`
-- `--keep-workdir` – keep intermediates (`work/`); otherwise cleaned
-- `--workdir PATH` – place intermediates/logs here (default `<out>`)
-- `--run-name` – names the run; outputs go under `<out>/<run-name>`
-
-Outputs layout:
-- Single: `<out>/<run-name>_best.sdf`, `<run-name>_poses.sdf`, `<run-name>.log`
-- Batch: `<out>/<run-name>/best_poses/*.sdf`, `all_poses/*_poses.sdf`, per-ligand logs in `logs/`, overall log `<run-name>.log`
-
-Examples:
-- Autobox single: `uv run matcha -r prot.pdb -l lig.sdf --autobox-ligand ref.sdf -o results/`
-- Batch 40 samples, physical-only: `uv run matcha -r prot.pdb --ligand-dir ligs.sdf --autobox-ligand ref.sdf -o results/ --n-samples 40 --physical-only`
-
+Search space options: manual box (`--center-x/--center-y/--center-z`), autobox (`--autobox-ligand ref.sdf`), or blind docking if none provided.
 
 ## Datasets <a name="datasets"></a>
+
 ### Existing datasets <a name="exist_datasets"></a>
-If you want to make predictions for existing test datasets, you need to download them first.
-Astex and PoseBusters datasets can be downloaded [here](https://zenodo.org/records/8278563).
-PDBBind_processed can be found [here](https://zenodo.org/records/6408497).
-DockGen can be downloaded from [here](https://zenodo.org/records/10656052).
+
+Astex and PoseBusters datasets can be downloaded [here](https://zenodo.org/records/8278563). PDBBind_processed can be found [here](https://zenodo.org/records/6408497). DockGen can be downloaded from [here](https://zenodo.org/records/10656052).
 
 ### Adding new dataset <a name="new_datasets"></a>
-If you need to predict some new data, you need to construct a dataset folder with the following structure:
+
+Use a dataset folder with the following structure:
+
 ```
-- dataset_path
-    - uid1
-        - f'{uid1}_protein.pdb' - protein structure file
-        - f'{uid1}_ligand.sdf' - ligand sdf file (can be an arbitrary conformation or a true position: we compute random conformers anyway)
-    - uid2
-        - f'{uid2}_protein.pdb'
-        - f'{uid2}_ligand.sdf' 
-    - ...
+dataset_path/
+    uid1/
+        uid1_protein.pdb
+        uid1_ligand.sdf
+    uid2/
+        uid2_protein.pdb
+        uid2_ligand.sdf
+    ...
 ```
+
 ## Preparing the config file <a name="config"></a>
-1. You need to provide paths to the required datasets. Edit the `configs/paths/paths.yaml` file: add `posebusters_data_dir`, `astex_data_dir`, `pdbbind_data_dir`, `dockgen_data_dir`. For a new dataset provide its path in `any_data_dir`. 
 
-If you do not need all datasets, comment unnecessary datasets in the config's `test_dataset_types`, keeping only those that are needed.
+1. Edit `configs/paths/paths.yaml`: set `posebusters_data_dir`, `astex_data_dir`, `pdbbind_data_dir`, `dockgen_data_dir` (or `any_data_dir` for a new dataset). Comment out unneeded entries in `test_dataset_types`.
 
-2. Provide data paths to keep intermediate and final data:
-- `cache_path`: path where intermediate dataset cache files will be stored
-- `data_folder`: path where intermediate files will be stored (eg. ESM embeddings)
-- `inference_results_folder`: <path_to_inference_results>
+2. Set paths for intermediate and final data:
+   - `cache_path`, `data_folder`, `inference_results_folder`
+   - `preprocessed_receptors_base`: root directory for **preprocessed** protein structures used by the GNINA affinity scripts (see [Protein preprocessing](#protein_preprocessing)). Required when using GNINA steps; layout: `{preprocessed_receptors_base}/{dataset}_{uid}/{dataset}_{uid}_protein.pdb`.
 
-3. Download checkpoints for Matcha for [here](https://huggingface.co/LigandPro/Matcha). You need to download the `pipeline` folder. Provide the path to the folder where you store them (folder that contains `pipeline`) in the `checkpoints_folder` in paths.yaml.
+3. Download checkpoints from [Hugging Face (LigandPro/Matcha)](https://huggingface.co/LigandPro/Matcha) (the `matcha_pipeline` folder). Set `checkpoints_folder` in paths.yaml to the folder that contains it.
 
+## Protein preprocessing (for GNINA) <a name="protein_preprocessing"></a>
+
+Protein structures used by the GNINA affinity scripts must be preprocessed (hydrogenation, PDBQT, etc.). We use the [dockprep-pipeline](https://github.com/LigandPro/dockprep-pipeline) for receptor and ligand preparation; see that repository for a minimal pipeline (Reduce/OpenMM hydrogenation, Meeko PDBQT). Further details are in the paper.
+
+## Running training <a name="train"></a>
+
+Training scripts are not included in this repository. For training details, see the paper.
 
 ## Running inference with one script <a name="inference"></a>
-If you need to compute inference for a dataset at once, you can use the script `full_inference.py`. It would be more computationally efficient than using the cli for each complex separately.
 
-The script `full_inference.py` is to compute all preprocessing and inference scripts in one. 
-Provide `--compute_final_metrics` if your dataset has true ligand positions in f'{uid_i}_ligand.sdf', so we can compute RMSD metrics and PoseBusters filters.
-Argument `-n inference_folder_name` is a name of a folder where to store inference results for dataset.
+To run docking and save merged predictions (without GNINA):
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python scripts/full_inference.py -c configs/base.yaml -p configs/paths/paths.yaml -n inference_folder_name --n_samples 40 --compute_final_metrics
+CUDA_VISIBLE_DEVICES=0 python scripts/full_inference.py -c configs/base.yaml -p configs/paths/paths.yaml -n inference_folder_name --merge-stages
 ```
 
-This script will provide a step-by-step computation of protein ESM embeddings, docking predictions, physically-aware unsupervised post-filtration, scoring and saving predictions to sdf.
+This computes ESM embeddings, runs the docking pipeline, merges stages, and saves predictions to SDF.
 
+## Full pipeline with GNINA <a name="full_pipeline"></a>
+
+To run the full pipeline including GNINA affinity, minimization, top-pose selection, and metrics:
+
+```bash
+./scripts/final_inference_pipeline.sh -n exp_name -c configs/default.yaml -p configs/paths/paths.yaml -d 0 -s 40 -g /path/to/run_gnina.sh
+```
+
+You must set `preprocessed_receptors_base` in paths.yaml (or provide preprocessed structures as required by the GNINA scripts) and pass `-g` with the path to your GNINA runner script.
 
 ## Running inference step-by-step <a name="inference_steps"></a>
+
 ### Preprocessing <a name="preproc"></a>
-Run scripts to compute protein sequences anf ESM embeddings for all test datasets.
 
 ```bash
 python scripts/prepare_esm_sequences.py -p configs/paths/paths.yaml
@@ -134,85 +138,54 @@ CUDA_VISIBLE_DEVICES=0 python scripts/compute_esm_embeddings.py -p configs/paths
 
 ### Inference <a name="inf"></a>
 
-To run inference:
 ```bash
 CUDA_VISIBLE_DEVICES=0 python scripts/run_inference_pipeline.py -c configs/base.yaml -p configs/paths/paths.yaml -n inference_folder_name --n_samples 40
 ```
 
-Then run `posebusters_unsupervised.py` to do fast unsupervised post-filtration and `save_best_pred_to_sdf.py` to get top-1 ranked pose. The top-ranked poses for each complex are stored in the `inference_results_folder/inference_folder_name/sdf_predictions`.
-You need to provide the same `--n_samples`, as for the `run_inference_pipeline.py`.
+Then merge stages and save to SDF:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python scripts/posebusters_unsupervised.py -c configs/base.yaml -p configs/paths/paths.yaml -n inference_folder_name --n_samples 40
-python scripts/save_best_pred_to_sdf.py -p configs/paths/paths.yaml -n inference_folder_name
+CUDA_VISIBLE_DEVICES=0 python scripts/full_inference.py -c configs/base.yaml -p configs/paths/paths.yaml -n inference_folder_name --merge-stages
 ```
+
+For the full pipeline with GNINA scoring and top-pose selection, use `final_inference_pipeline.sh` (see [Full pipeline with GNINA](#full_pipeline)).
 
 ### Metrics computation <a name="metrics"></a>
 
-Optionally, you can compute sample-level and dataset-level metrics (such as symmetry-corrected RMSD and passing PoseBusters filters) having your predictions.
-Individual metrics for each sample are stored in the folder with inference results in file `f'{dataset_name}_final_preds_all_metrics.npy'`.
-
-Dataset-level statistics are stored in the folder with inference results in file `f'{dataset_name}_final_metrics.csv'`.
-This can be done with the command:
+After running the pipeline (including GNINA and `select_top_gnina_poses.py`), metrics from the best SDF predictions can be computed with:
 
 ```bash
-python scripts/compute_metrics.py -p configs/paths/paths.yaml -n inference_folder_name
+python scripts/compute_metrics_from_sdf.py -p configs/paths/paths.yaml -n inference_folder_name --prediction-type best_minimized_predictions_40_filtered
 ```
 
 ## Benchmarking and pocket-aligned RMSD computation <a name="benchmarking"></a>
-If you need to compute metrics for other docking tool predictions, you firtsly need to construct a folder with method predictions with a certain structure. Docking methods can be divided into those that modify the protein structure (eg. co-folding methods, FlowDock, NeuralPlexer) and those that use the reference protein structure (eg. Matcha, DiffDock, SMINA). We have a separate flag `has_pred_proteins` to differentiate these cases. When `has_pred_proteins=False`, the folder needs to contain only ligands, while when `has_pred_proteins=True`, you need to store both proteins and ligands.
 
-The structure of the folder with predictions:
-
-```
-- method_name
-  - dataset_name
-    - uid1
-      - conf_0
-        - 'prot.pdb' - protein structure file (optional, needed when has_pred_proteins=True)
-        - 'lig_0.sdf' - ligand sdf file
-    - uid2
-      - conf_0
-        - 'prot.pdb' - protein structure file (optional, needed when has_pred_proteins=True)
-        - 'lig_0.sdf' - ligand sdf file
-    - ...
-```
-
-Then, you need to run the script `compute_aligned_rmsd.py` to align protein pockets and to compute RMSD and posebusters metrics.
-It has two types of alignment ('base' and 'pocket'), among which we prefer 'base' option because it does not produce overoptimistic results (see Appendix D in the original paper for the discussion on this topic).
-You need to set `methods_data` dict inside the script, providing method names and their `has_pred_proteins` flags.
-Also, you need to provide the path where you store initial method predictions (`--init-preds-path`) as well as dataset_names you need to evaluate (`dataset_names`).
-Then, run the script:
+For other docking methods, prepare a folder of predictions with the structure described in the script. Then:
 
 ```bash
 python scripts/compute_aligned_rmsd.py -p configs/paths/paths.yaml -a base --init-preds-path <path_to_initial_preds>
 ```
 
+Set `methods_data` and `dataset_names` inside the script as needed. We prefer alignment type `base` (see Appendix D in the paper).
 
 ## License <a name="license"></a>
-Shield: [![CC BY-NC 4.0][cc-by-nc-shield]][cc-by-nc]
 
-This work is licensed under a
-[Creative Commons Attribution-NonCommercial 4.0 International License][cc-by-nc].
+This work is licensed under a [Creative Commons Attribution-NonCommercial 4.0 International License](https://creativecommons.org/licenses/by-nc/4.0/).
 
-[![CC BY-NC 4.0][cc-by-nc-image]][cc-by-nc]
-
-[cc-by-nc]: https://creativecommons.org/licenses/by-nc/4.0/
-[cc-by-nc-image]: https://licensebuttons.net/l/by-nc/4.0/88x31.png
-[cc-by-nc-shield]: https://img.shields.io/badge/License-CC%20BY--NC%204.0-lightgrey.svg
+[![CC BY-NC 4.0](https://licensebuttons.net/l/by-nc/4.0/88x31.png)](https://creativecommons.org/licenses/by-nc/4.0/)
 
 ## Citation <a name="citation"></a>
 
-If you use Matcha in your work, please cite our paper:
+If you use Matcha in your work, please cite:
 
-```
+```bibtex
 @misc{frolova2025matchamultistageriemannianflow,
-      title={Matcha: Multi-Stage Riemannian Flow Matching for Accurate and Physically Valid Molecular Docking}, 
+      title={Matcha: Multi-Stage Riemannian Flow Matching for Accurate and Physically Valid Molecular Docking},
       author={Daria Frolova and Talgat Daulbaev and Egor Sevryugov and Sergei A. Nikolenko and Dmitry N. Ivankov and Ivan Oseledets and Marina A. Pak},
       year={2025},
       eprint={2510.14586},
       archivePrefix={arXiv},
       primaryClass={cs.LG},
-      url={https://arxiv.org/abs/2510.14586}, 
+      url={https://arxiv.org/abs/2510.14586},
 }
 ```
