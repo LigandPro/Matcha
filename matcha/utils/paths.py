@@ -14,8 +14,9 @@ def get_dataset_path(dataset_name, conf):
         return conf.any_data_dir
 
 
-def get_protein_path(uid, dataset_name, dataset_data_dir):
-    uid = uid.split('_mol')[0]
+def get_protein_path(uid, dataset_name, dataset_data_dir, crop_mol=True):
+    if crop_mol:
+        uid = uid.split('_mol')[0]
     if dataset_name.startswith('astex') or dataset_name.startswith('posebusters') or dataset_name.startswith('any'):
         rec_path = os.path.join(dataset_data_dir, uid, f'{uid}_protein.pdb')
     elif dataset_name.startswith('pdbbind') or dataset_name.startswith('dockgen'):
@@ -28,9 +29,10 @@ def get_protein_path(uid, dataset_name, dataset_data_dir):
 
 def get_ligand_path(uid, dataset_name, dataset_data_dir):
     uid = uid.split('_mol')[0]
-    if dataset_name.startswith('astex') or dataset_name.startswith('posebusters') or \
-            dataset_name.startswith('any') or dataset_name.startswith('pdbbind'):
+    if dataset_name.startswith('astex') or dataset_name.startswith('posebusters') or dataset_name.startswith('any'):
         lig_path = os.path.join(dataset_data_dir, uid, f'{uid}_ligand.sdf')
+    elif dataset_name.startswith('pdbbind'):
+        lig_path = os.path.join(dataset_data_dir, uid, f'{uid}_ligand.mol2')
     elif dataset_name.startswith('dockgen'):
         lig_path = os.path.join(dataset_data_dir, uid, f'{uid}_ligand.pdb')
     else:
@@ -38,9 +40,9 @@ def get_ligand_path(uid, dataset_name, dataset_data_dir):
     return lig_path
 
 
-def get_sequences_path(dataset_name, conf):
-    return os.path.join(conf.data_folder, f'{dataset_name}_id2seq_new.json')
+def get_sequences_path(dataset_name, conf, split='test'):
+    return os.path.join(conf.data_folder, f'{dataset_name.split("_conf")[0]}_id2seq_new.json')
 
 
-def get_esm_embeddings_path(dataset_name, conf):
-    return os.path.join(conf.data_folder, f'{dataset_name}_esm_embeddings.pt')
+def get_esm_embeddings_path(dataset_name, conf, split='test'):
+    return os.path.join(conf.data_folder, f'{dataset_name.split("_conf")[0]}_esm_embeddings.pt')

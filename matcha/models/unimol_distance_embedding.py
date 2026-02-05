@@ -76,19 +76,15 @@ class DistanceBias(nn.Module):
         self.vector_proj = NonLinear(3, num_attn_heads, hidden=128)
 
     def compute_edge_feature(self, dist, edge_types):
-        edge_feature = self.gaussian(
-            dist, edge_types
-        )
+        edge_feature = self.gaussian(dist, edge_types)
         edge_feature = self.out_proj(edge_feature)
         return edge_feature
 
     def forward(self, pos, edge_types, protein_length=None):
         # Initialize pair embeddings:
         if protein_length is not None and self.use_reduced_bias:
-            dlm_lig_lig = pos[:, None, :-protein_length] - \
-                pos[:, :-protein_length, None]
-            dlm_lig_prot = pos[:, None, :-protein_length] - \
-                pos[:, -protein_length:, None]
+            dlm_lig_lig = pos[:, None, :-protein_length] - pos[:, :-protein_length, None]
+            dlm_lig_prot = pos[:, None, :-protein_length] - pos[:, -protein_length:, None]
 
             dist_lig_lig = 1 / ((dlm_lig_lig ** 2).sum(dim=-1) + 1)
             dist_lig_prot = 1 / ((dlm_lig_prot ** 2).sum(dim=-1) + 1)

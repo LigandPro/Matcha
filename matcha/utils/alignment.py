@@ -1,12 +1,16 @@
 import copy
 import numpy as np
+import warnings
 
 import networkx as nx
 from networkx.algorithms import isomorphism as iso
 from rdkit import Chem
 from Bio.PDB import PDBParser, MMCIFParser, PDBIO, Select
+from Bio.PDB.PDBExceptions import PDBConstructionWarning
 
-from flowdock.utils.preprocessing import read_molecule
+from matcha.utils.preprocessing import read_molecule
+from matcha.utils.log import get_logger
+logger = get_logger(__name__)
 
 
 def restore_atom_order(ref_mol, pred_mol):
@@ -70,7 +74,7 @@ def filter_protein_chains_by_ligand_distance(reference_protein_pdb_path, referen
                     chain_coords.append(atom.get_coord())
         
         if len(chain_coords) == 0:
-            print(f"Chain {chain_id}: No atoms found")
+            logger.warning(f"Chain {chain_id}: No atoms found")
             continue
             
         chain_coords = np.array(chain_coords)
@@ -107,10 +111,10 @@ def filter_protein_chains_by_ligand_distance(reference_protein_pdb_path, referen
         io.save(chain_output_protein_pdb_path, ChainSelector([chain_id]))
     
     if len(kept_chains) == 0:
-        print("WARNING: No chains were kept! Consider increasing the distance cutoff.")
-        print("Chain distances to ligand:")
+        logger.warning("No chains were kept! Consider increasing the distance cutoff.")
+        logger.info("Chain distances to ligand:")
         for chain_id, distance in sorted(chain_distances.items()):
-            print(f"  {chain_id}: {distance:.2f} Å")
+            logger.info(f"  {chain_id}: {distance:.2f} Å")
     
     return kept_chains
 
@@ -243,6 +247,11 @@ def align_to_binding_site_by_pocket(
 
     # Define the predicted binding site(s) based on the reference ligand(s)
     cmd.select("pred_binding_site", f"(backbone) and pred_protein_heavy within {cutoff} of pred_ligand_heavy")
+
+    # # Define binding sites using predicted ligand position for both proteins
+    # # This ensures we align the same spatial region
+    # cmd.select("ref_binding_site", f"ref_protein and backbone and not elem H within {cutoff} of ref_ligand")
+    # cmd.select("pred_binding_site", f"pred_protein and backbone and not elem H within {cutoff} of pred_ligand")
 
     # Align the predicted protein to the reference binding site(s)
     alignment_result = cmd.align("pred_binding_site", "ref_binding_site", cycles=0)

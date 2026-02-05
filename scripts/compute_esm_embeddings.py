@@ -14,3 +14,4 @@ if __name__ == "__main__":
     # Load main model config
     conf = OmegaConf.load(args.paths_config_filename)
     compute_esm_embeddings(conf)
+    

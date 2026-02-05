@@ -1,10 +1,9 @@
-seed: 777
-
 # Dataset settings
 tr_std: 5.
+# use_sorted_batching: true
+# batch_limit: 40000
 
 # Model settings
 use_time: true
-dropout_rate: 0.
-num_kernel_pos_encoder: 128
-objective: ranking
+
+stage_num: 1

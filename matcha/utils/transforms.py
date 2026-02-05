@@ -33,8 +33,6 @@ def rotvec_to_rotmat(rotvec):
     """
     # Compute the norm (theta) for each rotation vector
     theta = torch.norm(rotvec, dim=-1, keepdim=True)  # Shape: (batch_size, 1)
-
-    # Compute the normalized rotation vectors (n = rotvec / theta)
     n = torch.nn.functional.normalize(rotvec, dim=-1)
 
     # Extract n1, n2, n3 from normalized vectors
@@ -182,11 +180,111 @@ def apply_tr_rot_changes_to_batch_inplace(batch, tr, rot):
     return
 
 
-def apply_changes_to_batch_inplace(batch, tr, rot, tor, is_reverse_order):
-    apply_tr_rot_changes_to_batch_inplace(batch, tr, rot)
-    apply_tor_changes_to_batch_inplace(
-        batch, tor, is_reverse_order=is_reverse_order)
-    return
+def compute_signed_dihedral_angles_vectorized(positions):
+    """
+    Compute signed dihedral angles for multiple sets of atoms in a vectorized way.
+
+    Parameters:
+    -----------
+    positions: np.ndarray or torch.Tensor, shape (B, 4, 3)
+        Positions of B sets of 4 atoms each: (n0, start, end, n1) in 3D space.
+
+    Returns:
+    --------
+    angles: np.ndarray or torch.Tensor, shape (B,)
+        The signed dihedral angles in radians.
+    """
+    # Extract the positions of each atom in each set
+    p0 = positions[:, 0]  # n0 positions
+    p1 = positions[:, 1]  # start positions
+    p2 = positions[:, 2]  # end positions
+    p3 = positions[:, 3]  # n1 positions
+
+    # Calculate bond vectors
+    b1 = p1 - p0  # n0 -> start
+    b2 = p2 - p1  # start -> end
+    b3 = p3 - p2  # end -> n1
+
+    # Normalize b2
+    if isinstance(positions, torch.Tensor):
+        b2_normalized = b2 / torch.norm(b2, dim=1, keepdim=True)
+
+        # Calculate normal vectors to the planes
+        n1 = torch.cross(b1, b2, dim=1)
+        n1_normalized = n1 / torch.norm(n1, dim=1, keepdim=True)
+
+        n2 = torch.cross(b2, b3, dim=1)
+        n2_normalized = n2 / torch.norm(n2, dim=1, keepdim=True)
+
+        # Calculate the orthogonal vector to n1 in the plane defined by b2
+        m1 = torch.cross(n1_normalized, b2_normalized, dim=1)
+
+        # Calculate cosine and sine
+        x = torch.sum(n1_normalized * n2_normalized, dim=1)
+        y = torch.sum(m1 * n2_normalized, dim=1)
+
+        # Calculate dihedral angle
+        angles = torch.atan2(y, x)
+    else:
+        b2_normalized = b2 / np.linalg.norm(b2, axis=1, keepdims=True)
+
+        # Calculate normal vectors to the planes
+        n1 = np.cross(b1, b2)
+        n1_normalized = n1 / np.linalg.norm(n1, axis=1, keepdims=True)
+
+        n2 = np.cross(b2, b3)
+        n2_normalized = n2 / np.linalg.norm(n2, axis=1, keepdims=True)
+
+        # Calculate the orthogonal vector to n1 in the plane defined by b2
+        m1 = np.cross(n1_normalized, b2_normalized)
+
+        # Calculate cosine and sine
+        x = np.sum(n1_normalized * n2_normalized, axis=1)
+        y = np.sum(m1 * n2_normalized, axis=1)
+
+        # Calculate dihedral angle
+        angles = np.arctan2(y, x)
+
+    return -angles
+
+
+def get_torsion_angles(pos, bond_atoms_for_angles):
+    # Create a batch of all atom quartets for dihedral calculations
+    n0 = bond_atoms_for_angles['neighbor_of_start']
+    start = bond_atoms_for_angles['start']
+    end = bond_atoms_for_angles['end']
+    n1 = bond_atoms_for_angles['neighbor_of_end']
+
+    # Stack the positions to form a batch
+    if isinstance(pos, torch.Tensor):
+        atom_quartets = torch.stack([
+            pos[n0], pos[start], pos[end], pos[n1]
+        ], dim=1)
+    else:
+        atom_quartets = np.stack([
+            pos[n0], pos[start], pos[end], pos[n1]
+        ], axis=1)
+
+    # Calculate all dihedral angles at once
+    angles = compute_signed_dihedral_angles_vectorized(atom_quartets)
+
+    # Fix the angles based on bond periods
+    angles = fix_torsion_angles(angles, bond_atoms_for_angles['bond_periods'])
+    return angles
+
+
+def fix_torsion_angles(angles, bond_periods):
+    return (angles + bond_periods / 2) % bond_periods - bond_periods / 2
+
+
+def get_bond_properties_for_angles(rotatable_bonds_ext):
+    bond_properties_for_angles = {}
+    bond_properties_for_angles['start'] = rotatable_bonds_ext.start
+    bond_properties_for_angles['end'] = rotatable_bonds_ext.end
+    bond_properties_for_angles['neighbor_of_start'] = rotatable_bonds_ext.neighbor_of_start
+    bond_properties_for_angles['neighbor_of_end'] = rotatable_bonds_ext.neighbor_of_end
+    bond_properties_for_angles['bond_periods'] = rotatable_bonds_ext.bond_periods
+    return bond_properties_for_angles
 
 
 def find_rigid_alignment(pos_a, pos_b):

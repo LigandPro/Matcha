@@ -7,10 +7,13 @@ from tqdm import tqdm
 import torch
 from matcha.utils.rotation import expm_SO3
 from matcha.utils.transforms import (apply_tr_rot_changes_to_batch_inplace, apply_tor_changes_to_batch_inplace,
-                                     find_rigid_alignment)
+                                       get_torsion_angles, find_rigid_alignment)
+from matcha.utils.log import get_logger
 
+logger = get_logger(__name__)
 
 def load_from_checkpoint(model, checkpoint_path, strict=True):
+    checkpoint_path = os.path.expanduser(checkpoint_path)
     state_dict = safetensors.torch.load_file(os.path.join(
         checkpoint_path, 'model.safetensors'), device="cpu")
     model.load_state_dict(state_dict, strict=strict)
@@ -22,15 +25,17 @@ def euler(model, batch, device, num_steps=20):
     h = 1. / num_steps
     batch_size = len(cur_batch)
     R_eye = torch.eye(3, device=device).repeat(batch_size, 1, 1)
-    R_agg = torch.eye(3, device=device).repeat(batch_size, 1, 1)
+    R_agg = cur_batch.ligand.init_rot
     tr = cur_batch.ligand.init_tr
     tor = cur_batch.ligand.init_tor
     cur_batch.ligand.t = torch.zeros_like(cur_batch.ligand.t)
 
+    pos_hist = []
+    trajectory = [cur_batch.ligand.pos.detach().cpu().numpy().copy()]
     tor_agg = torch.zeros_like(tor)
     for step in range(num_steps):
         with torch.no_grad():
-            dtr, drot, dtor, _, _ = model.forward_step(cur_batch)
+            dtr, drot, dtor, _ = model.forward_step(cur_batch)
 
             tr = tr + h * dtr
             if dtor is not None:
@@ -41,15 +46,17 @@ def euler(model, batch, device, num_steps=20):
             else:
                 R = R_eye
 
-            apply_tor_changes_to_batch_inplace(
-                cur_batch, tor, is_reverse_order=False)
+            apply_tor_changes_to_batch_inplace(cur_batch, tor, is_reverse_order=False)
             apply_tr_rot_changes_to_batch_inplace(cur_batch, tr, R)
 
             cur_batch.ligand.t += h
             R_agg = torch.bmm(R, R_agg)
 
+            pos_hist.append(cur_batch.ligand.pos.detach().cpu().numpy().copy())
+            trajectory.append(cur_batch.ligand.pos.detach().cpu().numpy().copy())
+
     tr_agg = tr
-    return cur_batch, tr_agg, R_agg, tor_agg
+    return cur_batch, tr_agg, R_agg, tor_agg, pos_hist, trajectory
 
 
 def run_evaluation(dataloader, num_steps, solver, model):
@@ -64,75 +71,96 @@ def run_evaluation(dataloader, num_steps, solver, model):
     metrics_dict = {}
     for batch in tqdm(dataloader, desc="Docking inference"):
         batch = batch['batch']
-        optimized, tr_agg, R_agg, tor_agg = solver(
+        batch_size = len(batch)
+        optimized, tr_agg, R_agg, tor_agg, pos_hist, _ = solver(
             model, batch, device=device, num_steps=num_steps)
 
+        # compute RMSD in case of zero-padded batches
+        num_batch_atoms = (~batch.ligand.is_padded_mask).sum(dim=1).to(device)
         for batch_idx, num_atoms in enumerate(optimized.ligand.num_atoms):
             optimized.ligand.pos[batch_idx, num_atoms:] = 0.
+            for i in range(len(pos_hist)):
+                pos_hist[i][batch_idx, num_atoms:] = 0.
 
-        # Normal alignment process
-        aligned_batch = copy.deepcopy(batch).to(device)
-        tr_aligned = torch.zeros_like(tr_agg, device=device)
-        rot_aligned = torch.eye(3, device=device).repeat(tr_agg.shape[0], 1, 1)
-        apply_tor_changes_to_batch_inplace(
-            aligned_batch, tor_agg, is_reverse_order=False)
-        for i in range(len(optimized.ligand.pos)):
-            pos_pred = aligned_batch.ligand.pos[i,
-                                                :optimized.ligand.num_atoms[i]]
-            pos_true = optimized.ligand.pos[i, :optimized.ligand.num_atoms[i]]
+        # Handle cases where solver returns None for aggregated values
+        if tr_agg is None or R_agg is None or tor_agg is None:
+            # Skip alignment and use identity transformations
+            tr_agg = torch.zeros(batch_size, 3, device=device)
+            R_agg = torch.eye(3, device=device).repeat(batch_size, 1, 1)
+            tor_agg = torch.zeros_like(batch.ligand.init_tor, device=device)
+            aligned_batch = copy.deepcopy(batch).to(device)
+        else:
+            # Normal alignment process
+            aligned_batch = copy.deepcopy(batch).to(device)
+            tr_aligned = torch.zeros_like(tr_agg, device=device)
+            rot_aligned = torch.eye(3, device=device).repeat(
+                tr_agg.shape[0], 1, 1)
+            apply_tor_changes_to_batch_inplace(
+                aligned_batch, tor_agg, is_reverse_order=False)
+            for i in range(len(optimized.ligand.pos)):
+                pos_pred = aligned_batch.ligand.pos[i, :optimized.ligand.num_atoms[i]]
+                pos_true = optimized.ligand.pos[i, :optimized.ligand.num_atoms[i]]
 
-            rot, tr = find_rigid_alignment(pos_pred, pos_true)
-            tr_aligned[i] = tr
-            rot_aligned[i] = rot
+                rot, tr = find_rigid_alignment(pos_pred, pos_true)
+                tr_aligned[i] = tr
+                rot_aligned[i] = rot
 
-        apply_tr_rot_changes_to_batch_inplace(
-            aligned_batch, tr_aligned, rot_aligned)
-        tr_agg = tr_aligned
-        R_agg = rot_aligned
+            apply_tr_rot_changes_to_batch_inplace(
+                aligned_batch, tr_aligned, rot_aligned)
+            tr_agg = tr_aligned
+            R_agg = rot_aligned
 
         # Handle tr_agg_init_coord computation
         tr_agg_init_coord = torch.bmm(
-            tr_agg[:, None, :], optimized.original_augm_rot)
+            (tr_agg)[:, None, :], optimized.original_augm_rot)[:, 0]
 
         init_batch = copy.deepcopy(batch).to(device)
         init_batch.ligand.pos = optimized.ligand.pos.clone().to(device)
         transformed_orig = revert_augm(init_batch)
 
-        for i, name in enumerate(batch.names):
+        tr_true_init = torch.bmm((optimized.ligand.final_tr)[:, None, :], optimized.original_augm_rot)[:, 0]
+
+        all_names = batch.names
+        tor_true = optimized.ligand.final_tor.cpu().numpy()
+
+        compute_metrics = True
+        tor_pred = tor_agg.cpu().numpy()
+
+        for full_idx, name in enumerate(all_names):
+            batch_idx = full_idx % len(batch.names)
             complex_metrics = {}
-            complex_metrics['transformed_orig'] = transformed_orig[i,
-                                                                   :optimized.ligand.num_atoms[i]].cpu().numpy()
+            complex_metrics['orig_pos_before_augm'] = optimized.ligand.orig_pos_before_augm[batch_idx, :optimized.ligand.num_atoms[batch_idx]].cpu().numpy()
+            complex_metrics['transformed_orig'] = transformed_orig[full_idx, :optimized.ligand.num_atoms[batch_idx]].cpu().numpy()
 
             # Handle cases where aggregated values might be None
             if tr_agg is not None:
-                complex_metrics['tr_pred_init'] = tr_agg_init_coord[i].cpu(
-                ).numpy()
+                complex_metrics['tr_pred_init'] = tr_agg_init_coord[full_idx].cpu().numpy()
             else:
                 complex_metrics['tr_pred_init'] = np.zeros(3)
 
             if R_agg is not None:
-                complex_metrics['rot_pred'] = R_agg[i].cpu().numpy()
+                complex_metrics['rot_pred'] = R_agg[full_idx].cpu().numpy()
             else:
                 complex_metrics['rot_pred'] = np.eye(3)
-            complex_metrics['rot_augm'] = optimized.original_augm_rot[i].cpu(
-            ).numpy()
-            complex_metrics['full_protein_center'] = optimized.protein.full_protein_center[i].cpu(
-            ).numpy()
+            complex_metrics['rot_augm'] = optimized.original_augm_rot[batch_idx].cpu().numpy()
+            complex_metrics['full_protein_center'] = optimized.protein.full_protein_center[batch_idx].cpu().numpy()
+
+            # compute torsion angles
+            bond_properties_for_angles = {}
+            bond_properties_for_angles['start'] = optimized.ligand.rotatable_bonds_ext.start[batch_idx,
+                                                                                             :optimized.ligand.num_rotatable_bonds[batch_idx]]
+            bond_properties_for_angles['end'] = optimized.ligand.rotatable_bonds_ext.end[batch_idx,
+                                                                                         :optimized.ligand.num_rotatable_bonds[batch_idx]]
+            bond_properties_for_angles['neighbor_of_start'] = optimized.ligand.rotatable_bonds_ext.neighbor_of_start[batch_idx,
+                                                                                                                     :optimized.ligand.num_rotatable_bonds[batch_idx]]
+            bond_properties_for_angles['neighbor_of_end'] = optimized.ligand.rotatable_bonds_ext.neighbor_of_end[batch_idx,
+                                                                                                                 :optimized.ligand.num_rotatable_bonds[batch_idx]]
+            bond_properties_for_angles['bond_periods'] = optimized.ligand.rotatable_bonds_ext.bond_periods[batch_idx,
+                                                                                                           :optimized.ligand.num_rotatable_bonds[batch_idx]]
+
+            torsion_angles_pred = get_torsion_angles(torch.from_numpy(np.copy(complex_metrics['transformed_orig'])).to(device),
+                                                     bond_atoms_for_angles=bond_properties_for_angles)
+            complex_metrics['torsion_angles_pred'] = torsion_angles_pred.cpu().numpy()
+
             metrics_dict[name] = metrics_dict.get(name, []) + [complex_metrics]
-    return metrics_dict
-
-
-def scoring_inference(loader, model):
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    metrics_dict = {}
-    for batch in tqdm(loader, desc="Scoring"):
-        batch = batch['batch'].to(device)
-        with torch.no_grad():
-            rmsd_pred = model.forward_step(batch)
-            rmsd_pred = rmsd_pred[0]
-
-        scores = rmsd_pred
-
-        for i, (name, score) in enumerate(zip(batch.names, scores.cpu().numpy())):
-            metrics_dict[name] = metrics_dict.get(name, []) + [score]
     return metrics_dict

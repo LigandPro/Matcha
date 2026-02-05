@@ -11,6 +11,9 @@ cache_path: <path_to_cache>
 data_folder: <path_to_data>
 checkpoints_folder: <path_to_checkpoints>
 inference_results_folder: <path_to_inference_results>
+# Root directory for preprocessed protein structures used by GNINA affinity scripts.
+# Expected layout: {preprocessed_receptors_base}/{dataset}_{uid}/{dataset}_{uid}_protein.pdb
+preprocessed_receptors_base: <path_to_preprocessed_proteins>
 
 pdbbind_data_dir: <path_to_PDBBind_processed>
 dockgen_data_dir: <path_to_DockGen/processed_files>

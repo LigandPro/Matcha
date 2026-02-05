@@ -3,6 +3,7 @@
 
 from typing import Any, List, Optional, Tuple, Union
 import numpy as np
+from rdkit import Chem
 
 from spyrmsd import graph, molecule, qcp, utils, molecule
 
@@ -25,52 +26,6 @@ def time_limit(seconds):
         yield
     finally:
         signal.alarm(0)
-
-
-def compute_all_isomorphisms(rdkit_mol):
-    try:
-        with time_limit(2):
-            mol = molecule.Molecule.from_rdkit(rdkit_mol)
-            # Convert molecules to graphs
-            G1 = graph.graph_from_adjacency_matrix(
-                mol.adjacency_matrix, mol.atomicnums)
-
-            # Get all the possible graph isomorphisms
-            isomorphisms = graph.match_graphs(G1, G1)
-    except TimeoutException:
-        isomorphisms = [(list(range(rdkit_mol.GetNumAtoms())),
-                         list(range(rdkit_mol.GetNumAtoms())))]
-    return isomorphisms
-
-
-def get_symmetry_rmsd_with_isomorphisms(coords1, coords2, isomorphisms):
-    with time_limit(1):
-        assert coords1.shape == coords2.shape
-
-        n = coords1.shape[0]
-
-        # Minimum result
-        # Squared displacement (not minimize) or RMSD (minimize)
-        min_result = np.inf
-
-        # Loop over all graph isomorphisms to find the lowest RMSD
-        for idx1, idx2 in isomorphisms:
-            # Use the isomorphism to shuffle coordinates around (from original order)
-            c1i = coords1[idx1, :]
-            c2i = coords2[idx2, :]
-
-            # Compute square displacement
-            # Avoid dividing by n and an expensive sqrt() operation
-            result = np.sum((c1i - c2i) ** 2)
-
-            if result < min_result:
-                min_result = result
-
-        # Compute actual RMSD from square displacement
-        min_result = np.sqrt(min_result / n)
-
-        # Return the actual RMSD
-        return min_result
 
 
 def get_symmetry_rmsd(mol, coords1, coords2, mol2=None, return_permutation=False):

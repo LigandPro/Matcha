@@ -6,19 +6,15 @@ from omegaconf import OmegaConf
 from collections import defaultdict
 
 import numpy as np
-from rdkit.Chem import RemoveAllHs, rdMolAlign
+from rdkit.Chem import RemoveAllHs, SDWriter
 
 from matcha.utils.alignment import (filter_protein_chains_by_ligand_distance, align_to_binding_site,
                                     restore_atom_order, align_to_binding_site_by_pocket)
 from matcha.utils.preprocessing import read_molecule
-from matcha.utils.inference_utils import compute_metrics_all
 from matcha.utils.paths import get_protein_path, get_ligand_path, get_dataset_path
+from matcha.utils.log import get_logger
 
-
-def print_rmsd_stats(rmsds):
-    rmsds = np.array(rmsds)
-    print((rmsds < 2).mean(), (rmsds < 5).mean(),
-          (rmsds < 1000).mean(), len(rmsds))
+logger = get_logger(__name__)
 
 
 def process_single_prediction(ref_protein_path, ref_lig_path, pred_folder, uid, has_pred_proteins, tmp_folder):
@@ -60,26 +56,30 @@ def process_single_prediction(ref_protein_path, ref_lig_path, pred_folder, uid, 
         pred_mol = read_molecule(aligned_ligand_pdb)
         mol_true = read_molecule(ref_lig_path)
 
-        pred_mol = RemoveAllHs(pred_mol, sanitize=False)
-        mol_true = RemoveAllHs(mol_true, sanitize=False)
+        try:
+            pred_mol = RemoveAllHs(pred_mol, sanitize=True)
+        except Exception as e:
+            logger.error(f'Failed to remove hydrogens for predicted ligand {uid}: {e}')
+            pred_mol = RemoveAllHs(pred_mol, sanitize=False)
+
+        try:
+            mol_true = RemoveAllHs(mol_true, sanitize=True)
+        except Exception as e:
+            logger.error(f'Failed to remove hydrogens for true ligand {uid}: {e}')
+            mol_true = RemoveAllHs(mol_true, sanitize=False)
 
         pred_mol_restored = restore_atom_order(mol_true, pred_mol)
-        symm_rms = rdMolAlign.CalcRMS(pred_mol_restored, mol_true)
-
         shutil.rmtree(tmp_folder)
-
         pred_pos = pred_mol_restored.GetConformer().GetPositions()
 
     except Exception as e:
-        print(e)
-        print('failed', ref_lig_path)
-        symm_rms = 1000
+        logger.error(f'failed {ref_lig_path}: {e}')
         pred_pos = None
         pred_mol_restored = None
-    return symm_rms, pred_pos, pred_mol_restored
+    return pred_pos, pred_mol_restored
 
 
-def process_single_prediction_new_alignment(ref_protein_path, ref_lig_path, pred_folder, uid, has_pred_proteins, tmp_folder):
+def process_single_prediction_pocket_alignment(ref_protein_path, ref_lig_path, pred_folder, uid, has_pred_proteins, tmp_folder):
 
     try:
         tmp_folder = os.path.join(tmp_folder, uid)
@@ -101,7 +101,6 @@ def process_single_prediction_new_alignment(ref_protein_path, ref_lig_path, pred
         chain_ids_list = filter_protein_chains_by_ligand_distance(pred_protein_path, pred_ligand_path,
                                                                   pred_protein_path_cropped, return_all=True)
 
-        # if has_pred_proteins:
         best_rmsd = 10000
         best_chain = chain_ids_list[0]
         for chain_id in chain_ids_list:
@@ -122,7 +121,7 @@ def process_single_prediction_new_alignment(ref_protein_path, ref_lig_path, pred
                         tmp_folder, f"aligned_protein.pdb"),
                 )
             except Exception as e:
-                print(
+                logger.error(
                     f'Alignment failed for {uid} chain {chain_id} (out of {chain_ids_list})')
                 continue
             if pocket_rms < best_rmsd:
@@ -134,38 +133,57 @@ def process_single_prediction_new_alignment(ref_protein_path, ref_lig_path, pred
         pred_mol = read_molecule(aligned_ligand_pdb)
         mol_true = read_molecule(ref_lig_path)
 
-        pred_mol = RemoveAllHs(pred_mol, sanitize=False)
-        mol_true = RemoveAllHs(mol_true, sanitize=False)
+        try:
+            pred_mol = RemoveAllHs(pred_mol, sanitize=True)
+        except Exception as e:
+            logger.error(f'Failed to remove hydrogens for predicted ligand {uid}: {e}')
+            pred_mol = RemoveAllHs(pred_mol, sanitize=False)
+        
+        try:
+            mol_true = RemoveAllHs(mol_true, sanitize=True)
+        except Exception as e:
+            logger.error(f'Failed to remove hydrogens for true ligand {uid}: {e}')
+            mol_true = RemoveAllHs(mol_true, sanitize=False)
+
         pred_mol_restored = restore_atom_order(mol_true, pred_mol)
-        symm_rms = rdMolAlign.CalcRMS(pred_mol_restored, mol_true)
-
         shutil.rmtree(tmp_folder)
-
         pred_pos = pred_mol_restored.GetConformer().GetPositions()
 
     except Exception as e:
-        print(e)
-        print('failed', ref_lig_path)
-        symm_rms = 1000
+        logger.error(f'failed {ref_lig_path}: {e}')
         pred_pos = None
-    return symm_rms, pred_pos, pred_mol_restored
+        pred_mol_restored = None
+    return pred_pos, pred_mol_restored
 
 
-def process_all_predictions(preds_path, dataset_name, has_pred_proteins, alignment_type, tmp_folder):
+def process_all_predictions(preds_path, dataset_name, has_pred_proteins, 
+                            alignment_type, tmp_folder, method_path, conf):
     dataset_path = get_dataset_path(dataset_name, conf)
-    uids = os.listdir(dataset_path)
+    uids = os.listdir(preds_path)
+    if dataset_name == 'dockgen':
+        real_dataset_name = 'dockgen_full'
+    else:
+        real_dataset_name = dataset_name
+    best_preds_path = os.path.join(method_path, f'{real_dataset_name}_conf', 'best_base_predictions')
+    os.makedirs(best_preds_path, exist_ok=True)
 
     predicted_positions = defaultdict(dict)
-    for i, uid in enumerate(tqdm(uids, desc=f"Processing {len(uids)} complexes")):
+    for i, uid in enumerate(tqdm(uids, desc=f"Processing {dataset_name} ({len(uids)} complexes) for {os.path.basename(method_path)}")):
         if os.path.exists(os.path.join(preds_path, uid)):
             ref_protein_path = get_protein_path(
                 uid, dataset_name, dataset_path)
+
             ref_lig_path = get_ligand_path(uid, dataset_name, dataset_path)
+            if dataset_name == 'pdbbind':
+                mol_tmp = read_molecule(ref_lig_path, remove_hs=False, sanitize=True, strict=True)
+                if mol_tmp is None:
+                    ref_lig_path = ref_lig_path.replace('.mol2', '.sdf')
+                    logger.warning(f'Failed to read mol2 file {ref_lig_path}. Trying to read sdf file instead.')
 
             # parse top-1 prediction
             for conf_id in [0]:
                 if alignment_type == 'base':
-                    rmsd, pred_pos, pred_mol = process_single_prediction(
+                    pred_pos, pred_mol = process_single_prediction(
                         ref_protein_path=ref_protein_path,
                         ref_lig_path=ref_lig_path,
                         pred_folder=os.path.join(
@@ -175,7 +193,7 @@ def process_all_predictions(preds_path, dataset_name, has_pred_proteins, alignme
                         tmp_folder=tmp_folder,
                     )
                 elif alignment_type == 'pocket':
-                    rmsd, pred_pos, pred_mol = process_single_prediction_new_alignment(
+                    pred_pos, pred_mol = process_single_prediction_pocket_alignment(
                         ref_protein_path=ref_protein_path,
                         ref_lig_path=ref_lig_path,
                         pred_folder=os.path.join(
@@ -188,15 +206,21 @@ def process_all_predictions(preds_path, dataset_name, has_pred_proteins, alignme
                     raise ValueError(
                         f'Unknown alignment_type: {alignment_type}')
                 if pred_pos is not None:
-                    # res_dict = {
-                    #     'rmsd': rmsd,
-                    #     'transformed_orig': pred_pos,
-                    #     'confidence': conf_id,
-                    #     'full_protein_center': np.zeros(3),
-                    #     'pred_mol': pred_mol,
-                    #     'posebusters_filters_passed_count_fast': 0,
-                    # }
-                    # predicted_positions[f'{uid}_mol0'].append(res_dict)
+                    # Save aligned molecule to method_path folder
+                    aligned_mol_path = os.path.join(best_preds_path, f'{uid}.sdf')
+                    try:
+                        writer = SDWriter(str(aligned_mol_path))
+                        writer.write(pred_mol)
+                    except Exception as e:
+                        writer = SDWriter(str(aligned_mol_path))
+                        writer.SetKekulize(False)
+                        try:
+                            writer.write(pred_mol)
+                        except Exception as e:
+                            logger.error(f'Error processing {uid}: {e}')
+                            writer.close()
+                            continue
+                    writer.close()
 
                     new_sample = {
                         'error_estimate_0': 0,
@@ -207,7 +231,7 @@ def process_all_predictions(preds_path, dataset_name, has_pred_proteins, alignme
                     else:
                         predicted_positions[f'{uid}_mol0']['sample_metrics'].append(new_sample)
         else:
-            print('No prediction for', uid)
+            logger.error(f'No prediction for {uid}')
 
     return predicted_positions
 
@@ -225,7 +249,8 @@ def compute_aligned_rmsd_for_dataset(conf, initial_preds_path, methods_data, dat
             final_predictions_path = os.path.join(
                 method_path, f'{dataset_name}_final_preds_fast_metrics.npy')
 
-            os.makedirs(method_path, exist_ok=True)
+            logger.info(f"Processing {dataset_name} for {method_name} with {alignment_type} alignment (has_pred_proteins: {has_pred_proteins})")
+
             predicted_positions = process_all_predictions(
                 preds_path=os.path.join(
                     initial_preds_path, method_name, dataset_name),
@@ -233,6 +258,8 @@ def compute_aligned_rmsd_for_dataset(conf, initial_preds_path, methods_data, dat
                 has_pred_proteins=has_pred_proteins,
                 alignment_type=alignment_type,
                 tmp_folder=tmp_folder,
+                method_path=method_path,
+                conf=conf,
             )
             np.save(final_predictions_path, [predicted_positions])
             shutil.rmtree(tmp_folder)
@@ -259,15 +286,16 @@ if __name__ == '__main__':
         'af3': True,
         'diffdock': False,
     }
-    dataset_names = ['astex', 'dockgen', 'pdbbind', 'posebusters']
-    print('Computing aligned RMSD for', dataset_names,
-          'with', args.alignment_type, 'alignment')
-    print('Initial predictions path:', args.initial_preds_path)
-    print('Methods data:', methods_data)
-    run_names = compute_aligned_rmsd_for_dataset(
-        conf, args.initial_preds_path, methods_data, dataset_names, alignment_type=args.alignment_type)
-    print('Run names:', run_names)
+    dataset_names = ['astex', 'dockgen', 'pdbbind', 'posebusters']ё
 
-    conf.test_dataset_types = dataset_names
-    for run_name in run_names:
-        compute_metrics_all(conf, run_name)
+    logger.info(f'Computing aligned RMSD for {dataset_names} with {args.alignment_type} alignment')
+    logger.info(f'Initial predictions path: {args.initial_preds_path}')
+    logger.info(f'Methods data: {methods_data}')
+    run_names = compute_aligned_rmsd_for_dataset(
+        conf=conf,
+        initial_preds_path=args.initial_preds_path, 
+        methods_data=methods_data, 
+        dataset_names=dataset_names, 
+        alignment_type=args.alignment_type)
+    logger.info(f'Run names: {run_names}')
+
