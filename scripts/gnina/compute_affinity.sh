@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Usage: ./compute_affinity.sh [exp_name] [dataset_name] [--config <config_file>] [--paths-config <paths_config_file>] [--receptors-base <path>] [--gnina-script <path>] [--minimize] [--device <device_id>]
-#   exp_name: Experiment name (default: PIPELINE_stage2_synthAll_2995k)
+#   exp_name: Experiment name (default: Matcha_inference)
 #   dataset_name: Dataset name (default: astex)
 #   --config <config_file>: Path to experiment config file (optional)
 #   --paths-config <paths_config_file>: Path to paths config file (optional). Must set preprocessed_receptors_base there, or use --receptors-base.
@@ -10,13 +10,13 @@
 #   --minimize: Optional flag to minimize ligands and save to minimized_sdf_predictions
 #   --device <device_id>: GPU device ID for gnina (default: 0)
 #
-# Example: ./compute_affinity.sh PIPELINE_stage2_synthAll_2995k astex --config configs/default.yaml --paths-config configs/paths/paths.yaml
-# Example: ./compute_affinity.sh PIPELINE_stage2_synthAll_2995k astex --receptors-base /path/to/preprocessed_proteins
-# Example: ./compute_affinity.sh PIPELINE_stage2_synthAll_2995k astex --gnina-script /path/to/gnina.sh --minimize --device 1
+# Example: ./compute_affinity.sh Matcha_inference astex --config configs/default.yaml --paths-config configs/paths/paths.yaml
+# Example: ./compute_affinity.sh Matcha_inference astex --receptors-base /path/to/preprocessed_proteins
+# Example: ./compute_affinity.sh Matcha_inference astex --gnina-script /path/to/gnina.sh --minimize --device 1
 
 # Parse command-line arguments
 # Get positional arguments (exp_name and dataset_name)
-exp_name="${1:-PIPELINE_stage2_synthAll_2995k}"
+exp_name="${1:-Matcha_inference}"
 dataset_name="${2:-astex}"
 
 # Remove positional arguments, handling cases where they might not be provided
