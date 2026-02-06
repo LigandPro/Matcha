@@ -374,14 +374,19 @@ class PDBBind(Dataset):
             predicted_ligand_transforms_path, n_preds_to_use)
 
     def _set_predicted_ligand_transforms(self, predicted_ligand_transforms_path, n_preds_to_use):
+        if n_preds_to_use < 1:
+            raise ValueError(f"n_preds_to_use must be >= 1, got {n_preds_to_use}")
 
         self.predicted_ligand_transforms = np.load(
             predicted_ligand_transforms_path, allow_pickle=True)[0]
         self.n_repeats = 1
+        self.complexes = [
+            c for c in self.complexes if c.name in self.predicted_ligand_transforms]
+        if not self.complexes:
+            raise ValueError(
+                f"No complexes found in predicted transforms from {predicted_ligand_transforms_path}")
         n_preds_to_use_real = min(n_preds_to_use, len(
             self.predicted_ligand_transforms[self.complexes[0].name]))
-        self.complexes = [
-            complex for complex in self.complexes if complex.name in self.predicted_ligand_transforms]
 
         # initialize extended complexes
         extended_complexes = []
