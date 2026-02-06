@@ -258,6 +258,10 @@ def run_matcha(
     if (ligand is None) == (ligand_dir is None):
         _print_usage_and_exit()
 
+    if n_samples < 1:
+        console.print("[bold red]Error:[/bold red] --n-samples must be >= 1")
+        raise typer.Exit(code=1)
+
     if gpu is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
 
