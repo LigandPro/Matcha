@@ -728,10 +728,12 @@ class PDBBindWithSortedBatching(Dataset):
             if (len(cur_batch) + 1) * cur_len <= batch_limit:
                 cur_batch.append(real_ind)
             else:
-                batch_indices.append(cur_batch)
+                if cur_batch:
+                    batch_indices.append(cur_batch)
                 cur_batch = [real_ind]
 
-        batch_indices.append(cur_batch)
+        if cur_batch:
+            batch_indices.append(cur_batch)
         return batch_indices
 
     def _form_batches(self, batch_limit):
