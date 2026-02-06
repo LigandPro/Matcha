@@ -10,10 +10,10 @@
 #   --device <device_id>: GPU device ID for gnina (default: 0)
 #   dataset1, dataset2, ...: List of dataset names to process (optional, defaults to: astex pdbbind posebusters)
 #
-# Example: ./compute_affinity_batch.sh PIPELINE_stage2_synthAll_2995k
-# Example: ./compute_affinity_batch.sh PIPELINE_stage2_synthAll_2995k astex posebusters
-# Example: ./compute_affinity_batch.sh PIPELINE_stage2_synthAll_2995k --config configs/default.yaml --paths-config configs/paths/paths.yaml --minimize
-# Example: ./compute_affinity_batch.sh PIPELINE_stage2_synthAll_2995k --gnina-script /path/to/gnina.sh --device 1
+# Example: ./compute_affinity_batch.sh Matcha_inference
+# Example: ./compute_affinity_batch.sh Matcha_inference astex posebusters
+# Example: ./compute_affinity_batch.sh Matcha_inference --config configs/default.yaml --paths-config configs/paths/paths.yaml --minimize
+# Example: ./compute_affinity_batch.sh Matcha_inference --gnina-script /path/to/gnina.sh --device 1
 
 # Get the directory where this script is located
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,10 +26,10 @@ DEFAULT_DATASETS=("astex" "pdbbind" "posebusters")
 if [ $# -lt 1 ]; then
     echo "Error: Missing required argument: exp_name"
     echo "Usage: $0 <exp_name> [--minimize] [--device <device_id>] [dataset1] [dataset2] [dataset3] ..."
-    echo "Example: $0 PIPELINE_stage2_synthAll_2995k"
-    echo "Example: $0 PIPELINE_stage2_synthAll_2995k astex posebusters"
-    echo "Example: $0 PIPELINE_stage2_synthAll_2995k --minimize"
-    echo "Example: $0 PIPELINE_stage2_synthAll_2995k --device 1"
+    echo "Example: $0 Matcha_inference"
+    echo "Example: $0 Matcha_inference astex posebusters"
+    echo "Example: $0 Matcha_inference --minimize"
+    echo "Example: $0 Matcha_inference --device 1"
     exit 1
 fi
 

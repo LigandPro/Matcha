@@ -98,7 +98,7 @@ def main():
     for module in docking_modules:
         model = MatchaModel(**module['model_kwargs'], conf=conf)
         model = load_from_checkpoint(model, os.path.join(
-            conf.results_folder, module['model_path']))
+            conf.checkpoints_folder, module['model_path']))
         model.to(device)
         model.eval()
         module['model'] = model

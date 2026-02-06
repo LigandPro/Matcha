@@ -45,22 +45,22 @@ def get_datasets(conf, splits,
             val_split_path = None
             if dataset_type == 'pdbbind' or dataset_type == 'pdbbind_conf':
                 data_dir = conf.pdbbind_data_dir
-                train_split_path = conf.pdbbind_split_train
-                val_split_path = conf.pdbbind_split_val
-                test_split_path = conf.pdbbind_split_test
+                train_split_path = conf.get('pdbbind_split_train', None)
+                val_split_path = conf.get('pdbbind_split_val', None)
+                test_split_path = conf.get('pdbbind_split_test', None)
             elif dataset_type == 'dockgen' or dataset_type == 'dockgen_full' or dataset_type == 'dockgen_full_conf':
                 data_dir = conf.dockgen_data_dir
-                val_split_path = conf.dockgen_split_val
+                val_split_path = conf.get('dockgen_split_val', None)
                 if dataset_type == 'dockgen_full' or dataset_type == 'dockgen_full_conf':
-                    test_split_path = conf.dockgen_split_test_full
+                    test_split_path = conf.get('dockgen_split_test_full', None)
                 else:
-                    test_split_path = conf.dockgen_split_test
+                    test_split_path = conf.get('dockgen_split_test', None)
             elif dataset_type.startswith('posebusters'):
                 data_dir = conf.posebusters_data_dir
-                test_split_path = conf.posebusters_split_test
+                test_split_path = conf.get('posebusters_split_test', None)
             elif dataset_type.startswith('astex'):
                 data_dir = conf.astex_data_dir
-                test_split_path = conf.astex_split_test
+                test_split_path = conf.get('astex_split_test', None)
             elif dataset_type.startswith('any'):
                 data_dir = conf.any_data_dir
             else:

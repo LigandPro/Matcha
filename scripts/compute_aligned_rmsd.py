@@ -286,7 +286,7 @@ if __name__ == '__main__':
         'af3': True,
         'diffdock': False,
     }
-    dataset_names = ['astex', 'dockgen', 'pdbbind', 'posebusters']ё
+    dataset_names = ['astex', 'dockgen', 'pdbbind', 'posebusters']
 
     logger.info(f'Computing aligned RMSD for {dataset_names} with {args.alignment_type} alignment')
     logger.info(f'Initial predictions path: {args.initial_preds_path}')
