@@ -50,11 +50,11 @@ dev = [
 matcha = "matcha.cli:main"
 
 [build-system]
-requires = ["setuptools>=61.0"]
-build-backend = "setuptools.build_meta"
+requires = ["uv_build>=0.9.18,<0.10.0"]
+build-backend = "uv_build"
 
-[tool.setuptools.packages.find]
-include = ["matcha*"]
+[tool.uv.build-backend]
+module-root = ""
 
 [tool.ruff]
 line-length = 100
