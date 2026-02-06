@@ -1,4 +1,5 @@
 import os
+import time
 from tqdm import tqdm
 import numpy as np
 from pathlib import Path
@@ -250,8 +251,10 @@ def compute_fast_filters_from_sdf(conf, inference_run_name, sdf_type='base', n_p
         logger.info(f"Computing filters for {dataset_name} from {sdf_folder}")
         
         # Create uid -> protein data mapping from cached dataset
+        # PDBBindWithSortedBatching wraps the actual dataset in .dataset
         uid_to_data = {}
-        for data in dataset.complexes:
+        inner = dataset.dataset if hasattr(dataset, 'dataset') else dataset
+        for data in inner.complexes:
             name, conf_num = data.name.split('_conf')
             if conf_num == '0':
                 uid_to_data[name.split('_mol')[0]] = data
@@ -346,21 +349,173 @@ def compute_fast_filters_from_sdf(conf, inference_run_name, sdf_type='base', n_p
         logger.info(f"Successfully processed {len(filters_results)} UIDs for {dataset_name}")
 
 
-# Stubs for CLI compatibility (v1 pipeline). In v2 use scripts instead.
-def run_inference_pipeline(conf, run_name, n_preds_to_use, pocket_centers_filename=None,
-                           docking_batch_limit=15000, scoring_batch_size=4):
-    raise NotImplementedError(
-        "Matcha v2: for inference use scripts/run_inference_pipeline.py and scripts/full_inference.py. See README."
-    )
+def run_v2_inference_pipeline(
+    conf,
+    run_name,
+    n_preds_to_use,
+    pocket_centers_filename=None,
+    docking_batch_limit=15000,
+    num_workers=0,
+    progress_callback=None,
+):
+    """Run the full v2 3-stage inference pipeline.
 
+    Replaces the v1 ``run_inference_pipeline``, ``compute_fast_filters`` and
+    ``save_best_pred_to_sdf`` stubs with a single entry-point used by both
+    CLI and TUI.
 
-def compute_fast_filters(conf, inference_run_name, n_preds_to_use):
-    raise NotImplementedError(
-        "Matcha v2: use scripts/fast_filters_from_sdf.py and scripts/final_inference_pipeline.sh. See README."
-    )
+    Args:
+        conf: OmegaConf config (must contain v2 fields such as ``results_folder``).
+        run_name: Name of the inference run (folder under ``inference_results_folder``).
+        n_preds_to_use: Number of pose samples to generate per ligand.
+        pocket_centers_filename: Optional path to precomputed pocket centres (skip stage 1).
+        docking_batch_limit: Token budget per batch.
+        num_workers: DataLoader workers (0 = main-process; safer for TUI).
+        progress_callback: ``fn(event_type, stage, name, elapsed, progress)`` for UI updates.
+    """
+    from torch.utils.data import DataLoader
+    from matcha.models import MatchaModel
+    from matcha.utils.inference import euler, load_from_checkpoint, run_evaluation
+    from matcha.utils.metrics import construct_output_dict
+    from matcha.dataset.pdbbind import complex_collate_fn, dummy_ranking_collate_fn
 
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.multiprocessing.set_sharing_strategy('file_system')
+    torch.manual_seed(conf.seed)
 
-def save_best_pred_to_sdf(conf, inference_run_name):
-    raise NotImplementedError(
-        "Matcha v2: use scripts/gnina/select_top_gnina_poses.py and scripts/final_inference_pipeline.sh. See README."
-    )
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    num_steps = 10
+
+    conf.batch_limit = docking_batch_limit
+
+    # v2 3-stage pipeline definition (no scoring model)
+    pipeline = {
+        'docking': [
+            {
+                'model_path': 'matcha_pipeline/stage1/',
+                'model_kwargs': {},
+                'dataset_kwargs': {'n_preds_to_use': n_preds_to_use},
+            },
+            {
+                'model_path': 'matcha_pipeline/stage2/',
+                'model_kwargs': {'use_qk_bias': False},
+                'dataset_kwargs': {'n_preds_to_use': n_preds_to_use},
+            },
+            {
+                'model_path': 'matcha_pipeline/stage3/',
+                'model_kwargs': {},
+                'dataset_kwargs': {'use_predicted_tr_only': False, 'n_preds_to_use': n_preds_to_use},
+            },
+        ],
+    }
+
+    # Save pipeline config
+    os.makedirs(os.path.join(conf.inference_results_folder, run_name), exist_ok=True)
+    with open(os.path.join(conf.inference_results_folder, run_name, 'config.json'), 'w') as f:
+        json.dump(pipeline, f)
+
+    # Load all stage models
+    docking_modules = pipeline['docking']
+    for module in docking_modules:
+        model = MatchaModel(**module['model_kwargs'], conf=conf)
+        model = load_from_checkpoint(model, os.path.join(
+            conf.results_folder, module['model_path']))
+        model.to(device)
+        model.eval()
+        module['model'] = model
+
+    logger.info(f"Starting v2 inference pipeline: {run_name}")
+    logger.info(f"Generating {n_preds_to_use} samples per ligand, num_steps={num_steps}")
+
+    def get_dataloader_docking(dataset):
+        return DataLoader(
+            dataset, batch_size=1, shuffle=False,
+            prefetch_factor=2 if num_workers > 0 else None,
+            collate_fn=dummy_ranking_collate_fn,
+            num_workers=num_workers,
+        )
+
+    dataset_names = conf.test_dataset_types
+
+    for dataset_name in dataset_names:
+        predicted_ligand_transforms_path = None
+
+        conf.use_sorted_batching = True
+        conf.test_dataset_types = [dataset_name]
+        test_dataset_docking = get_datasets(
+            conf, splits=['test'],
+            predicted_ligand_transforms_path=predicted_ligand_transforms_path,
+            is_train_dataset=False,
+            complex_collate_fn=complex_collate_fn,
+            stage_num=1,
+            n_preds_to_use=n_preds_to_use,
+        )['test']
+        logger.info({ds_name: len(ds) for ds_name, ds in test_dataset_docking.items()})
+        test_dataset_docking = test_dataset_docking[dataset_name]
+
+        for stage_idx in [0, 1, 2]:
+            if pocket_centers_filename is not None and stage_idx == 0:
+                predicted_ligand_transforms_path = str(pocket_centers_filename)
+                logger.info(f'Skipping stage 1, using pocket centers from {pocket_centers_filename}')
+                continue
+
+            module = pipeline['docking'][min(stage_idx, len(pipeline['docking']) - 1)]
+            model = module['model']
+            model.to(device)
+            logger.info(f"Stage {stage_idx + 1}, transforms path: {predicted_ligand_transforms_path}")
+
+            test_dataset_docking.stage_num = stage_idx + 1
+
+            stage_names = ['Translation (R³)', 'Rotation (SO(3))', 'Torsion (SO(2))']
+            if progress_callback is not None:
+                progress_callback('stage_start', f'stage{stage_idx + 1}', stage_names[stage_idx], None, None)
+
+            if predicted_ligand_transforms_path is not None:
+                use_predicted_tr_only = docking_modules[stage_idx]['dataset_kwargs'].get('use_predicted_tr_only', True)
+                test_dataset_docking.dataset.use_predicted_tr_only = use_predicted_tr_only
+                test_dataset_docking.reset_predicted_ligand_transforms(
+                    predicted_ligand_transforms_path, n_preds_to_use)
+
+            test_loader = get_dataloader_docking(test_dataset_docking)
+            stage_start_time = time.time()
+            metrics = run_evaluation(
+                test_loader, num_steps=num_steps, solver=euler, model=model,
+                progress_callback=progress_callback, current_stage=f'stage{stage_idx + 1}')
+            stage_elapsed = time.time() - stage_start_time
+
+            # Save stage results
+            predicted_ligand_transforms_path = os.path.join(
+                conf.inference_results_folder, run_name, f'stage{stage_idx+1}_{dataset_name}.npy')
+            np.save(predicted_ligand_transforms_path, [metrics])
+            logger.info(f"Saved stage {stage_idx+1} metrics to {predicted_ligand_transforms_path}")
+
+            if progress_callback is not None:
+                progress_callback('stage_done', f'stage{stage_idx + 1}', None, stage_elapsed, None)
+
+            # Build per-stage output dict
+            updated_metrics = construct_output_dict(metrics, test_dataset_docking.dataset)
+            final_metrics_path = os.path.join(
+                conf.inference_results_folder, run_name, f'{dataset_name}_final_preds_{stage_idx + 1}stage.npy')
+            np.save(final_metrics_path, [updated_metrics])
+
+        # Save final predictions (last stage)
+        final_preds_path = os.path.join(
+            conf.inference_results_folder, run_name, f'{dataset_name}_final_preds.npy')
+        np.save(final_preds_path, [updated_metrics])
+        logger.info(f"Saved final predictions to {final_preds_path}")
+
+    # Save all predictions to SDF
+    if progress_callback is not None:
+        progress_callback('stage_start', 'sdf_save', 'Saving predictions to SDF', None, None)
+    sdf_start = time.time()
+    save_all_to_sdf(conf, run_name, one_file=True)
+    if progress_callback is not None:
+        progress_callback('stage_done', 'sdf_save', None, time.time() - sdf_start, None)
+
+    # Compute PoseBusters fast filters from SDF
+    if progress_callback is not None:
+        progress_callback('stage_start', 'posebusters', 'Physical validation', None, None)
+    pb_start = time.time()
+    compute_fast_filters_from_sdf(conf, run_name, n_preds_to_use=n_preds_to_use)
+    if progress_callback is not None:
+        progress_callback('stage_done', 'posebusters', None, time.time() - pb_start, None)
