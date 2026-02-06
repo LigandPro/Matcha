@@ -94,10 +94,6 @@ def setup_logging():
     logging.getLogger('transformers').setLevel(logging.WARNING)
     logging.getLogger('posebusters.posebusters').setLevel(logging.WARNING)
     
-    # Silence wandb and git (wandb auto-initializes when installed, even if not used)
-    logging.getLogger('wandb').setLevel(logging.WARNING)
-    logging.getLogger('wandb.docker').setLevel(logging.WARNING)
-    logging.getLogger('wandb.docker.auth').setLevel(logging.CRITICAL)
     logging.getLogger('git').setLevel(logging.WARNING)
     logging.getLogger('git.cmd').setLevel(logging.CRITICAL)
     
