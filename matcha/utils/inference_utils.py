@@ -77,7 +77,6 @@ def get_data_for_buster(preds, dataset_data_dir, dataset_name, use_all_samples=F
             for sample in samples:
                 pred_new = {
                     'transformed_orig': sample['pred_pos'],
-                    'error_estimate_0': sample['error_estimate_0'],
                     'true_pos': true_pos,
                     'orig_mol': orig_mol,
                     'full_protein_center': np.zeros(3),
@@ -88,15 +87,12 @@ def get_data_for_buster(preds, dataset_data_dir, dataset_name, use_all_samples=F
             pb_passed_count = np.array(
                 [sample.get('posebusters_filters_passed_count_fast', 0) for sample in samples])
             best_pb_count = max(pb_passed_count)
-            samples = [sample for sample in samples
+            best_samples = [sample for sample in samples
                     if sample.get('posebusters_filters_passed_count_fast', 0) == best_pb_count]
-            scores = [sample['error_estimate_0'] for sample in samples]
-            best_score_idx = np.argmin(scores)
-            best_sample = samples[best_score_idx]
+            best_sample = best_samples[0]
 
             pred_new = {
                 'transformed_orig': best_sample['pred_pos'],
-                'error_estimate_0': best_sample['error_estimate_0'],
                 'true_pos': true_pos,
                 'orig_mol': orig_mol,
                 'full_protein_center': np.zeros(3),
@@ -379,11 +375,13 @@ def run_v2_inference_pipeline(
     from matcha.utils.metrics import construct_output_dict
     from matcha.dataset.pdbbind import complex_collate_fn, dummy_ranking_collate_fn
 
-    torch.backends.cuda.matmul.allow_tf32 = False
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = False
     torch.multiprocessing.set_sharing_strategy('file_system')
     torch.manual_seed(conf.seed)
 
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    from matcha.utils.device import resolve_device
+    device = resolve_device()
     num_steps = 10
 
     conf.batch_limit = docking_batch_limit

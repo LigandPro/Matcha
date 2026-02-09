@@ -87,7 +87,8 @@ def get_embeddings_residue(tokens, esm_model, device):
     with torch.no_grad():
         for i, batch in enumerate(tqdm(tokens, desc='Computing ESM embeddings')):
             if not i % 1000 and i != 0:
-                torch.cuda.empty_cache()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
                 gc.collect()
             batch = torch.tensor(batch).to(device)
             batch = batch[None, :]
@@ -129,7 +130,8 @@ def save_dataset_embeddings(dataset_sequence_path, save_emb_path, model, tokeniz
 def compute_esm_embeddings(conf, model_type='hf_esm_12'):
     reduce_to_unique_sequences = False
 
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+    from matcha.utils.device import resolve_device
+    device = torch.device(resolve_device())
     logger.info(f'Available device: {device}')
 
     if model_type == 'hf_esm_6':
