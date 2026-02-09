@@ -63,25 +63,24 @@ def run_evaluation(dataloader, num_steps, solver, model, progress_callback=None,
     def revert_augm(batch):
         batch.ligand.pos[:] = torch.einsum(
             'bij,bjk->bik', batch.ligand.pos, batch.original_augm_rot)
-        for batch_idx, num_atoms in enumerate(batch.ligand.num_atoms):
-            batch.ligand.pos[batch_idx, num_atoms:] = 0.
+        for idx, num_atoms in enumerate(batch.ligand.num_atoms):
+            batch.ligand.pos[idx, num_atoms:] = 0.
         return batch.ligand.pos
 
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    from matcha.utils.device import resolve_device
+    device = resolve_device()
     metrics_dict = {}
     total_batches = len(dataloader)
-    for batch_idx, batch in enumerate(tqdm(dataloader, desc="Docking inference")):
+    for loader_idx, batch in enumerate(tqdm(dataloader, desc="Docking inference")):
         batch = batch['batch']
         batch_size = len(batch)
         optimized, tr_agg, R_agg, tor_agg, pos_hist, _ = solver(
             model, batch, device=device, num_steps=num_steps)
 
-        # compute RMSD in case of zero-padded batches
-        num_batch_atoms = (~batch.ligand.is_padded_mask).sum(dim=1).to(device)
-        for batch_idx, num_atoms in enumerate(optimized.ligand.num_atoms):
-            optimized.ligand.pos[batch_idx, num_atoms:] = 0.
+        for elem_idx, num_atoms in enumerate(optimized.ligand.num_atoms):
+            optimized.ligand.pos[elem_idx, num_atoms:] = 0.
             for i in range(len(pos_hist)):
-                pos_hist[i][batch_idx, num_atoms:] = 0.
+                pos_hist[i][elem_idx, num_atoms:] = 0.
 
         # Handle cases where solver returns None for aggregated values
         if tr_agg is None or R_agg is None or tor_agg is None:
@@ -119,19 +118,13 @@ def run_evaluation(dataloader, num_steps, solver, model, progress_callback=None,
         init_batch.ligand.pos = optimized.ligand.pos.clone().to(device)
         transformed_orig = revert_augm(init_batch)
 
-        tr_true_init = torch.bmm((optimized.ligand.final_tr)[:, None, :], optimized.original_augm_rot)[:, 0]
-
         all_names = batch.names
-        tor_true = optimized.ligand.final_tor.cpu().numpy()
-
-        compute_metrics = True
-        tor_pred = tor_agg.cpu().numpy()
 
         for full_idx, name in enumerate(all_names):
-            batch_idx = full_idx % len(batch.names)
+            sample_idx = full_idx % len(batch.names)
             complex_metrics = {}
-            complex_metrics['orig_pos_before_augm'] = optimized.ligand.orig_pos_before_augm[batch_idx, :optimized.ligand.num_atoms[batch_idx]].cpu().numpy()
-            complex_metrics['transformed_orig'] = transformed_orig[full_idx, :optimized.ligand.num_atoms[batch_idx]].cpu().numpy()
+            complex_metrics['orig_pos_before_augm'] = optimized.ligand.orig_pos_before_augm[sample_idx, :optimized.ligand.num_atoms[sample_idx]].cpu().numpy()
+            complex_metrics['transformed_orig'] = transformed_orig[full_idx, :optimized.ligand.num_atoms[sample_idx]].cpu().numpy()
 
             # Handle cases where aggregated values might be None
             if tr_agg is not None:
@@ -143,21 +136,21 @@ def run_evaluation(dataloader, num_steps, solver, model, progress_callback=None,
                 complex_metrics['rot_pred'] = R_agg[full_idx].cpu().numpy()
             else:
                 complex_metrics['rot_pred'] = np.eye(3)
-            complex_metrics['rot_augm'] = optimized.original_augm_rot[batch_idx].cpu().numpy()
-            complex_metrics['full_protein_center'] = optimized.protein.full_protein_center[batch_idx].cpu().numpy()
+            complex_metrics['rot_augm'] = optimized.original_augm_rot[sample_idx].cpu().numpy()
+            complex_metrics['full_protein_center'] = optimized.protein.full_protein_center[sample_idx].cpu().numpy()
 
             # compute torsion angles
             bond_properties_for_angles = {}
-            bond_properties_for_angles['start'] = optimized.ligand.rotatable_bonds_ext.start[batch_idx,
-                                                                                             :optimized.ligand.num_rotatable_bonds[batch_idx]]
-            bond_properties_for_angles['end'] = optimized.ligand.rotatable_bonds_ext.end[batch_idx,
-                                                                                         :optimized.ligand.num_rotatable_bonds[batch_idx]]
-            bond_properties_for_angles['neighbor_of_start'] = optimized.ligand.rotatable_bonds_ext.neighbor_of_start[batch_idx,
-                                                                                                                     :optimized.ligand.num_rotatable_bonds[batch_idx]]
-            bond_properties_for_angles['neighbor_of_end'] = optimized.ligand.rotatable_bonds_ext.neighbor_of_end[batch_idx,
-                                                                                                                 :optimized.ligand.num_rotatable_bonds[batch_idx]]
-            bond_properties_for_angles['bond_periods'] = optimized.ligand.rotatable_bonds_ext.bond_periods[batch_idx,
-                                                                                                           :optimized.ligand.num_rotatable_bonds[batch_idx]]
+            bond_properties_for_angles['start'] = optimized.ligand.rotatable_bonds_ext.start[sample_idx,
+                                                                                             :optimized.ligand.num_rotatable_bonds[sample_idx]]
+            bond_properties_for_angles['end'] = optimized.ligand.rotatable_bonds_ext.end[sample_idx,
+                                                                                         :optimized.ligand.num_rotatable_bonds[sample_idx]]
+            bond_properties_for_angles['neighbor_of_start'] = optimized.ligand.rotatable_bonds_ext.neighbor_of_start[sample_idx,
+                                                                                                                     :optimized.ligand.num_rotatable_bonds[sample_idx]]
+            bond_properties_for_angles['neighbor_of_end'] = optimized.ligand.rotatable_bonds_ext.neighbor_of_end[sample_idx,
+                                                                                                                 :optimized.ligand.num_rotatable_bonds[sample_idx]]
+            bond_properties_for_angles['bond_periods'] = optimized.ligand.rotatable_bonds_ext.bond_periods[sample_idx,
+                                                                                                           :optimized.ligand.num_rotatable_bonds[sample_idx]]
 
             torsion_angles_pred = get_torsion_angles(torch.from_numpy(np.copy(complex_metrics['transformed_orig'])).to(device),
                                                      bond_atoms_for_angles=bond_properties_for_angles)
@@ -167,7 +160,7 @@ def run_evaluation(dataloader, num_steps, solver, model, progress_callback=None,
 
         # Update progress for TUI
         if progress_callback is not None and current_stage is not None:
-            progress_percent = int((batch_idx + 1) / total_batches * 100)
+            progress_percent = int((loader_idx + 1) / total_batches * 100)
             progress_callback('stage_progress', current_stage, None, None, progress_percent)
 
     return metrics_dict
