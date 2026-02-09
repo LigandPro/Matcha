@@ -2,13 +2,9 @@
 
 This is an official implementation of the paper [Matcha: Multi-Stage Riemannian Flow Matching for Accurate and Physically Valid Molecular Docking](https://arxiv.org/abs/2510.14586).
 
-## News
-
-We have updated the repository and the [Hugging Face checkpoints](https://huggingface.co/LigandPro/Matcha): the current code and weights correspond to the improved pipeline and **much better results**! The previous version, however, remains available as tag `v1` (`git checkout v1`).
-
 ## Overview
 
-Matcha is a molecular docking pipeline that combines multi-stage flow matching with learned scoring and physical validity filtering. Our approach consists of three sequential stages applied consecutively to progressively refine docking predictions, each implemented as a flow matching model operating on appropriate geometric spaces (R³, SO(3), and SO(2)). We enhance the prediction quality through a dedicated scoring model and apply unsupervised physical validity filters to eliminate unrealistic poses.
+Matcha is a molecular docking pipeline that combines multi-stage flow matching with physical validity filtering. It consists of three sequential stages that progressively refine docking predictions, each implemented as a flow matching model operating on appropriate geometric spaces (R³, SO(3), and SO(2)). Physical validity filters eliminate unrealistic poses, and optional GNINA scoring ranks final predictions.
 
 ![pipeline](data/img/matcha_pipeline.png)
 ![architecture](data/img/matcha_architecture.png)
@@ -49,7 +45,7 @@ pip install -e .
 
 ## CLI usage <a name="cli"></a>
 
-The `matcha` CLI wraps the full v2 inference pipeline (ESM embeddings, 3-stage docking, PoseBusters filtering) with optional GNINA scoring into a single command.
+The `matcha` CLI wraps the full inference pipeline (ESM embeddings, 3-stage docking, PoseBusters filtering) with optional GNINA scoring into a single command.
 
 ### Single ligand
 
