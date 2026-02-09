@@ -27,7 +27,6 @@ def construct_output_dict(preds, dataset):
         for pred in preds_list:
             sample = {
                 'pred_pos': pred['transformed_orig'] + pred['full_protein_center'].reshape(1, 3),
-                'error_estimate_0': pred.get('error_estimate_0', 0),
             }
             samples.append(sample)
         output_dict[uid_real]['sample_metrics'].extend(samples)

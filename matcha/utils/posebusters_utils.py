@@ -194,7 +194,8 @@ def check_intermolecular_distance(  # noqa: PLR0913
     Returns:
         PoseBusters results dictionary.
     """
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    from matcha.utils.device import resolve_device
+    device = resolve_device()
     # [n_preds, n_lig_atoms, 3]
     coords_ligand = torch.tensor(pos_pred, device=device).float()
     coords_protein = torch.tensor(
@@ -435,14 +436,11 @@ def check_geometry(  # noqa: PLR0913, PLR0915
 def calc_posebusters(pos_pred, pos_cond, atom_ids_pred, atom_names_cond, names, lig_mol_for_posebusters):
     atom_ids_list = allowable_features['possible_atomic_num_list']
     if 22 in atom_ids_pred:
-        with open("error.txt", "a") as f:
-            f.write(f"Error in {names}\n")
-            f.write(f"22 (misc) in atom_ids_pred\n")
+        logger.error(f"Error in {names}: 22 (misc) in atom_ids_pred")
         return None
     atom_names_pred = np.array([_periodic_table.GetElementSymbol(
         atom_ids_list[atom_id]) for atom_id in atom_ids_pred if atom_id >= 0], dtype=object)
 
-    posebusters_results = {}
     try:
         assert len(pos_pred[0]) == len(
             atom_names_pred), f"len(pos_pred[i]) = {len(pos_pred[0])} != len(atom_names_pred[i]) = {len(atom_names_pred)}"
@@ -451,9 +449,6 @@ def calc_posebusters(pos_pred, pos_cond, atom_ids_pred, atom_names_cond, names, 
     except Exception as e:
         logger.error(f"Error in {names}: {e}")
         return None
-    res1 = check_intermolecular_distance(
+    result = check_intermolecular_distance(
         lig_mol_for_posebusters, pos_pred, pos_cond, atom_names_pred, atom_names_cond)
-    res = {**res1['results']}
-    for key in res.keys():
-        posebusters_results[key] = res[key]
-    return posebusters_results
+    return result['results']

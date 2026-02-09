@@ -20,7 +20,7 @@ Compared to various approaches, Matcha demonstrates superior performance on Aste
 ## Content
 
 - [Installation](#install)
-<!-- - [CLI usage](#cli) -->
+- [CLI usage](#cli)
 - [Datasets](#datasets)
   - [Existing datasets](#exist_datasets)
   - [Adding new dataset](#new_datasets)
@@ -47,23 +47,51 @@ Or with pip:
 pip install -e .
 ```
 
-<!-- ## CLI usage <a name="cli"></a>
+## CLI usage <a name="cli"></a>
 
-The recommended way to run inference is via scripts (`full_inference.py`, `final_inference_pipeline.sh`). The `matcha` CLI is kept for compatibility but delegates to the same pipeline; for single-run inference use the scripts below.
+The `matcha` CLI wraps the full v2 inference pipeline (ESM embeddings, 3-stage docking, PoseBusters filtering) with optional GNINA scoring into a single command.
 
-Run single ligand:
+### Single ligand
 
-```
-uv run matcha -r protein.pdb -l ligand.sdf -o results/ --gpu 0 [--run-name name]
-```
-
-Run batch (multi-ligand file or directory):
-
-```
-uv run matcha -r protein.pdb --ligand-dir ligands.sdf -o results/ --run-name batch --gpu 0
+```bash
+uv run matcha -r protein.pdb -l ligand.sdf -o results/
 ```
 
-Search space options: manual box (`--center-x/--center-y/--center-z`), autobox (`--autobox-ligand ref.sdf`), or blind docking if none provided. -->
+### Batch mode (multi-ligand file or directory)
+
+```bash
+uv run matcha -r protein.pdb --ligand-dir ligands.sdf -o results/
+```
+
+All molecules are processed in a single pipeline pass (native batching).
+
+### Key options
+
+| Flag | Description |
+|------|-------------|
+| `-r`, `--receptor` | Protein structure (`.pdb`) |
+| `-l`, `--ligand` | Single ligand (`.sdf`/`.mol`/`.mol2`/`.pdb`) |
+| `--ligand-dir` | Multi-ligand `.sdf` file or directory |
+| `-o`, `--out` | Output directory |
+| `-g`, `--device` | `auto`, `cpu`, `cuda`, `cuda:N`, or `mps` (Apple Metal) |
+| `--n-samples` | Poses per ligand (default: 40) |
+| `--scorer` | `gnina` (default), `custom`, or `none` |
+| `--scorer-minimize` / `--no-scorer-minimize` | GNINA minimization (default: on) |
+| `--autobox-ligand` | Box center from reference ligand |
+| `--center-x/y/z` | Manual box center (Å) |
+| `--overwrite` | Overwrite existing run |
+
+Run `matcha --help` for the full list.
+
+### Search space
+
+- **Blind docking** (default): searches the entire protein surface.
+- **Autobox**: `--autobox-ligand ref.sdf` — centers the search on a reference ligand.
+- **Manual box**: `--center-x X --center-y Y --center-z Z` — explicit coordinates.
+
+### Output
+
+Single mode produces `<run-name>_best.sdf` (top pose) and `<run-name>_poses.sdf` (all ranked poses). Batch mode creates `best_poses/` and `all_poses/` directories with per-ligand SDFs. A detailed log file is written alongside the results.
 
 ## Datasets <a name="datasets"></a>
 
