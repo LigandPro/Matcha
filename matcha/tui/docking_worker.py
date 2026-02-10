@@ -37,6 +37,62 @@ class DockingDefaults:
     DEFAULT_PB_FILTERS = [False] * PB_FILTER_COUNT
 
 
+def _build_inference_config(
+    OmegaConf: type,
+    checkpoint_path: Path,
+    cache_path: Path,
+    data_folder: Path,
+    inference_results_folder: Path,
+    any_data_dir: Path,
+) -> Any:
+    """Build OmegaConf config for v2 inference with default parameters."""
+    return OmegaConf.create({
+        "seed": DockingDefaults.SEED,
+        "tr_std": DockingDefaults.TR_STD,
+        "use_time": True,
+        "dropout_rate": DockingDefaults.DROPOUT_RATE,
+        "num_kernel_pos_encoder": DockingDefaults.NUM_KERNEL_POS_ENCODER,
+        "llm_emb_dim": DockingDefaults.LLM_EMB_DIM,
+        "feature_dim": DockingDefaults.FEATURE_DIM,
+        "num_heads": DockingDefaults.NUM_HEADS,
+        "num_transformer_blocks": DockingDefaults.NUM_TRANSFORMER_BLOCKS,
+        "predict_torsion_angles": DockingDefaults.PREDICT_TORSION_ANGLES,
+        "stage_num": 1,
+        "use_all_chains": False,
+        "ligand_mask_ratio": 0.0,
+        "protein_mask_ratio": 0.0,
+        "std_protein_pos": 0.0,
+        "std_lig_pos": 0.0,
+        "esm_emb_noise_std": 0.0,
+        "randomize_bond_neighbors": False,
+        "batch_limit": 15000,
+        "checkpoints_folder": str(checkpoint_path),
+        "results_folder": str(checkpoint_path),
+        "cache_path": str(cache_path),
+        "data_folder": str(data_folder),
+        "inference_results_folder": str(inference_results_folder),
+        "any_data_dir": str(any_data_dir),
+        "test_dataset_types": ["any_conf"],
+    })
+
+
+def _enrich_metrics_with_pb_filters(metrics: dict, filters_json_path: Path) -> None:
+    """Load PB filters from JSON and enrich metrics in-place."""
+    import json as _json
+
+    if not filters_json_path.exists():
+        return
+    with open(filters_json_path) as _f:
+        pb_filters = _json.load(_f)
+    for uid_key, uid_data in metrics.items():
+        uid_real = uid_key.split('_mol')[0] if '_mol' in uid_key else uid_key
+        if uid_real in pb_filters:
+            fdata = pb_filters[uid_real]
+            for i, sample in enumerate(uid_data.get('sample_metrics', [])):
+                if i < len(fdata.get('posebusters_filters_passed_count_fast', [])):
+                    sample['posebusters_filters_passed_count_fast'] = fdata['posebusters_filters_passed_count_fast'][i]
+
+
 def find_ligands(ligand_dir: Path, extensions: tuple = (".sdf", ".mol", ".mol2")) -> list[Path]:
     """Find all ligand files in a directory."""
     ligands = []
@@ -183,8 +239,6 @@ def _write_log_file(
     runtime: float = 0.0,
 ) -> None:
     """Write log file similar to CLI output."""
-    import numpy as np
-
     timestamp = datetime.now(timezone.utc).isoformat() + "Z"
 
     log_lines = [
@@ -475,34 +529,14 @@ def run_docking(job: "DockingJob") -> None:
                 return
 
             # Build config (CLI-like, v2)
-            conf = OmegaConf.create({
-                "seed": DockingDefaults.SEED,
-                "tr_std": DockingDefaults.TR_STD,
-                "use_time": True,
-                "dropout_rate": DockingDefaults.DROPOUT_RATE,
-                "num_kernel_pos_encoder": DockingDefaults.NUM_KERNEL_POS_ENCODER,
-                "llm_emb_dim": DockingDefaults.LLM_EMB_DIM,
-                "feature_dim": DockingDefaults.FEATURE_DIM,
-                "num_heads": DockingDefaults.NUM_HEADS,
-                "num_transformer_blocks": DockingDefaults.NUM_TRANSFORMER_BLOCKS,
-                "predict_torsion_angles": DockingDefaults.PREDICT_TORSION_ANGLES,
-                "stage_num": 1,
-                "use_all_chains": False,
-                "ligand_mask_ratio": 0.0,
-                "protein_mask_ratio": 0.0,
-                "std_protein_pos": 0.0,
-                "std_lig_pos": 0.0,
-                "esm_emb_noise_std": 0.0,
-                "randomize_bond_neighbors": False,
-                "batch_limit": 15000,
-                "checkpoints_folder": str(checkpoint_path),
-                "results_folder": str(checkpoint_path),
-                "cache_path": str(run_workdir / "cache"),
-                "data_folder": str(run_workdir / "data"),
-                "inference_results_folder": str(run_workdir / "runs"),
-                "any_data_dir": str(dataset_dir),
-                "test_dataset_types": ["any_conf"],
-            })
+            conf = _build_inference_config(
+                OmegaConf=OmegaConf,
+                checkpoint_path=checkpoint_path,
+                cache_path=run_workdir / "cache",
+                data_folder=run_workdir / "data",
+                inference_results_folder=run_workdir / "runs",
+                any_data_dir=dataset_dir,
+            )
 
             # ESM embeddings (once for batch)
             emit(ProgressEvent(type="stage_start", stage="esm", name="Computing ESM embeddings"))
@@ -548,7 +582,6 @@ def run_docking(job: "DockingJob") -> None:
             # Optional GNINA scoring (requires CUDA)
             preds_root = Path(conf.inference_results_folder) / run_name
             dataset_name = "any_conf"
-            scorer_used = False
             if resolved_device == "cuda":
                 try:
                     from matcha.scoring import create_scorer
@@ -558,30 +591,18 @@ def run_docking(job: "DockingJob") -> None:
                     emit(ProgressEvent(type="stage_start", stage="scoring", name="GNINA scoring"))
                     scoring_start = time.time()
                     scorer.score_poses(str(receptor), str(sdf_input), str(sdf_scored), device=cuda_device_idx)
-                    scorer_used = True
                     emit(ProgressEvent(type="stage_done", stage="scoring", elapsed=time.time() - scoring_start))
                 except (RuntimeError, FileNotFoundError):
                     pass  # GNINA not available, skip scoring
 
             import numpy as np
-            import json as _json
 
             # Load final predictions
             final_preds_path = preds_root / f"{dataset_name}_final_preds.npy"
             metrics = np.load(final_preds_path, allow_pickle=True).item()
 
             # Load PB filters from JSON and enrich metrics
-            filters_json_path = preds_root / dataset_name / "filters_results.json"
-            if filters_json_path.exists():
-                with open(filters_json_path) as _f:
-                    pb_filters = _json.load(_f)
-                for uid_key, uid_data in metrics.items():
-                    uid_real = uid_key.split('_mol')[0] if '_mol' in uid_key else uid_key
-                    if uid_real in pb_filters:
-                        fdata = pb_filters[uid_real]
-                        for i, sample in enumerate(uid_data.get('sample_metrics', [])):
-                            if i < len(fdata.get('posebusters_filters_passed_count_fast', [])):
-                                sample['posebusters_filters_passed_count_fast'] = fdata['posebusters_filters_passed_count_fast'][i]
+            _enrich_metrics_with_pb_filters(metrics, preds_root / dataset_name / "filters_results.json")
 
             output_run_dir = output_path / run_name
             best_dir = output_run_dir / "best_poses"
@@ -1020,34 +1041,14 @@ def process_single_ligand(
     data_dir.mkdir(parents=True, exist_ok=True)
 
     # Build config (v2)
-    conf = OmegaConf.create({
-        "seed": DockingDefaults.SEED,
-        "tr_std": DockingDefaults.TR_STD,
-        "use_time": True,
-        "dropout_rate": DockingDefaults.DROPOUT_RATE,
-        "num_kernel_pos_encoder": DockingDefaults.NUM_KERNEL_POS_ENCODER,
-        "llm_emb_dim": DockingDefaults.LLM_EMB_DIM,
-        "feature_dim": DockingDefaults.FEATURE_DIM,
-        "num_heads": DockingDefaults.NUM_HEADS,
-        "num_transformer_blocks": DockingDefaults.NUM_TRANSFORMER_BLOCKS,
-        "predict_torsion_angles": DockingDefaults.PREDICT_TORSION_ANGLES,
-        "stage_num": 1,
-        "use_all_chains": False,
-        "ligand_mask_ratio": 0.0,
-        "protein_mask_ratio": 0.0,
-        "std_protein_pos": 0.0,
-        "std_lig_pos": 0.0,
-        "esm_emb_noise_std": 0.0,
-        "randomize_bond_neighbors": False,
-        "batch_limit": 15000,
-        "checkpoints_folder": str(checkpoint_path),
-        "results_folder": str(checkpoint_path),
-        "cache_path": str(run_workdir / "cache"),
-        "inference_results_folder": str(run_workdir / "runs" / ligand_name),
-        "any_data_dir": str(run_workdir / "datasets" / "any_conf"),
-        "test_dataset_types": ["any_conf"],
-        "data_folder": str(data_dir),
-    })
+    conf = _build_inference_config(
+        OmegaConf=OmegaConf,
+        checkpoint_path=checkpoint_path,
+        cache_path=run_workdir / "cache",
+        data_folder=data_dir,
+        inference_results_folder=run_workdir / "runs" / ligand_name,
+        any_data_dir=run_workdir / "datasets" / "any_conf",
+    )
 
     # ESM embeddings
     emit(ProgressEvent(
@@ -1203,30 +1204,17 @@ def process_single_ligand(
 
     # Get pose info from v2 output format
     import numpy as np
-    import json as _json
 
     final_preds_path = Path(conf.inference_results_folder) / "any_conf_final_preds.npy"
     poses = []
     if final_preds_path.exists():
         data = np.load(final_preds_path, allow_pickle=True).item()
 
-        # Load PB filters from JSON
-        filters_json_path = preds_root / "filters_results.json"
-        pb_filters = {}
-        if filters_json_path.exists():
-            with open(filters_json_path) as _f:
-                pb_filters = _json.load(_f)
+        # Load PB filters from JSON and enrich metrics
+        _enrich_metrics_with_pb_filters(data, preds_root / "filters_results.json")
 
         for uid_key, uid_data in data.items():
-            uid_real = uid_key.split('_mol')[0] if '_mol' in uid_key else uid_key
             sample_metrics = uid_data.get('sample_metrics', [])
-
-            # Enrich with PB filter data
-            if uid_real in pb_filters:
-                fdata = pb_filters[uid_real]
-                for i, sample in enumerate(sample_metrics):
-                    if i < len(fdata.get('posebusters_filters_passed_count_fast', [])):
-                        sample['posebusters_filters_passed_count_fast'] = fdata['posebusters_filters_passed_count_fast'][i]
 
             for i, sample in enumerate(sample_metrics[:10]):
                 pb_data = extract_pb_filters(sample)

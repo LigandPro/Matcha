@@ -15,7 +15,7 @@ import { generateMolstarViewer } from '../utils/molstar-viewer.js';
 import { isKey } from '../utils/keyboard.js';
 import { getBridge } from '../services/python-bridge.js';
 import { parseRuntimeFromLog } from '../utils/runtime.js';
-import { DataRow, Section, TopPosesTable } from '../components/index.js';
+import { DataRow, Section } from '../components/index.js';
 import type { BatchLigandStatus, PoseResult } from '../types/index.js';
 import { BatchDetailView } from './Results/BatchDetailView.js';
 import { SingleModeView } from './Results/SingleModeView.js';
@@ -249,6 +249,15 @@ export function ResultsScreen(): React.ReactElement {
     ? results?.ligandStatuses?.[activeLigandIndex] ?? null
     : null;
 
+  // Helper to navigate into ligand detail view
+  const enterLigandDetail = useCallback((ligandIndex: number, returnView: 'summary' | 'ligands') => {
+    setResultsUI({
+      activeLigandIndex: ligandIndex,
+      detailReturnView: returnView,
+      viewMode: 'ligand-detail',
+    });
+  }, [setResultsUI]);
+
   const showBatchDetail = Boolean(isBatch && viewMode === 'ligand-detail' && activeLigand);
 
   useEffect(() => {
@@ -293,11 +302,7 @@ export function ResultsScreen(): React.ReactElement {
         return;
       }
       if (key.return && topLigands[selectedTopIndex]) {
-        setResultsUI({
-          activeLigandIndex: topLigands[selectedTopIndex].index,
-          detailReturnView: 'summary',
-          viewMode: 'ligand-detail',
-        });
+        enterLigandDetail(topLigands[selectedTopIndex].index, 'summary');
         return;
       }
     }
@@ -312,11 +317,7 @@ export function ResultsScreen(): React.ReactElement {
         return;
       }
       if (key.return && ligandList[selectedLigandIndex]) {
-        setResultsUI({
-          activeLigandIndex: selectedLigandIndex,
-          detailReturnView: 'ligands',
-          viewMode: 'ligand-detail',
-        });
+        enterLigandDetail(selectedLigandIndex, 'ligands');
         return;
       }
     }
@@ -329,19 +330,11 @@ export function ResultsScreen(): React.ReactElement {
     if (key.rightArrow && viewMode !== 'ligand-detail') {
       // Treat right arrow as Enter for batch lists
       if (isBatch && viewMode === 'summary' && topLigands[selectedTopIndex]) {
-        setResultsUI({
-          activeLigandIndex: topLigands[selectedTopIndex].index,
-          detailReturnView: 'summary',
-          viewMode: 'ligand-detail',
-        });
+        enterLigandDetail(topLigands[selectedTopIndex].index, 'summary');
         return;
       }
       if (isBatch && viewMode === 'ligands' && ligandList[selectedLigandIndex]) {
-        setResultsUI({
-          activeLigandIndex: selectedLigandIndex,
-          detailReturnView: 'ligands',
-          viewMode: 'ligand-detail',
-        });
+        enterLigandDetail(selectedLigandIndex, 'ligands');
         return;
       }
       return;
@@ -381,8 +374,6 @@ export function ResultsScreen(): React.ReactElement {
   if (!results) {
     return <Box><Text color="yellow">No results available</Text></Box>;
   }
-
-  const bestPose = results.poses[0];
 
   // Calculate batch statistics
   const completed = results.ligandStatuses?.filter((l) => l.status === 'completed').length ?? 0;

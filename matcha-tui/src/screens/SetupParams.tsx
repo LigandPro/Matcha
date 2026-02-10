@@ -78,12 +78,7 @@ export function SetupParams(): React.ReactElement {
   };
 
   useInput((input, key) => {
-    if (key.escape) {
-      setScreen('setup-box');
-      return;
-    }
-
-    if (key.leftArrow) {
+    if (key.escape || key.leftArrow) {
       setScreen('setup-box');
       return;
     }

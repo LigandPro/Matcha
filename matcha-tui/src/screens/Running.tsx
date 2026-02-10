@@ -127,18 +127,6 @@ export function RunningScreen(): React.ReactElement {
   const [batchState, dispatchBatch] = useReducer(batchReducer, initialBatchState);
   const { isBatch, totalLigands, currentLigandIndex, currentLigand, ligandStatuses } = batchState;
   const [batchProgress, setBatchProgress] = useState(0);
-  const stageOrder = ['init', 'checkpoints', 'dataset', 'esm', 'stage1', 'stage2', 'stage3', 'scoring', 'posebusters'] as const;
-  const stageWeights: Record<string, number> = {
-    init: 1,
-    checkpoints: 1,
-    dataset: 1,
-    esm: 1,
-    stage1: 1,
-    stage2: 1,
-    stage3: 1,
-    scoring: 1,
-    posebusters: 1,
-  };
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -147,31 +135,23 @@ export function RunningScreen(): React.ReactElement {
     return () => clearInterval(timer);
   }, [startTime]);
 
-  // Compute overall batch progress from stage progress
+  // Compute overall batch progress as average of all stage progress values
   useEffect(() => {
     if (!isBatch) return;
-    let totalWeight = 0;
-    let weightedProgress = 0;
 
-    for (const stageId of stageOrder) {
-      const weight = stageWeights[stageId] ?? 1;
-      totalWeight += weight;
-      const status = stages[stageId];
-      if (!status) {
-        continue;
-      }
-      let percent = 0;
+    const stageIds = PIPELINE_STAGES.map((s) => s.id);
+    let totalPercent = 0;
+    for (const id of stageIds) {
+      const status = stages[id];
+      if (!status) continue;
       if (status.status === 'done') {
-        percent = 100;
+        totalPercent += 100;
       } else if (status.status === 'running') {
-        percent = status.progress ?? 0;
+        totalPercent += status.progress ?? 0;
       }
-      weightedProgress += weight * percent;
     }
 
-    if (totalWeight > 0) {
-      setBatchProgress(Math.round(weightedProgress / totalWeight));
-    }
+    setBatchProgress(stageIds.length > 0 ? Math.round(totalPercent / stageIds.length) : 0);
   }, [isBatch, stages]);
 
   // Progress event handler - shared between new job and resume

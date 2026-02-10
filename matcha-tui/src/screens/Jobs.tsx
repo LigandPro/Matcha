@@ -6,8 +6,7 @@ import React, { useState, useEffect } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { useStore } from '../store/index.js';
 import { getBridge } from '../services/python-bridge.js';
-import { icons, getStatusColor } from '../utils/colors.js';
-import type { ActiveJob } from '../types/index.js';
+import { getStatusColor } from '../utils/colors.js';
 
 export function JobsScreen(): React.ReactElement {
   const setScreen = useStore((s) => s.setScreen);

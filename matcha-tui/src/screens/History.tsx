@@ -441,8 +441,7 @@ export function HistoryScreen(): React.ReactElement {
         <Text color="#D0D1FA">[Enter] View results</Text>
         <Text color="red">[d] Delete</Text>
         <Text color="gray">[↑/↓] Navigate</Text>
-        <Text color="gray">[Esc] Back</Text>
-        <Text color="gray">[←] Back</Text>
+        <Text color="gray">[←/Esc] Back</Text>
       </Box>
     </Box>
   );
