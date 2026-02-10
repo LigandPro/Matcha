@@ -66,7 +66,7 @@ export function JobsScreen(): React.ReactElement {
           <Text color="gray" dimColor>No active jobs</Text>
         </Box>
         <Box>
-          <Text color="cyan" dimColor>[Esc]</Text>
+          <Text color="#D0D1FA" dimColor>[Esc]</Text>
           <Text color="gray" dimColor> Back to home</Text>
         </Box>
       </Box>
@@ -77,7 +77,7 @@ export function JobsScreen(): React.ReactElement {
     <Box flexDirection="column" paddingX={1}>
       {/* Header */}
       <Box marginBottom={1}>
-        <Text color="cyan" bold>Active Jobs</Text>
+        <Text color="#D0D1FA" bold>Active Jobs</Text>
         <Text color="gray" dimColor> ({jobsList.length} total)</Text>
         {refreshing && (
           <>
@@ -105,7 +105,7 @@ export function JobsScreen(): React.ReactElement {
 
         return (
           <Box key={job.id}>
-            <Text color={isSelected ? 'cyan' : 'gray'}>
+            <Text color={isSelected ? '#D0D1FA' : 'gray'}>
               {isSelected ? '▸ ' : '  '}
             </Text>
             <Text color={statusColor}>{statusIcon}</Text>
@@ -120,15 +120,15 @@ export function JobsScreen(): React.ReactElement {
       {/* Help */}
       <Box marginTop={2} gap={2}>
         <Box>
-          <Text color="cyan" dimColor>[↑↓]</Text>
+          <Text color="#D0D1FA" dimColor>[↑↓]</Text>
           <Text color="gray" dimColor> Navigate</Text>
         </Box>
         <Box>
-          <Text color="cyan" dimColor>[Enter]</Text>
+          <Text color="#D0D1FA" dimColor>[Enter]</Text>
           <Text color="gray" dimColor> View progress</Text>
         </Box>
         <Box>
-          <Text color="cyan" dimColor>[Esc]</Text>
+          <Text color="#D0D1FA" dimColor>[Esc]</Text>
           <Text color="gray" dimColor> Back</Text>
         </Box>
       </Box>

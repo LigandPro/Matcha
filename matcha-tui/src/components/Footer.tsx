@@ -119,9 +119,9 @@ export function Footer({ screen, isRunning }: FooterProps): React.ReactElement {
             <Text color="gray"> +{queuedJobs.length} queued</Text>
           )}
           <Text> </Text>
-          <Text color="cyan" bold>[r]</Text>
+          <Text color="#D0D1FA" bold>[r]</Text>
           <Text color="white"> View progress </Text>
-          <Text color="cyan" bold>[j]</Text>
+          <Text color="#D0D1FA" bold>[j]</Text>
           <Text color="white"> All jobs</Text>
         </Box>
       )}
@@ -130,7 +130,7 @@ export function Footer({ screen, isRunning }: FooterProps): React.ReactElement {
       {!hasBackgroundJobs && hasBackgroundTask && (
         <Box paddingX={1} paddingY={0}>
           <Text color="yellow" bold>● Docking in progress </Text>
-          <Text color="cyan" bold>[r]</Text>
+          <Text color="#D0D1FA" bold>[r]</Text>
           <Text color="white"> View progress</Text>
         </Box>
       )}
@@ -150,7 +150,7 @@ export function Footer({ screen, isRunning }: FooterProps): React.ReactElement {
       <Box gap={2} paddingX={1}>
         {shortcuts.map(({ key, label, disabled }) => (
           <Box key={key}>
-            <Text color={disabled ? 'gray' : 'cyan'} dimColor>
+            <Text color={disabled ? 'gray' : '#D0D1FA'} dimColor>
               [{key}]
             </Text>
             <Text color="gray" dimColor>

@@ -52,10 +52,10 @@ export function Welcome(): React.ReactElement {
             const isSelected = index === selectedIndex;
             return (
               <Box key={item.value}>
-                <Text color={isSelected ? 'cyan' : 'gray'}>
+                <Text color={isSelected ? '#D0D1FA' : 'gray'}>
                   {isSelected ? '▸ ' : '  '}
                 </Text>
-                <Text color={isSelected ? 'cyan' : 'white'} bold={isSelected}>
+                <Text color={isSelected ? '#D0D1FA' : 'white'} bold={isSelected}>
                   {item.label}
                 </Text>
                 <Text color="gray"> [{item.key}]</Text>

@@ -1172,8 +1172,8 @@ def process_single_ligand(
         try:
             from matcha.scoring import create_scorer
             scorer = create_scorer("gnina")
-            sdf_input = preds_root / "any_conf" / "sdf_predictions"
-            sdf_scored = preds_root / "any_conf" / "scored_sdf_predictions"
+            sdf_input = preds_root / "sdf_predictions"
+            sdf_scored = preds_root / "scored_sdf_predictions"
             emit(ProgressEvent(
                 type="stage_start", stage="scoring", name="GNINA scoring",
                 current_ligand=ligand.name, ligand_index=ligand_index, total_ligands=total_ligands,
@@ -1189,7 +1189,7 @@ def process_single_ligand(
 
     # Copy final SDF to top-level output directory
     run_output_dir = run_workdir.parent  # This is output_path / run_name
-    sdf_preds_dir = preds_root / "any_conf" / "sdf_predictions"
+    sdf_preds_dir = preds_root / "sdf_predictions"
     pred_sdf_files = list(sdf_preds_dir.glob("*.sdf"))
     if pred_sdf_files:
         if total_ligands > 1:
@@ -1205,13 +1205,13 @@ def process_single_ligand(
     import numpy as np
     import json as _json
 
-    final_preds_path = preds_root / "any_conf_final_preds.npy"
+    final_preds_path = Path(conf.inference_results_folder) / "any_conf_final_preds.npy"
     poses = []
     if final_preds_path.exists():
         data = np.load(final_preds_path, allow_pickle=True).item()
 
         # Load PB filters from JSON
-        filters_json_path = preds_root / "any_conf" / "filters_results.json"
+        filters_json_path = preds_root / "filters_results.json"
         pb_filters = {}
         if filters_json_path.exists():
             with open(filters_json_path) as _f:

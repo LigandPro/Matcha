@@ -421,7 +421,7 @@ export function ResultsScreen(): React.ReactElement {
             <Box>
               <Text color="gray">File:</Text>
               <Text> </Text>
-              <Text color="cyan">{makeClickableLink(viewer3DInfo.url, shortenPath(viewer3DInfo.url))}</Text>
+              <Text color="#D0D1FA">{makeClickableLink(viewer3DInfo.url, shortenPath(viewer3DInfo.url))}</Text>
             </Box>
             {viewer3DInfo.port === 0 && (
               <Box marginTop={1}>
@@ -534,7 +534,7 @@ export function ResultsScreen(): React.ReactElement {
 
       {/* Navigation */}
       <Box marginTop={2} gap={4}>
-        <Text color="cyan">[n] New docking</Text>
+        <Text color="#D0D1FA">[n] New docking</Text>
         {isBatch && viewMode !== 'ligand-detail' && <Text color="gray">[↑↓] Select</Text>}
         {isBatch && viewMode !== 'ligand-detail' && <Text color="gray">[Enter or →] View ligand</Text>}
         {isBatch && viewMode !== 'ligand-detail' && (
@@ -569,13 +569,13 @@ function LigandResultRow({
   return (
     <Box flexDirection="column">
       <Box>
-        <Text color={selected ? 'cyan' : 'gray'}>{selected ? '▸ ' : '  '}</Text>
-        <Text color={selected ? 'cyan' : 'white'} bold={selected}>
+        <Text color={selected ? '#D0D1FA' : 'gray'}>{selected ? '▸ ' : '  '}</Text>
+        <Text color={selected ? '#D0D1FA' : 'white'} bold={selected}>
           {ligand.name.substring(0, 27).padEnd(28)}
         </Text>
         <Text color={ligand.pb_count === 4 ? 'green' : 'yellow'} dimColor={!selected}>{pbChecks}</Text>
         <Text color={statusColor} dimColor={!selected}>{pbIcons.padEnd(10)}</Text>
-        <Text color="cyan" dimColor={!selected}>
+        <Text color="#D0D1FA" dimColor={!selected}>
           {ligand.gnina_score != null ? ligand.gnina_score.toFixed(2) : '-'}
         </Text>
       </Box>

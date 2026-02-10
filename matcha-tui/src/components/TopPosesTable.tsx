@@ -58,7 +58,7 @@ export function TopPosesTable({
                (pose.checks.no_volume_clash ? icons.check : icons.cross)}
             </Text>
             {hasGnina && (
-              <Text color="cyan">{'  '}{pose.gnina_score != null ? pose.gnina_score.toFixed(2) : '-'}</Text>
+              <Text color="#D0D1FA">{'  '}{pose.gnina_score != null ? pose.gnina_score.toFixed(2) : '-'}</Text>
             )}
           </Box>
         ))}

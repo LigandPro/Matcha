@@ -313,7 +313,7 @@ export function FileBrowser({
         </Box>
         {searchQuery && (
           <Box marginTop={1}>
-            <Text color="cyan">🔍 </Text>
+            <Text color="#D0D1FA">🔍 </Text>
             <Text color="white">{searchQuery}</Text>
           </Box>
         )}
@@ -341,7 +341,7 @@ export function FileBrowser({
 
       {/* Search input */}
       <Box marginBottom={1}>
-        <Text color="cyan">🔍 </Text>
+        <Text color="#D0D1FA">🔍 </Text>
         <Text color={searchQuery ? 'white' : 'gray'}>
           {searchQuery || 'Type to search...'}
         </Text>
@@ -368,7 +368,7 @@ export function FileBrowser({
           let dimmed = false;
 
           if (isSelected) {
-            color = 'cyan';
+            color = '#D0D1FA';
           } else if (item.name === '..') {
             color = 'gray';
           } else if (item.is_dir) {
@@ -382,7 +382,7 @@ export function FileBrowser({
 
           return (
             <Box key={actualIndex}>
-              <Text color={isSelected ? 'cyan' : 'gray'}>
+              <Text color={isSelected ? '#D0D1FA' : 'gray'}>
                 {isSelected ? '▸ ' : '  '}
               </Text>
               <Text color={color} dimColor={dimmed}>

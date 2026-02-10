@@ -1,9 +1,12 @@
 import chalk from 'chalk';
 
+// Main accent color — lavender RGB(208, 209, 250)
+export const ACCENT = '#D0D1FA';
+
 // Theme colors for consistent styling
 export const colors = {
   // Primary colors
-  primary: chalk.cyan,
+  primary: chalk.hex(ACCENT),
   secondary: chalk.magenta,
   accent: chalk.yellow,
 
@@ -20,12 +23,12 @@ export const colors = {
 
   // UI elements
   border: chalk.gray,
-  highlight: chalk.bgCyan.black,
+  highlight: chalk.bgHex(ACCENT).black,
   selected: chalk.bgWhite.black,
 
   // Brand
-  brand: chalk.bold.cyan,
-  version: chalk.dim.cyan,
+  brand: chalk.bold.hex(ACCENT),
+  version: chalk.dim.hex(ACCENT),
 };
 
 // Status icons

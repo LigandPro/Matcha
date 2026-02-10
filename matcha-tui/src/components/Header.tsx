@@ -21,14 +21,14 @@ export function Header({ showLogo = false, title, subtitle, showBackgroundTask =
     <Box flexDirection="column">
       {showLogo && (
         <Box marginBottom={1}>
-          <Text color="cyan">{LOGO}</Text>
+          <Text color="#D0D1FA">{LOGO}</Text>
         </Box>
       )}
       <Box marginTop={showLogo ? 1 : 0} borderStyle="round" borderColor="gray" paddingX={1}>
         <Box flexDirection="column">
           <Box>
             <Text color="gray">{'>_ '}</Text>
-            <Text bold color="cyan">MATCHA DOCKING ENGINE</Text>
+            <Text bold color="#D0D1FA">MATCHA DOCKING ENGINE</Text>
             <Text color="gray"> v1.5.0</Text>
             {title && (
               <>
@@ -47,7 +47,7 @@ export function Header({ showLogo = false, title, subtitle, showBackgroundTask =
         <Box marginTop={1}>
           <Text color="yellow" dimColor>● Docking in progress</Text>
           <Text color="gray" dimColor> · </Text>
-          <Text color="cyan" dimColor>[r]</Text>
+          <Text color="#D0D1FA" dimColor>[r]</Text>
           <Text color="gray" dimColor> view progress</Text>
         </Box>
       )}

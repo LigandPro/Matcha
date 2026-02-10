@@ -35,7 +35,7 @@ export function SingleModeView({ results }: SingleModeViewProps): React.ReactEle
             valueColor={(bestPose.pb_count ?? 0) === 4 ? 'green' : 'yellow'}
           />
           {bestPose.gnina_score != null && (
-            <DataRow label="GNINA affinity" value={bestPose.gnina_score.toFixed(2)} valueColor="cyan" />
+            <DataRow label="GNINA affinity" value={bestPose.gnina_score.toFixed(2)} valueColor="#D0D1FA" />
           )}
           <Box>
             <Text color="gray">Checks: </Text>
@@ -98,7 +98,7 @@ export function SingleModeView({ results }: SingleModeViewProps): React.ReactEle
                     (pose.checks?.no_volume_clash ? icons.check : icons.cross)).padEnd(10)}
                 </Text>
                 {pose.gnina_score != null && (
-                  <Text color="cyan">{pose.gnina_score.toFixed(2)}</Text>
+                  <Text color="#D0D1FA">{pose.gnina_score.toFixed(2)}</Text>
                 )}
               </Box>
             ))}

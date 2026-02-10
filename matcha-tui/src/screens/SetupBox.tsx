@@ -160,7 +160,7 @@ export function SetupBox(): React.ReactElement {
             items={boxModeItems}
             onSelect={handleModeSelect}
             indicatorComponent={({ isSelected }) => (
-              <Text color={isSelected ? 'cyan' : 'gray'}>
+              <Text color={isSelected ? '#D0D1FA' : 'gray'}>
                 {isSelected ? '▸ ' : '  '}
               </Text>
             )}
@@ -168,7 +168,7 @@ export function SetupBox(): React.ReactElement {
               const m = boxModeItems.find((i) => i.label === label)?.value;
               return (
                 <Box flexDirection="column">
-                  <Text color={isSelected ? 'cyan' : 'white'} bold={isSelected}>
+                  <Text color={isSelected ? '#D0D1FA' : 'white'} bold={isSelected}>
                     {label}
                   </Text>
                   {m && (
@@ -194,7 +194,7 @@ export function SetupBox(): React.ReactElement {
             </Text>
             <Box gap={2}>
               <Box flexDirection="column">
-                <Text color={activeField === 'x' ? 'cyan' : 'gray'}>X:</Text>
+                <Text color={activeField === 'x' ? '#D0D1FA' : 'gray'}>X:</Text>
                 {activeField === 'x' ? (
                   <TextInput value={centerX} onChange={setCenterX} placeholder="0.0" />
                 ) : (
@@ -202,7 +202,7 @@ export function SetupBox(): React.ReactElement {
                 )}
               </Box>
               <Box flexDirection="column">
-                <Text color={activeField === 'y' ? 'cyan' : 'gray'}>Y:</Text>
+                <Text color={activeField === 'y' ? '#D0D1FA' : 'gray'}>Y:</Text>
                 {activeField === 'y' ? (
                   <TextInput value={centerY} onChange={setCenterY} placeholder="0.0" />
                 ) : (
@@ -210,7 +210,7 @@ export function SetupBox(): React.ReactElement {
                 )}
               </Box>
               <Box flexDirection="column">
-                <Text color={activeField === 'z' ? 'cyan' : 'gray'}>Z:</Text>
+                <Text color={activeField === 'z' ? '#D0D1FA' : 'gray'}>Z:</Text>
                 {activeField === 'z' ? (
                   <TextInput value={centerZ} onChange={setCenterZ} placeholder="0.0" />
                 ) : (
@@ -223,7 +223,7 @@ export function SetupBox(): React.ReactElement {
 
         {mode === 'autobox' && activeField !== 'mode' && (
           <Box flexDirection="column" marginTop={1}>
-            <Text color={activeField === 'autobox' ? 'cyan' : 'white'} bold>
+            <Text color={activeField === 'autobox' ? '#D0D1FA' : 'white'} bold>
               Reference Ligand
             </Text>
             <Box marginLeft={2}>
@@ -269,7 +269,7 @@ export function SetupBox(): React.ReactElement {
       )}
 
       <Box marginTop={2} gap={2}>
-        <Text color="cyan">[Enter] Continue</Text>
+        <Text color="#D0D1FA">[Enter] Continue</Text>
         <Text color="gray">[Esc] Back</Text>
       </Box>
 
@@ -277,7 +277,7 @@ export function SetupBox(): React.ReactElement {
         <Text color="gray">┌─ Progress ──────────────────────────────────┐</Text>
         <Text>
           <Text color="gray">│</Text>
-          <Text color="cyan"> ✓ Mode  ✓ Files  ● Box  ○ Params  ○ Review </Text>
+          <Text color="#D0D1FA"> ✓ Mode  ✓ Files  ● Box  ○ Params  ○ Review </Text>
           <Text color="gray">│</Text>
         </Text>
         <Text color="gray">└──────────────────────────────────────────────┘</Text>

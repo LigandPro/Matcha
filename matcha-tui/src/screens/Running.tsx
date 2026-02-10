@@ -2,14 +2,14 @@
  * Running Screen - shows docking progress with batch monitoring support.
  */
 
-import React, { useEffect, useState, useRef, useReducer } from 'react';
+import React, { useEffect, useState, useRef, useReducer, useCallback } from 'react';
 import { Box, Text, useInput } from 'ink';
 import path from 'path';
 import { useStore } from '../store/index.js';
 import { getBridge, initBridge, closeBridge, type ProgressEvent } from '../services/index.js';
 import { ProgressBar } from '../components/ProgressBar.js';
 import { icons, getStageColor, getStatusColor } from '../utils/colors.js';
-import { PIPELINE_STAGES, type PipelineStage, type PoseResult } from '../types/index.js';
+import { PIPELINE_STAGES, type PipelineStage, type PoseResult, type JobConfig } from '../types/index.js';
 import { formatDuration, generateRunName } from '../utils/format.js';
 import { isKey } from '../utils/keyboard.js';
 import { logger } from '../utils/logger.js';
@@ -104,7 +104,10 @@ export function RunningScreen(): React.ReactElement {
   const currentJobId = useStore((s) => s.currentJobId);
   const setCurrentJob = useStore((s) => s.setCurrentJob);
   const activeJobs = useStore((s) => s.activeJobs);
+  const addJob = useStore((s) => s.addJob);
+  const updateJobStatus = useStore((s) => s.updateJobStatus);
   const updateJobProgress = useStore((s) => s.updateJobProgress);
+  const jobIdRef = useRef<string | null>(currentJobId);
 
   // Initialize all stages with pending status to avoid race conditions
   const [stages, setStages] = useState<Record<string, StageStatus>>(() => {
@@ -171,10 +174,162 @@ export function RunningScreen(): React.ReactElement {
     }
   }, [isBatch, stages]);
 
-  // Start docking job on mount
+  // Progress event handler - shared between new job and resume
+  const handleProgress = useCallback((event: ProgressEvent) => {
+    // Filter events by job_id - only process events for current job
+    const targetJobId = jobIdRef.current;
+    if (targetJobId && event.job_id && event.job_id !== targetJobId) {
+      return;
+    }
+
+    addLog(JSON.stringify(event));
+
+    // Batch events
+    if (event.type === 'batch_start') {
+      dispatchBatch({
+        type: 'BATCH_START',
+        totalLigands: event.total_ligands ?? 1,
+        ligandStatuses: (event.ligand_statuses as LigandStatus[]) ?? [],
+      });
+    } else if (event.type === 'batch_progress') {
+      dispatchBatch({
+        type: 'BATCH_PROGRESS',
+        ligandIndex: event.ligand_index ?? 0,
+        ligandStatuses: (event.ligand_statuses as LigandStatus[]) ?? [],
+      });
+    } else if (event.type === 'ligand_start') {
+      dispatchBatch({
+        type: 'LIGAND_START',
+        currentLigand: event.current_ligand ?? '',
+        ligandIndex: event.ligand_index ?? 0,
+        totalLigands: event.total_ligands ?? 1,
+        ligandStatuses: (event.ligand_statuses as LigandStatus[]) ?? [],
+      });
+      // Reset stages for new ligand
+      setStages({});
+    } else if (event.type === 'ligand_done') {
+      dispatchBatch({
+        type: 'LIGAND_DONE',
+        ligandStatuses: (event.ligand_statuses as LigandStatus[]) ?? [],
+      });
+    } else if (event.type === 'stage_start' && event.stage) {
+      setStages((prev) => ({
+        ...prev,
+        [event.stage!]: { status: 'running', progress: 0, message: event.name },
+      }));
+    } else if (event.type === 'stage_progress' && event.stage) {
+      setStages((prev) => ({
+        ...prev,
+        [event.stage!]: { ...prev[event.stage!], progress: event.progress ?? 0, message: event.message },
+      }));
+    } else if (event.type === 'stage_done' && event.stage) {
+      setStages((prev) => ({
+        ...prev,
+        [event.stage!]: { status: 'done', progress: 100, elapsed: event.elapsed },
+      }));
+    } else if (event.type === 'poses_update' && event.poses) {
+      setPoses(event.poses as PoseResult[]);
+    } else if (event.type === 'job_done') {
+      setRunning(false);
+      const jid = jobIdRef.current;
+      if (jid) updateJobStatus(jid, 'completed');
+
+      // Use event.poses from backend (aggregated data for all ligands)
+      const finalPoses = (event.poses ?? []) as PoseResult[];
+      const runDir = event.output_path ?? '';
+      const runName = jobConfig.params?.runName ?? 'matcha_tui_run';
+      const isBatchRun =
+        (event.total_ligands ?? 0) > 1 || jobConfig.mode === 'batch';
+
+      // Check if all ligands failed
+      const evLigandStatuses = event.ligand_statuses as LigandStatus[] | undefined;
+      const completedCount = evLigandStatuses?.filter(l => l.status === 'completed').length ?? 0;
+      const failedCount = evLigandStatuses?.filter(l => l.status === 'failed').length ?? 0;
+      const allFailed = failedCount > 0 && completedCount === 0;
+
+      // If all failed, show error and go to welcome
+      if (allFailed) {
+        const firstError = evLigandStatuses?.find(l => l.error_message)?.error_message;
+        setError(`Docking failed: ${firstError ?? 'All ligands failed'}`);
+        setScreen('welcome');
+        return;
+      }
+
+      const bestPosePath = isBatchRun
+        ? path.join(runDir, 'best_poses')
+        : path.join(runDir, `${runName}_best.sdf`);
+      const allPosesPath = isBatchRun
+        ? path.join(runDir, 'all_poses')
+        : path.join(runDir, `${runName}_poses.sdf`);
+      const logPath = path.join(runDir, `${runName}.log`);
+
+      const results = {
+        runName,
+        runtime: (Date.now() - startTime) / 1000,
+        totalPoses: finalPoses.length,
+        physicalPoses: finalPoses.filter((p) => p.pb_count === 4).length,
+        poses: finalPoses,
+        bestPosePath,
+        allPosesPath,
+        logPath,
+        receptor: jobConfig.receptor,
+        ligand: jobConfig.mode === 'batch' ? jobConfig.ligandDir : jobConfig.ligand,
+        totalLigands: event.total_ligands,
+        ligandStatuses: evLigandStatuses,
+      };
+
+      setResults(results);
+
+      // Check if user is still on running screen
+      const currentScreen = useStore.getState().screen;
+      if (currentScreen === 'running') {
+        setScreen('results');
+      } else {
+        setNotification('Docking completed! View results in History.');
+      }
+    } else if (event.type === 'error') {
+      setError(event.message ?? 'Unknown error');
+      setRunning(false);
+      const jid = jobIdRef.current;
+      if (jid) updateJobStatus(jid, 'failed');
+    } else if (event.type === 'cancelled') {
+      setRunning(false);
+      setScreen('welcome');
+      const jid = jobIdRef.current;
+      if (jid) updateJobStatus(jid, 'failed');
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Start docking job on mount, or resume if returning to existing job
   useEffect(() => {
     if (jobStartedRef.current) return;
     jobStartedRef.current = true;
+
+    // Check if we're resuming an existing job (e.g. user pressed 'r' to return)
+    const storeState = useStore.getState();
+    const existingJobId = storeState.currentJobId;
+    const existingJob = existingJobId ? storeState.activeJobs.get(existingJobId) : null;
+    const isResuming = existingJob != null && existingJob.status === 'running';
+
+    if (isResuming) {
+      // Resume: just re-subscribe to bridge progress events
+      jobIdRef.current = existingJobId;
+      setRunning(true);
+      try {
+        const bridge = getBridge();
+        if (bridge.isReady()) {
+          bridge.on('progress', handleProgress);
+          setBridgeReady(true);
+          addLog(`Resumed monitoring job ${existingJobId}`);
+        }
+      } catch {
+        addLog('Bridge not available for resume');
+      }
+      return;
+    }
+
+    // New job: initialize bridge and start docking
     setRunning(true);
 
     // Build config from jobConfig
@@ -198,18 +353,11 @@ export function RunningScreen(): React.ReactElement {
 
     addLog(`Starting docking with config: ${JSON.stringify(config)}`);
 
-    // Initialize bridge first, then start docking
     const startJob = async () => {
       try {
-        // Initialize Python backend
         addLog('Initializing Python backend...');
-        // TUI is in matcha-tui/ subdirectory, but Python package is in parent directory
-        // Use parent directory as project root so 'uv run python -m matcha.tui.backend' can find the package
         const projectRoot = process.env.MATCHA_ROOT || path.join(process.cwd(), '..');
         addLog(`Project root: ${projectRoot}`);
-
-        // Capture all stderr before bridge starts
-        let stderrBuffer = '';
 
         const bridge = await initBridge({
           projectRoot,
@@ -218,26 +366,20 @@ export function RunningScreen(): React.ReactElement {
 
         // Listen for stderr to help with debugging
         bridge.on('stderr', (data: string) => {
-          stderrBuffer += data;
           addLog(`[stderr] ${data}`);
         });
 
         // Listen for debug events from backend
         bridge.on('debug', (event: any) => {
           if (debugMode) {
-            // Add to store for UI display
             addDebugLog({
               level: event.level,
               component: event.component,
               message: event.message,
               data: event.data,
             });
-
-            // Write to file via logger
             const logMethod = event.level as 'debug' | 'info' | 'warn' | 'error';
             logger[logMethod](event.component, event.message, event.data);
-
-            // Also add to running logs display
             addLog(`[${event.level}] [${event.component}] ${event.message}`);
           }
         });
@@ -250,133 +392,8 @@ export function RunningScreen(): React.ReactElement {
           addLog(`[backend exit] code ${code}`);
         });
 
-        // IMPORTANT: Subscribe to progress BEFORE starting docking!
-        bridge.on('progress', (event: ProgressEvent) => {
-          // Filter events by job_id - only process events for current job
-          if (currentJobId && event.job_id !== currentJobId) {
-            return;
-          }
-
-          addLog(JSON.stringify(event));
-
-          // Batch events
-          if (event.type === 'batch_start') {
-            dispatchBatch({
-              type: 'BATCH_START',
-              totalLigands: event.total_ligands ?? 1,
-              ligandStatuses: (event.ligand_statuses as LigandStatus[]) ?? [],
-            });
-          } else if (event.type === 'batch_progress') {
-            dispatchBatch({
-              type: 'BATCH_PROGRESS',
-              ligandIndex: event.ligand_index ?? 0,
-              ligandStatuses: (event.ligand_statuses as LigandStatus[]) ?? [],
-            });
-          } else if (event.type === 'ligand_start') {
-            dispatchBatch({
-              type: 'LIGAND_START',
-              currentLigand: event.current_ligand ?? '',
-              ligandIndex: event.ligand_index ?? 0,
-              totalLigands: event.total_ligands ?? 1,
-              ligandStatuses: (event.ligand_statuses as LigandStatus[]) ?? [],
-            });
-            // Reset stages for new ligand
-            setStages({});
-          } else if (event.type === 'ligand_done') {
-            dispatchBatch({
-              type: 'LIGAND_DONE',
-              ligandStatuses: (event.ligand_statuses as LigandStatus[]) ?? [],
-            });
-          } else if (event.type === 'stage_start' && event.stage) {
-            setStages((prev) => ({
-              ...prev,
-              [event.stage!]: { status: 'running', progress: 0, message: event.name },
-            }));
-          } else if (event.type === 'stage_progress' && event.stage) {
-            setStages((prev) => ({
-              ...prev,
-              [event.stage!]: { ...prev[event.stage!], progress: event.progress ?? 0, message: event.message },
-            }));
-          } else if (event.type === 'stage_done' && event.stage) {
-            setStages((prev) => ({
-              ...prev,
-              [event.stage!]: { status: 'done', progress: 100, elapsed: event.elapsed },
-            }));
-          } else if (event.type === 'poses_update' && event.poses) {
-            setPoses(event.poses as PoseResult[]);
-          } else if (event.type === 'job_done') {
-            setRunning(false);
-            if (isBatch) {
-              setBatchProgress(100);
-            }
-            // Use event.poses from backend (aggregated data for all ligands)
-            // Local 'poses' state is only for displaying current ligand during execution
-            const finalPoses = (event.poses ?? []) as PoseResult[];
-            const runDir = event.output_path ?? '';
-            const runName = jobConfig.params?.runName ?? 'matcha_tui_run';
-            const isBatchRun =
-              (event.total_ligands ?? 0) > 1 || jobConfig.mode === 'batch';
-
-            // Check if all ligands failed
-            const ligandStatuses = event.ligand_statuses as LigandStatus[] | undefined;
-            const completedCount = ligandStatuses?.filter(l => l.status === 'completed').length ?? 0;
-            const failedCount = ligandStatuses?.filter(l => l.status === 'failed').length ?? 0;
-            const allFailed = failedCount > 0 && completedCount === 0;
-
-            // If all failed, show error and go to welcome
-            if (allFailed) {
-              const firstError = ligandStatuses?.find(l => l.error_message)?.error_message;
-              setError(`Docking failed: ${firstError ?? 'All ligands failed'}`);
-              setScreen('welcome');
-              return;
-            }
-
-            const bestPosePath = isBatchRun
-              ? path.join(runDir, 'best_poses')
-              : path.join(runDir, `${runName}_best.sdf`);
-            const allPosesPath = isBatchRun
-              ? path.join(runDir, 'all_poses')
-              : path.join(runDir, `${runName}_poses.sdf`);
-            const logPath = path.join(runDir, `${runName}.log`);
-
-            // DEBUG: Log received poses
-            console.error('[DEBUG] job_done event.poses count:', finalPoses.length);
-            if (finalPoses.length > 0) {
-              console.error('[DEBUG] First pose:', JSON.stringify(finalPoses[0], null, 2));
-            }
-
-            const results = {
-              runName,
-              runtime: (Date.now() - startTime) / 1000,
-              totalPoses: finalPoses.length,
-              physicalPoses: finalPoses.filter((p) => p.pb_count === 4).length,
-              poses: finalPoses,
-              bestPosePath,
-              allPosesPath,
-              logPath,
-              receptor: jobConfig.receptor,
-              ligand: jobConfig.mode === 'batch' ? jobConfig.ligandDir : jobConfig.ligand,
-              totalLigands: event.total_ligands,
-              ligandStatuses,
-            };
-
-            setResults(results);
-
-            // Check if user is still on running screen
-            // If they navigated away, show notification instead of auto-navigating
-            if (screen === 'running') {
-              setScreen('results');
-            } else {
-              setNotification('✓ Docking completed! View results in History.');
-            }
-          } else if (event.type === 'error') {
-            setError(event.message ?? 'Unknown error');
-            setRunning(false);
-          } else if (event.type === 'cancelled') {
-            setRunning(false);
-            setScreen('welcome');
-          }
-        });
+        // Subscribe to progress BEFORE starting docking
+        bridge.on('progress', handleProgress);
 
         addLog('Backend initialized, starting docking...');
         setBridgeReady(true);
@@ -385,7 +402,14 @@ export function RunningScreen(): React.ReactElement {
         const { job_id } = await bridge.startDocking(config);
 
         // Save job_id for tracking
+        jobIdRef.current = job_id;
         setCurrentJob(job_id);
+        addJob({
+          id: job_id,
+          config: jobConfig as JobConfig,
+          status: 'running',
+          startTime: new Date().toISOString(),
+        });
         addLog(`Job started with ID: ${job_id}`);
       } catch (err) {
         const error = err as Error;
@@ -398,12 +422,17 @@ export function RunningScreen(): React.ReactElement {
 
     startJob();
 
-    // No cleanup on unmount - allow background job to continue
-    // Backend will be cleaned up when app exits
+    // Cleanup: remove progress listener on unmount (job continues in background)
+    return () => {
+      try {
+        const bridge = getBridge();
+        bridge.removeListener('progress', handleProgress);
+      } catch {
+        // Bridge may already be closed
+      }
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  // Progress events are now handled in the first useEffect (before startDocking)
 
   useInput((input, key) => {
     if (isKey(input, 'c') && bridgeReady && currentJobId) {
@@ -432,7 +461,7 @@ export function RunningScreen(): React.ReactElement {
           </>
         )}
         <Text color="gray" dimColor> • </Text>
-        <Text color="cyan" dimColor>h/Esc</Text>
+        <Text color="#D0D1FA" dimColor>h/Esc</Text>
         <Text color="gray" dimColor> run in background</Text>
       </Box>
 
@@ -474,7 +503,7 @@ export function RunningScreen(): React.ReactElement {
                 <Text color="white">{String(pose.rank).padEnd(6)}</Text>
                 <Text color={pose.pb_count === 4 ? 'green' : 'yellow'}>{`${pose.pb_count ?? 0}/4`.padEnd(8)}</Text>
                 {pose.gnina_score != null && (
-                  <Text color="cyan">{pose.gnina_score.toFixed(2)}</Text>
+                  <Text color="#D0D1FA">{pose.gnina_score.toFixed(2)}</Text>
                 )}
               </Box>
             ))}
@@ -544,7 +573,7 @@ function LigandRow({ ligand, isCurrent }: { ligand: LigandStatus; isCurrent: boo
           {ligand.gnina_score != null && (
             <>
               <Text color="gray"> aff: </Text>
-              <Text color="cyan">{ligand.gnina_score.toFixed(2)}</Text>
+              <Text color="#D0D1FA">{ligand.gnina_score.toFixed(2)}</Text>
             </>
           )}
         </>

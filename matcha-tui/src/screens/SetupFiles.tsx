@@ -193,7 +193,7 @@ export function SetupFiles(): React.ReactElement {
     <Box flexDirection="column">
       <Box marginY={1} flexDirection="column" gap={1}>
         <Box flexDirection="column">
-          <Text color={activeField === 'receptor' ? 'cyan' : 'white'} bold>
+          <Text color={activeField === 'receptor' ? '#D0D1FA' : 'white'} bold>
             {activeField === 'receptor' ? '▸ ' : '  '}Receptor (.pdb)
           </Text>
           <Box marginLeft={2}>
@@ -236,7 +236,7 @@ export function SetupFiles(): React.ReactElement {
         </Box>
 
         <Box flexDirection="column">
-          <Text color={activeField === 'ligand' ? 'cyan' : 'white'} bold>
+          <Text color={activeField === 'ligand' ? '#D0D1FA' : 'white'} bold>
             {activeField === 'ligand' ? '▸ ' : '  '}{ligandLabel}
           </Text>
           <Box marginLeft={2}>
@@ -291,9 +291,9 @@ export function SetupFiles(): React.ReactElement {
       <Box marginTop={2} gap={2}>
         {receptorState.mode === 'input' && ligandState.mode === 'input' && (
           <>
-            <Text color="cyan">[Space] Browse files</Text>
+            <Text color="#D0D1FA">[Space] Browse files</Text>
             <Text color="gray">[Tab] Switch field</Text>
-            <Text color="cyan">[Enter] Continue</Text>
+            <Text color="#D0D1FA">[Enter] Continue</Text>
           </>
         )}
         <Text color="gray">[Esc] {receptorState.mode === 'browse' || ligandState.mode === 'browse' ? 'Cancel' : 'Back'}</Text>
@@ -303,7 +303,7 @@ export function SetupFiles(): React.ReactElement {
         <Text color="gray">┌─ Progress ──────────────────────────────────┐</Text>
         <Text>
           <Text color="gray">│</Text>
-          <Text color="cyan"> ✓ Mode  ● Files  ○ Box  ○ Params  ○ Review </Text>
+          <Text color="#D0D1FA"> ✓ Mode  ● Files  ○ Box  ○ Params  ○ Review </Text>
           <Text color="gray">│</Text>
         </Text>
         <Text color="gray">└──────────────────────────────────────────────┘</Text>

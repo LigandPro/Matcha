@@ -9,7 +9,7 @@ interface SpinnerProps {
 export function Spinner({ label }: SpinnerProps): React.ReactElement {
   return (
     <Box>
-      <Text color="cyan">
+      <Text color="#D0D1FA">
         <InkSpinner type="dots" />
       </Text>
       {label && <Text color="gray"> {label}</Text>}

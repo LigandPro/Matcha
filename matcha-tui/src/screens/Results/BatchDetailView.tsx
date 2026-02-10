@@ -91,7 +91,7 @@ export function BatchDetailView({
               {bestPose.gnina_score != null && (
                 <Box>
                   <Text color="gray">GNINA affinity: </Text>
-                  <Text color="cyan">{bestPose.gnina_score.toFixed(2)}</Text>
+                  <Text color="#D0D1FA">{bestPose.gnina_score.toFixed(2)}</Text>
                 </Box>
               )}
             </>

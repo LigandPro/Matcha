@@ -87,6 +87,10 @@ export function SetupReview(): React.ReactElement {
             </Text>
           </Box>
           <Box>
+            <Text color="gray" bold>{'  Scoring:       '}</Text>
+            <Text color="white">GNINA (auto, requires CUDA)</Text>
+          </Box>
+          <Box>
             <Text color="gray" bold>{'  Run name:      '}</Text>
             <Text color="white">{runName}</Text>
           </Box>
@@ -98,7 +102,7 @@ export function SetupReview(): React.ReactElement {
       </Box>
 
       <Box marginY={1} gap={2}>
-        <Text color="cyan" bold>[Enter] Start docking</Text>
+        <Text color="#D0D1FA" bold>[Enter] Start docking</Text>
         <Text color="gray">[Esc] Back</Text>
       </Box>
 
@@ -106,7 +110,7 @@ export function SetupReview(): React.ReactElement {
         <Text color="gray">┌─ Progress ──────────────────────────────────┐</Text>
         <Text>
           <Text color="gray">│</Text>
-          <Text color="cyan"> ✓ Mode  ✓ Files  ✓ Box  ✓ Params  ● Review </Text>
+          <Text color="#D0D1FA"> ✓ Mode  ✓ Files  ✓ Box  ✓ Params  ● Review </Text>
           <Text color="gray">│</Text>
         </Text>
         <Text color="gray">└──────────────────────────────────────────────┘</Text>

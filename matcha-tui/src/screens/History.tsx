@@ -370,13 +370,13 @@ export function HistoryScreen(): React.ReactElement {
         </Box>
 
         <Box paddingX={1}>
-          <Text color="cyan" dimColor>[y]</Text>
+          <Text color="#D0D1FA" dimColor>[y]</Text>
           <Text color="gray" dimColor> delete </Text>
           <Text color="gray" dimColor>· </Text>
-          <Text color="cyan" dimColor>[n]</Text>
+          <Text color="#D0D1FA" dimColor>[n]</Text>
           <Text color="gray" dimColor> cancel </Text>
           <Text color="gray" dimColor>· </Text>
-          <Text color="cyan" dimColor>[esc]</Text>
+          <Text color="#D0D1FA" dimColor>[esc]</Text>
           <Text color="gray" dimColor> close</Text>
         </Box>
       </Box>
@@ -387,7 +387,7 @@ export function HistoryScreen(): React.ReactElement {
     return (
       <Box flexDirection="column" gap={1}>
         <EmptyState message="No previous runs found" hint="Run a docking job to see it here" />
-        <Box marginTop={2}><Text color="cyan">[Esc] Back to home</Text></Box>
+        <Box marginTop={2}><Text color="#D0D1FA">[Esc] Back to home</Text></Box>
       </Box>
     );
   }
@@ -408,8 +408,8 @@ export function HistoryScreen(): React.ReactElement {
 
           return (
             <Box key={run.path}>
-              <Text color={isSelected ? 'cyan' : 'white'}>{isSelected ? '▶ ' : '  '}</Text>
-              <Text color={isSelected ? 'cyan' : 'white'} bold={isSelected}>{run.name.slice(0, 23).padEnd(25)}</Text>
+              <Text color={isSelected ? '#D0D1FA' : 'white'}>{isSelected ? '▶ ' : '  '}</Text>
+              <Text color={isSelected ? '#D0D1FA' : 'white'} bold={isSelected}>{run.name.slice(0, 23).padEnd(25)}</Text>
               <Text color="gray">{formatDate(run.date).padEnd(20)}</Text>
               <Text color={statusColor}>{statusIcon} {run.status}</Text>
             </Box>
@@ -438,7 +438,7 @@ export function HistoryScreen(): React.ReactElement {
       )}
 
       <Box marginTop={2} gap={2}>
-        <Text color="cyan">[Enter] View results</Text>
+        <Text color="#D0D1FA">[Enter] View results</Text>
         <Text color="red">[d] Delete</Text>
         <Text color="gray">[↑/↓] Navigate</Text>
         <Text color="gray">[Esc] Back</Text>

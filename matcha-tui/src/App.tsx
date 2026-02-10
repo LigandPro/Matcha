@@ -107,13 +107,13 @@ export function App(): React.ReactElement {
     }
 
     // Navigate to jobs screen
-    if (input === 'j' && activeJobs.size > 0 && screen !== 'jobs') {
+    if (isKey(input, 'j') && activeJobs.size > 0 && screen !== 'jobs') {
       navigateTo('jobs');
       return;
     }
 
     // Return to running screen if background task exists
-    if (input === 'r') {
+    if (isKey(input, 'r')) {
       const runningJob = getRunningJob();
       if (runningJob && screen !== 'running') {
         setCurrentJob(runningJob.id);
@@ -152,6 +152,7 @@ export function App(): React.ReactElement {
     }
 
     const backMap: Partial<Record<Screen, Screen>> = {
+      setup: 'welcome',
       'setup-files': 'welcome',
       'setup-box': 'setup-files',
       'setup-params': 'setup-box',
@@ -202,7 +203,7 @@ export function App(): React.ReactElement {
       </Box>
 
       {/* Main content */}
-      <Box flexGrow={1} flexShrink={1} minHeight={0} flexDirection="column" paddingX={1}>
+      <Box flexGrow={1} flexShrink={1} flexDirection="column" paddingX={1}>
         <ScreenRouter screen={screen} />
       </Box>
 

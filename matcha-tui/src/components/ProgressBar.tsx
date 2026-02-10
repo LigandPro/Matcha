@@ -31,7 +31,7 @@ export function ProgressBar({
         </Text>
       )}
       <Box>
-        <Text color="cyan">{bar}</Text>
+        <Text color="#D0D1FA">{bar}</Text>
         {showPercent && (
           <Text color="gray"> {formatPercent(clampedPercent)}</Text>
         )}

@@ -126,7 +126,7 @@ export function SetupParams(): React.ReactElement {
     const isActive = activeField === field;
     return (
       <Box flexDirection="column">
-        <Text color={isActive ? 'cyan' : 'white'} bold>
+        <Text color={isActive ? '#D0D1FA' : 'white'} bold>
           {isActive ? '▸ ' : '  '}{label}
         </Text>
         <Box marginLeft={2}>
@@ -151,7 +151,7 @@ export function SetupParams(): React.ReactElement {
         {renderField('gpu', 'GPU device (empty for auto)', gpu, setGpu, 'auto')}
 
         <Box flexDirection="column">
-          <Text color={activeField === 'physicalOnly' ? 'cyan' : 'white'} bold>
+          <Text color={activeField === 'physicalOnly' ? '#D0D1FA' : 'white'} bold>
             {activeField === 'physicalOnly' ? '▸ ' : '  '}Physical-only filter
           </Text>
           <Box marginLeft={2}>
@@ -172,7 +172,7 @@ export function SetupParams(): React.ReactElement {
       )}
 
       <Box marginTop={2} gap={2}>
-        <Text color="cyan">[Enter] Continue</Text>
+        <Text color="#D0D1FA">[Enter] Continue</Text>
         <Text color="gray">[Esc] Back</Text>
       </Box>
 
@@ -180,7 +180,7 @@ export function SetupParams(): React.ReactElement {
         <Text color="gray">┌─ Progress ──────────────────────────────────┐</Text>
         <Text>
           <Text color="gray">│</Text>
-          <Text color="cyan"> ✓ Mode  ✓ Files  ✓ Box  ● Params  ○ Review </Text>
+          <Text color="#D0D1FA"> ✓ Mode  ✓ Files  ✓ Box  ● Params  ○ Review </Text>
           <Text color="gray">│</Text>
         </Text>
         <Text color="gray">└──────────────────────────────────────────────┘</Text>
