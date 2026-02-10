@@ -6,7 +6,7 @@ import { isKey } from '../utils/keyboard.js';
 import * as path from 'path';
 
 export function SetupReview(): React.ReactElement {
-  const { setScreen, jobConfig } = useStore();
+  const { setScreen, jobConfig, setCurrentJob } = useStore();
 
   const mode = jobConfig.mode === 'batch' ? 'Batch (multiple ligands)' : 'Single ligand';
   const receptor = jobConfig.receptor ? path.basename(jobConfig.receptor) : '—';
@@ -29,6 +29,8 @@ export function SetupReview(): React.ReactElement {
   const { nSamples, gpu, physicalOnly, runName, outputDir } = jobConfig.params || {};
 
   const startDocking = () => {
+    // Ensure Running screen starts a new job instead of resuming a previous one.
+    setCurrentJob(null);
     setScreen('running');
   };
 

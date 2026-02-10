@@ -73,7 +73,7 @@ export function Welcome(): React.ReactElement {
           {recentJobs.map((job) => (
             <Box key={job.id}>
               <Text color="gray">• </Text>
-              <Text color="white">{job.config.params?.runName || job.id}</Text>
+              <Text color="white">{job.config?.params?.runName || job.id}</Text>
               <Text color="gray"> - {job.status}</Text>
             </Box>
           ))}

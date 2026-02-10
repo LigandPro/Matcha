@@ -84,12 +84,15 @@ export interface JobConfig {
 // Active job info (for job queue)
 export interface ActiveJob {
   id: string;
-  config: JobConfig;
+  config: Partial<JobConfig> | null;
   status: JobStatus;
   startTime?: string;
   endTime?: string;
   progress?: ProgressInfo;
   error?: string;
+  requestedGpu?: number;
+  assignedGpu?: number;
+  externalGpuBusy?: boolean;
 }
 
 // Ligand status in batch mode

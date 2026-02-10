@@ -4,11 +4,13 @@
 
 import React, { useEffect, useCallback, useState } from 'react';
 import { Box, Text, useApp, useInput, useStdout } from 'ink';
+import path from 'path';
 import { useStore } from './store/index.js';
 import { Header } from './components/Header.js';
 import { Footer } from './components/Footer.js';
 import { logger } from './utils/logger.js';
 import { isKey } from './utils/keyboard.js';
+import { initBridge, closeBridge, getBridge } from './services/index.js';
 
 // Screen imports
 import { Welcome } from './screens/Welcome.js';
@@ -52,6 +54,10 @@ export function App(): React.ReactElement {
   const debugMode = useStore((s) => s.debugMode);
   const trackNavigation = useStore((s) => s.trackNavigation);
   const modalOpen = useStore((s) => s.modalOpen);
+  const setModalOpen = useStore((s) => s.setModalOpen);
+  const syncJobsFromBackend = useStore((s) => s.syncJobsFromBackend);
+  const applyProgressEvent = useStore((s) => s.applyProgressEvent);
+  const addDebugLog = useStore((s) => s.addDebugLog);
 
   // Multi-job support
   const activeJobs = useStore((s) => s.activeJobs);
@@ -60,6 +66,7 @@ export function App(): React.ReactElement {
 
   // Get terminal dimensions for full-screen mode with resize tracking
   const [terminalHeight, setTerminalHeight] = useState(stdout?.rows || 24);
+  const [helpOpen, setHelpOpen] = useState(false);
 
   // Update dimensions on terminal resize
   useEffect(() => {
@@ -92,8 +99,103 @@ export function App(): React.ReactElement {
     [screen, debugMode, setScreen, trackNavigation, setPreviousScreen]
   );
 
+  // Initialize backend bridge once and keep it running for background jobs.
+  useEffect(() => {
+    let disposed = false;
+    let pollTimer: NodeJS.Timeout | null = null;
+
+    const start = async () => {
+      try {
+        const projectRoot =
+          process.env.MATCHA_ROOT || path.join(process.cwd(), '..');
+
+        const bridge = await initBridge({
+          projectRoot,
+          useUv: true,
+        });
+
+        if (disposed) return;
+
+        const onProgress = (event: any) => {
+          applyProgressEvent(event);
+
+          // Notify on background completion
+          if (event?.type === 'job_done') {
+            const currentScreen = useStore.getState().screen;
+            if (currentScreen !== 'running') {
+              setNotification('Docking completed! View results in History.');
+            }
+          } else if (event?.type === 'error') {
+            const msg = typeof event?.message === 'string' ? event.message : 'Unknown error';
+            setNotification(`Job failed: ${msg}`);
+          }
+        };
+
+        const onDebug = (event: any) => {
+          if (!debugMode) return;
+          addDebugLog({
+            level: event.level,
+            component: event.component,
+            message: event.message,
+            data: event.data,
+          });
+          const logMethod = event.level as 'debug' | 'info' | 'warn' | 'error';
+          logger[logMethod](event.component, event.message, event.data);
+        };
+
+        bridge.on('progress', onProgress);
+        bridge.on('debug', onDebug);
+
+        // Initial sync
+        try {
+          const { jobs } = await bridge.listJobs();
+          syncJobsFromBackend(jobs as any);
+        } catch {
+          // Ignore sync errors
+        }
+
+        // Periodic sync (recover from missed events)
+        pollTimer = setInterval(async () => {
+          try {
+            const b = getBridge();
+            if (!b.isReady()) return;
+            const { jobs } = await b.listJobs();
+            syncJobsFromBackend(jobs as any);
+          } catch {
+            // Ignore poll errors
+          }
+        }, 2000);
+
+        return () => {
+          bridge.removeListener('progress', onProgress);
+          bridge.removeListener('debug', onDebug);
+        };
+      } catch (err) {
+        const error = err as Error;
+        setError(`Failed to start backend: ${error.message}`);
+      }
+    };
+
+    const cleanupPromise = start();
+
+    return () => {
+      disposed = true;
+      if (pollTimer) clearInterval(pollTimer);
+      void cleanupPromise;
+      void closeBridge();
+    };
+  }, [applyProgressEvent, syncJobsFromBackend, setError, setNotification, debugMode, addDebugLog]);
+
   // Global keyboard shortcuts
   useInput((input, key) => {
+    if (helpOpen) {
+      if (key.escape || input === '?') {
+        setHelpOpen(false);
+        setModalOpen(false);
+      }
+      return;
+    }
+
     // Quit on 'q' (unless running or in input mode)
     if (input === 'q' && !isRunning && screen !== 'setup-files') {
       exit();
@@ -107,7 +209,8 @@ export function App(): React.ReactElement {
     }
 
     // Navigate to jobs screen
-    if (isKey(input, 'j') && activeJobs.size > 0 && screen !== 'jobs') {
+    const hasActiveJobs = Boolean(getRunningJob() || useStore.getState().getQueuedJobs().length > 0);
+    if (isKey(input, 'j') && hasActiveJobs && screen !== 'jobs') {
       navigateTo('jobs');
       return;
     }
@@ -128,7 +231,8 @@ export function App(): React.ReactElement {
 
     // Help on '?'
     if (input === '?') {
-      // TODO: Show help overlay
+      setHelpOpen(true);
+      setModalOpen(true);
       return;
     }
 
@@ -204,7 +308,7 @@ export function App(): React.ReactElement {
 
       {/* Main content */}
       <Box flexGrow={1} flexShrink={1} flexDirection="column" paddingX={1}>
-        <ScreenRouter screen={screen} />
+        {helpOpen ? <HelpOverlay screen={screen} /> : <ScreenRouter screen={screen} />}
       </Box>
 
       {/* Footer - hide when modal is open */}
@@ -247,4 +351,109 @@ function ScreenRouter({ screen }: { screen: Screen }): React.ReactElement {
         </Box>
       );
   }
+}
+
+function HelpOverlay({ screen }: { screen: Screen }): React.ReactElement {
+  const shortcutsByScreen: Record<Screen, Array<{ key: string; label: string }>> = {
+    welcome: [
+      { key: '↑/↓', label: 'Navigate' },
+      { key: 'Enter/→', label: 'Select' },
+      { key: 'n', label: 'New docking' },
+      { key: 'h', label: 'History' },
+      { key: 'q', label: 'Quit' },
+    ],
+    setup: [
+      { key: '↑/↓', label: 'Navigate' },
+      { key: 'Enter/→', label: 'Select' },
+      { key: 'Esc/←', label: 'Back' },
+    ],
+    'setup-files': [
+      { key: 'Tab', label: 'Switch field / Continue' },
+      { key: 'Space', label: 'Browse files' },
+      { key: 'Enter/→', label: 'Continue' },
+      { key: 'Esc/←', label: 'Back / Cancel browse' },
+    ],
+    'setup-box': [
+      { key: 'Enter/→', label: 'Continue' },
+      { key: 'Tab', label: 'Next field' },
+      { key: 'Space', label: 'Browse (autobox)' },
+      { key: 'Esc/←', label: 'Back / Cancel browse' },
+    ],
+    'setup-params': [
+      { key: 'Tab', label: 'Next field' },
+      { key: 'Shift+Tab/↑', label: 'Previous field' },
+      { key: 'Enter', label: 'Continue / Toggle checkbox' },
+      { key: 'Space', label: 'Toggle checkbox' },
+      { key: 'Esc/←', label: 'Back' },
+    ],
+    'setup-review': [
+      { key: 'Enter/→', label: 'Start docking' },
+      { key: 'Esc/←', label: 'Back' },
+    ],
+    running: [
+      { key: 'c', label: 'Cancel job' },
+      { key: 'h/Esc/←', label: 'Home (run in background)' },
+    ],
+    results: [
+      { key: 'n', label: 'New docking' },
+      { key: 'v', label: 'View 3D' },
+      { key: 'b/←', label: 'Back' },
+      { key: 'h', label: 'Home' },
+    ],
+    history: [
+      { key: '↑/↓', label: 'Navigate' },
+      { key: 'Enter/→', label: 'View run' },
+      { key: 'd', label: 'Delete run' },
+      { key: 'Esc/←', label: 'Back' },
+    ],
+    jobs: [
+      { key: '↑/↓', label: 'Navigate' },
+      { key: 'Enter/→', label: 'View progress' },
+      { key: 'c', label: 'Cancel selected job' },
+      { key: 'Esc/←', label: 'Back' },
+    ],
+  };
+
+  const globalShortcuts: Array<{ key: string; label: string }> = [
+    { key: '?', label: 'Close help' },
+    { key: 'r', label: 'Go to running job' },
+    { key: 'j', label: 'Show jobs list' },
+  ];
+
+  const screenShortcuts = shortcutsByScreen[screen] ?? [];
+
+  return (
+    <Box flexDirection="column" paddingX={1}>
+      <Box borderStyle="round" borderColor="gray" paddingX={1}>
+        <Box flexDirection="column" gap={1}>
+          <Text bold color="#D0D1FA">Help</Text>
+          <Text color="gray" dimColor>Screen: {screen}</Text>
+
+          <Box flexDirection="column" marginTop={1}>
+            <Text bold color="white">Global</Text>
+            {globalShortcuts.map((s) => (
+              <Box key={s.key}>
+                <Text color="#D0D1FA" dimColor>[{s.key}]</Text>
+                <Text color="gray" dimColor>{' '}{s.label}</Text>
+              </Box>
+            ))}
+          </Box>
+
+          <Box flexDirection="column" marginTop={1}>
+            <Text bold color="white">This Screen</Text>
+            {screenShortcuts.map((s) => (
+              <Box key={s.key}>
+                <Text color="#D0D1FA" dimColor>[{s.key}]</Text>
+                <Text color="gray" dimColor>{' '}{s.label}</Text>
+              </Box>
+            ))}
+          </Box>
+
+          <Box marginTop={1}>
+            <Text color="gray" dimColor>Press [Esc] or [?] to close</Text>
+          </Box>
+        </Box>
+      </Box>
+    </Box>
+  );
 }

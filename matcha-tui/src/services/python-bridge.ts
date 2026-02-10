@@ -36,6 +36,14 @@ export interface ProgressEvent {
   ligand_statuses?: unknown[];
 }
 
+export interface DebugEvent {
+  level: 'debug' | 'info' | 'warn' | 'error';
+  component: string;
+  message: string;
+  timestamp?: string;
+  data?: Record<string, unknown>;
+}
+
 export interface FileInfo {
   name: string;
   path: string;
@@ -146,6 +154,8 @@ export class PythonBridge extends EventEmitter {
         this.emit('ready');
       } else if (notification.method === 'progress') {
         this.emit('progress', notification.params as ProgressEvent);
+      } else if (notification.method === 'debug') {
+        this.emit('debug', notification.params as DebugEvent);
       } else if (notification.method === 'error') {
         this.emit('backend-error', notification.params);
       }
@@ -317,9 +327,16 @@ export class PythonBridge extends EventEmitter {
   async listJobs(): Promise<{
     jobs: Array<{
       job_id: string;
-      status: 'running' | 'queued';
+      status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
       config: Record<string, unknown>;
       cancelled: boolean;
+      requested_gpu?: number;
+      assigned_gpu?: number;
+      external_gpu_busy?: boolean;
+      progress?: { stage: string; percent: number };
+      error?: string;
+      start_time?: string;
+      end_time?: string;
     }>;
   }> {
     this.ensureReady();
@@ -414,6 +431,7 @@ export class PythonBridge extends EventEmitter {
 
 // Singleton instance
 let _bridge: PythonBridge | null = null;
+let _startPromise: Promise<PythonBridge> | null = null;
 
 export function getBridge(): PythonBridge {
   if (!_bridge) {
@@ -423,12 +441,28 @@ export function getBridge(): PythonBridge {
 }
 
 export async function initBridge(options?: BridgeOptions): Promise<PythonBridge> {
-  if (_bridge) {
-    await _bridge.stop();
+  if (_bridge?.isReady()) {
+    return _bridge;
   }
-  _bridge = new PythonBridge(options);
-  await _bridge.start();
-  return _bridge;
+
+  if (_startPromise) {
+    return _startPromise;
+  }
+
+  _startPromise = (async () => {
+    if (_bridge) {
+      await _bridge.stop();
+    }
+    _bridge = new PythonBridge(options);
+    await _bridge.start();
+    return _bridge;
+  })();
+
+  try {
+    return await _startPromise;
+  } finally {
+    _startPromise = null;
+  }
 }
 
 export async function closeBridge(): Promise<void> {

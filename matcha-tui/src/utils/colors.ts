@@ -44,7 +44,7 @@ export const icons = {
 };
 
 // Status types for color mapping
-export type JobStatus = 'pending' | 'running' | 'completed' | 'failed';
+export type JobStatus = 'pending' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
 export type StageStatus = 'pending' | 'running' | 'done';
 
 /**
@@ -56,9 +56,11 @@ export type StageStatus = 'pending' | 'running' | 'done';
 export function getStatusColor(status: JobStatus): 'gray' | 'yellow' | 'green' | 'red' {
   const colorMap: Record<JobStatus, 'gray' | 'yellow' | 'green' | 'red'> = {
     pending: 'gray',
+    queued: 'gray',
     running: 'yellow',
     completed: 'green',
     failed: 'red',
+    cancelled: 'gray',
   };
   return colorMap[status] ?? 'gray';
 }

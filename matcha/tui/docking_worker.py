@@ -344,17 +344,18 @@ def run_docking(job: "DockingJob") -> None:
         if gpu is not None:
             os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
             resolved_device = "cuda"
-            cuda_device_idx = int(gpu)
+            # When CUDA_VISIBLE_DEVICES is set to a single device, the visible CUDA index is 0.
+            cuda_device_idx = 0
         elif device_cfg and device_cfg != "auto":
             if device_cfg.isdigit():
                 os.environ["CUDA_VISIBLE_DEVICES"] = device_cfg
                 resolved_device = "cuda"
-                cuda_device_idx = int(device_cfg)
+                cuda_device_idx = 0
             elif device_cfg.startswith("cuda:"):
                 idx = device_cfg.split(":")[1]
                 os.environ["CUDA_VISIBLE_DEVICES"] = idx
                 resolved_device = "cuda"
-                cuda_device_idx = int(idx)
+                cuda_device_idx = 0
             elif device_cfg in ("cuda", "mps", "cpu"):
                 resolved_device = device_cfg
             else:

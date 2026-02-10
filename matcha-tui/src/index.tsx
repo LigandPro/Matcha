@@ -8,10 +8,17 @@
 import React from 'react';
 import { render } from 'ink';
 import { App } from './App.js';
+import fs from 'fs';
+import path from 'path';
 
 async function main(): Promise<void> {
   // Set project root for docking service
-  process.env.MATCHA_ROOT = process.env.MATCHA_ROOT ?? process.cwd();
+  if (!process.env.MATCHA_ROOT) {
+    const cwd = process.cwd();
+    const parent = path.resolve(cwd, '..');
+    // If running from matcha-tui/, prefer the repo root (contains pyproject.toml).
+    process.env.MATCHA_ROOT = fs.existsSync(path.join(parent, 'pyproject.toml')) ? parent : cwd;
+  }
 
   try {
     // Clear terminal before rendering

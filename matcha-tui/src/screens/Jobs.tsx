@@ -6,16 +6,19 @@ import React, { useState, useEffect } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { useStore } from '../store/index.js';
 import { getBridge } from '../services/python-bridge.js';
-import { getStatusColor } from '../utils/colors.js';
+import { icons, getStatusColor } from '../utils/colors.js';
 
 export function JobsScreen(): React.ReactElement {
   const setScreen = useStore((s) => s.setScreen);
   const setCurrentJob = useStore((s) => s.setCurrentJob);
   const activeJobs = useStore((s) => s.activeJobs);
+  const syncJobsFromBackend = useStore((s) => s.syncJobsFromBackend);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
 
-  const jobsList = Array.from(activeJobs.values());
+  const jobsList = Array.from(activeJobs.values()).filter(
+    (j) => j.status === 'running' || j.status === 'queued'
+  );
 
   // Poll for job updates every 2 seconds
   useEffect(() => {
@@ -24,8 +27,8 @@ export function JobsScreen(): React.ReactElement {
         setRefreshing(true);
         const bridge = getBridge();
         if (bridge.isReady()) {
-          await bridge.listJobs();
-          // Jobs will be updated via store by the caller
+          const { jobs } = await bridge.listJobs();
+          syncJobsFromBackend(jobs as any);
         }
       } catch (err) {
         // Ignore errors during polling
@@ -53,6 +56,9 @@ export function JobsScreen(): React.ReactElement {
       const job = jobsList[selectedIndex];
       setCurrentJob(job.id);
       setScreen('running');
+    } else if (input === 'c' && jobsList.length > 0) {
+      const job = jobsList[selectedIndex];
+      getBridge().cancelJob(job.id).catch(() => {});
     } else if (key.escape || input === 'b' || key.leftArrow) {
       setScreen('welcome');
     }
@@ -97,8 +103,17 @@ export function JobsScreen(): React.ReactElement {
       {/* Jobs list */}
       {jobsList.map((job, idx) => {
         const isSelected = idx === selectedIndex;
-        const statusIcon = job.status === 'running' ? '●' : '○';
-        const statusColor = job.status === 'running' ? getStatusColor('running') : getStatusColor('pending');
+        const statusIcon =
+          job.status === 'running'
+            ? icons.running
+            : job.status === 'queued'
+            ? icons.pending
+            : job.status === 'completed'
+            ? icons.check
+            : job.status === 'failed'
+            ? icons.error
+            : icons.pending;
+        const statusColor = getStatusColor(job.status === 'queued' ? 'pending' : (job.status as any));
         const progress = job.progress?.percent ?? 0;
         const stage = job.progress?.stage ?? 'init';
 
@@ -125,6 +140,10 @@ export function JobsScreen(): React.ReactElement {
         <Box>
           <Text color="#D0D1FA" dimColor>[Enter]</Text>
           <Text color="gray" dimColor> View progress</Text>
+        </Box>
+        <Box>
+          <Text color="#D0D1FA" dimColor>[c]</Text>
+          <Text color="gray" dimColor> Cancel</Text>
         </Box>
         <Box>
           <Text color="#D0D1FA" dimColor>[Esc]</Text>

@@ -11,6 +11,8 @@ import sys
 import signal
 import threading
 import shutil
+import subprocess
+import time
 from pathlib import Path
 from typing import Any, Callable, Optional, Dict, TypedDict, List, Union
 from datetime import datetime
@@ -82,107 +84,374 @@ class DeleteResult(TypedDict, total=False):
 
 
 class JobManager:
-    """Thread-safe manager for docking jobs."""
+    """Thread-safe manager for docking jobs.
+
+    Runs each job in a separate OS process to allow safe parallelism and GPU pinning.
+    """
 
     def __init__(self):
-        self._jobs: Dict[str, "DockingJob"] = {}
+        self._jobs: Dict[str, "ManagedJob"] = {}
         self._job_queue: deque = deque()
-        self._running_job_id: Optional[str] = None
         self._lock = threading.Lock()
+        self._cv = threading.Condition(self._lock)
+        self._scheduler_thread: Optional[threading.Thread] = None
+        self._shutdown = False
+        self._all_gpus_cache: Optional[list[int]] = None
 
-    def add_job(self, job_id: str, job: "DockingJob") -> None:
+        # Keep finished jobs for a short time so the UI can still show them.
+        self._retention_seconds = 600
+
+    def start_scheduler(self) -> None:
+        """Start the background scheduler thread (idempotent)."""
+        with self._lock:
+            if self._scheduler_thread and self._scheduler_thread.is_alive():
+                return
+            self._shutdown = False
+            self._scheduler_thread = threading.Thread(target=self._scheduler_loop, daemon=True)
+            self._scheduler_thread.start()
+
+    def shutdown(self) -> None:
+        """Stop scheduling and terminate running jobs."""
+        with self._lock:
+            self._shutdown = True
+            self._cv.notify_all()
+
+        # Best-effort termination of all jobs.
+        self.cancel_all_jobs()
+
+    def add_job(self, job_id: str, job: "ManagedJob") -> None:
         """Add a job to the queue.
 
         Args:
             job_id: Unique job identifier
-            job: DockingJob instance
+            job: ManagedJob instance
         """
         with self._lock:
             self._jobs[job_id] = job
             self._job_queue.append(job_id)
             emit_debug("info", "backend", f"Job {job_id} added to queue (position: {len(self._job_queue)})")
+            self._cv.notify_all()
 
-    def start_next(self) -> None:
-        """Start the next job from the queue (must be called WITHOUT holding lock)."""
-        with self._lock:
-            if len(self._job_queue) == 0:
-                return
+    def _scheduler_loop(self) -> None:
+        """Periodically attempt to start queued jobs based on available GPUs."""
+        while True:
+            with self._lock:
+                if self._shutdown:
+                    return
+                self._prune_finished_locked()
+                # Attempt to start as many jobs as possible.
+                self._schedule_once_locked()
+                self._cv.wait(timeout=2.0)
 
-            job_id = self._job_queue.popleft()
-            job = self._jobs.get(job_id)
-
-            if not job:
-                return
-
-            self._running_job_id = job_id
-            emit_debug("info", "backend", f"Starting job from queue: {job_id}")
-
-        # Start thread OUTSIDE lock to avoid potential deadlocks
-        job.thread = threading.Thread(
-            target=self._run_job, args=(job_id,), daemon=False
-        )
-        job.thread.start()
-
-    def _run_job(self, job_id: str) -> None:
-        """Run a docking job in a separate thread."""
-        try:
-            job = self.get_job(job_id)
-            if not job:
-                emit_debug("error", "backend", f"Job not found: {job_id}")
-                return
-
-            emit_debug("info", "backend", f"Executing job: {job_id}")
-
-            # Import here to avoid circular dependency
-            from matcha.tui.docking_worker import run_docking
-
-            run_docking(job)
-
-        except Exception as e:
-            emit_debug("error", "backend", f"Job {job_id} failed: {e}")
-            # Send error notification
-            send_notification("job_error", {"job_id": job_id, "error": str(e)})
-        finally:
-            # Clean up and start next job
-            self.cleanup_job(job_id)
-
-    def cleanup_job(self, job_id: str) -> None:
-        """Clean up a completed job and start next in queue.
-
-        Args:
-            job_id: Job ID to clean up
-        """
-        # Perform cleanup inside lock
-        with self._lock:
-            if job_id in self._jobs:
-                del self._jobs[job_id]
-
-            if self._running_job_id == job_id:
-                self._running_job_id = None
-
-        # Start next job OUTSIDE lock to prevent deadlock
-        self.start_next()
-
-    def get_job(self, job_id: str) -> Optional["DockingJob"]:
+    def get_job(self, job_id: str) -> Optional["ManagedJob"]:
         """Get a job by ID (thread-safe).
 
         Args:
             job_id: Job identifier
 
         Returns:
-            DockingJob instance or None if not found
+            ManagedJob instance or None if not found
         """
         with self._lock:
             return self._jobs.get(job_id)
 
-    def get_running_job_id(self) -> Optional[str]:
-        """Get the currently running job ID (thread-safe).
+    def _get_all_gpus(self) -> list[int]:
+        """Return list of GPU indices, cached."""
+        if self._all_gpus_cache is not None:
+            return self._all_gpus_cache
+        try:
+            out = subprocess.check_output(
+                ["nvidia-smi", "--query-gpu=index", "--format=csv,noheader,nounits"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            )
+            indices = []
+            for line in out.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    indices.append(int(line))
+                except ValueError:
+                    continue
+            self._all_gpus_cache = sorted(set(indices))
+            return self._all_gpus_cache
+        except Exception:
+            self._all_gpus_cache = []
+            return []
 
-        Returns:
-            Job ID or None
-        """
+    def _get_external_busy_gpus(self) -> set[int]:
+        """Return set of GPU indices that have active compute processes (external view)."""
+        all_gpus = self._get_all_gpus()
+        if not all_gpus:
+            return set()
+        try:
+            gpu_uuid_out = subprocess.check_output(
+                ["nvidia-smi", "--query-gpu=index,uuid", "--format=csv,noheader,nounits"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            )
+            idx_by_uuid: dict[str, int] = {}
+            for line in gpu_uuid_out.splitlines():
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) != 2:
+                    continue
+                try:
+                    idx = int(parts[0])
+                except ValueError:
+                    continue
+                idx_by_uuid[parts[1]] = idx
+
+            compute_out = subprocess.check_output(
+                ["nvidia-smi", "--query-compute-apps=gpu_uuid,pid", "--format=csv,noheader,nounits"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            )
+            busy: set[int] = set()
+            for line in compute_out.splitlines():
+                parts = [p.strip() for p in line.split(",")]
+                if not parts or not parts[0]:
+                    continue
+                uuid = parts[0]
+                if uuid in idx_by_uuid:
+                    busy.add(idx_by_uuid[uuid])
+            return busy
+        except Exception:
+            # If we cannot query processes, assume unknown. Fall back to internal scheduling only.
+            emit_debug("warn", "backend", "Failed to query external GPU usage; falling back to internal-only scheduling")
+            return set()
+
+    def _internal_busy_gpus_locked(self) -> set[int]:
+        busy: set[int] = set()
+        for job in self._jobs.values():
+            if job.status == "running" and job.assigned_gpu is not None:
+                busy.add(job.assigned_gpu)
+        return busy
+
+    def _schedule_once_locked(self) -> None:
+        if not self._job_queue:
+            return
+
+        all_gpus = self._get_all_gpus()
+        internal_busy = self._internal_busy_gpus_locked()
+
+        # If GPU discovery is unavailable, fall back to a single-slot scheduler (CPU or unknown device).
+        if not all_gpus:
+            any_running = any(j.status == "running" for j in self._jobs.values())
+            if any_running:
+                return
+            # Start the first queued job.
+            for job_id in list(self._job_queue):
+                job = self._jobs.get(job_id)
+                if not job or job.status != "queued":
+                    continue
+                self._start_job_locked(job)
+                try:
+                    self._job_queue.remove(job_id)
+                except ValueError:
+                    pass
+                return
+
+        external_busy = self._get_external_busy_gpus()
+        auto_free = [g for g in all_gpus if g not in external_busy and g not in internal_busy]
+
+        started_any = True
+        while started_any:
+            started_any = False
+            for job_id in list(self._job_queue):
+                job = self._jobs.get(job_id)
+                if not job or job.status != "queued":
+                    # Remove stale entries.
+                    try:
+                        self._job_queue.remove(job_id)
+                    except ValueError:
+                        pass
+                    continue
+
+                # Cancelled before start
+                if job.cancel_requested:
+                    job.status = "cancelled"
+                    job.end_time = datetime.now().isoformat()
+                    try:
+                        self._job_queue.remove(job_id)
+                    except ValueError:
+                        pass
+                    send_notification("progress", {"job_id": job_id, "type": "cancelled", "message": "Job cancelled"})
+                    started_any = True
+                    break
+
+                requested = job.requested_gpu
+                if requested is not None:
+                    if requested in internal_busy:
+                        continue
+                    if all_gpus and requested not in all_gpus:
+                        job.status = "failed"
+                        job.error = f"Requested GPU {requested} not found"
+                        job.end_time = datetime.now().isoformat()
+                        try:
+                            self._job_queue.remove(job_id)
+                        except ValueError:
+                            pass
+                        send_notification("progress", {"job_id": job_id, "type": "error", "message": job.error})
+                        started_any = True
+                        break
+
+                    job.assigned_gpu = requested
+                    job.external_gpu_busy = requested in external_busy
+                    self._start_job_locked(job)
+                    internal_busy.add(requested)
+                    try:
+                        self._job_queue.remove(job_id)
+                    except ValueError:
+                        pass
+                    started_any = True
+                    break
+
+                # Auto scheduling
+                if auto_free:
+                    assigned = auto_free.pop(0)
+                    job.assigned_gpu = assigned
+                    self._start_job_locked(job)
+                    internal_busy.add(assigned)
+                    try:
+                        self._job_queue.remove(job_id)
+                    except ValueError:
+                        pass
+                    started_any = True
+                    break
+
+                # No resources left for auto jobs
+                return
+
+    def _start_job_locked(self, job: "ManagedJob") -> None:
+        """Spawn the worker process and start reader threads (lock must be held)."""
+        job.status = "running"
+        job.start_time = datetime.now().isoformat()
+        job.progress = {"stage": "init", "percent": 0}
+
+        cmd = [sys.executable, "-m", "matcha.tui.worker_process", "--job-id", job.job_id]
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        if job.assigned_gpu is not None:
+            env["CUDA_VISIBLE_DEVICES"] = str(job.assigned_gpu)
+
+        emit_debug("info", "backend", f"Spawning worker for job {job.job_id}", {"cmd": cmd, "gpu": job.assigned_gpu})
+
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+            cwd=os.getcwd(),
+            bufsize=1,
+        )
+        job.process = proc
+
+        # Send config then close stdin.
+        try:
+            assert proc.stdin is not None
+            proc.stdin.write(json.dumps(job.config))
+            proc.stdin.close()
+        except Exception as e:
+            emit_debug("error", "backend", f"Failed to send config to worker: {e}")
+
+        def stdout_reader() -> None:
+            assert proc.stdout is not None
+            for raw in proc.stdout:
+                line = raw.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except Exception:
+                    emit_debug("warn", "backend", "Failed to parse worker event", {"line": line[:500]})
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                event.setdefault("job_id", job.job_id)
+                send_notification("progress", event)
+                self._update_job_from_event(job.job_id, event)
+
+        def stderr_reader() -> None:
+            assert proc.stderr is not None
+            for raw in proc.stderr:
+                msg = raw.rstrip()
+                if not msg:
+                    continue
+                # Keep stderr as debug-only to avoid spamming UI.
+                emit_debug("warn", "worker-stderr", msg[:1000], {"job_id": job.job_id})
+
+        job.stdout_thread = threading.Thread(target=stdout_reader, daemon=True)
+        job.stderr_thread = threading.Thread(target=stderr_reader, daemon=True)
+        job.stdout_thread.start()
+        job.stderr_thread.start()
+
+        def waiter() -> None:
+            rc = proc.wait()
+            with self._lock:
+                self._finalize_after_exit_locked(job.job_id, rc)
+                self._cv.notify_all()
+
+        job.waiter_thread = threading.Thread(target=waiter, daemon=True)
+        job.waiter_thread.start()
+
+    def _update_job_from_event(self, job_id: str, event: dict) -> None:
         with self._lock:
-            return self._running_job_id
+            job = self._jobs.get(job_id)
+            if not job:
+                return
+            etype = event.get("type")
+            if etype in {"stage_start", "stage_progress", "stage_done"}:
+                stage = event.get("stage")
+                if stage:
+                    if etype == "stage_start":
+                        job.progress = {"stage": stage, "percent": 0}
+                    elif etype == "stage_progress":
+                        job.progress = {"stage": stage, "percent": int(event.get("progress") or 0)}
+                    elif etype == "stage_done":
+                        job.progress = {"stage": stage, "percent": 100}
+            elif etype == "job_done":
+                job.status = "completed"
+                job.end_time = datetime.now().isoformat()
+            elif etype == "cancelled":
+                job.status = "cancelled"
+                job.end_time = datetime.now().isoformat()
+            elif etype == "error":
+                job.status = "failed"
+                job.error = str(event.get("message") or "Unknown error")
+                job.end_time = datetime.now().isoformat()
+
+    def _finalize_after_exit_locked(self, job_id: str, returncode: int) -> None:
+        job = self._jobs.get(job_id)
+        if not job:
+            return
+        # If already terminal, keep it.
+        if job.status in {"completed", "failed", "cancelled"}:
+            return
+        if job.cancel_requested:
+            job.status = "cancelled"
+        elif returncode == 0:
+            job.status = "completed"
+        else:
+            job.status = "failed"
+            job.error = job.error or f"Worker exited with code {returncode}"
+        job.end_time = datetime.now().isoformat()
+
+    def _prune_finished_locked(self) -> None:
+        now = time.time()
+        to_delete: list[str] = []
+        for jid, job in self._jobs.items():
+            if job.status in {"completed", "failed", "cancelled"} and job.end_time:
+                try:
+                    end_ts = datetime.fromisoformat(job.end_time).timestamp()
+                except Exception:
+                    end_ts = now
+                if now - end_ts > self._retention_seconds:
+                    to_delete.append(jid)
+        for jid in to_delete:
+            self._jobs.pop(jid, None)
 
     def cancel_job(self, job_id: Optional[str] = None) -> tuple[bool, Optional[str]]:
         """Cancel a specific job or the running job.
@@ -194,14 +463,39 @@ class JobManager:
             Tuple of (success, actual_job_id)
         """
         with self._lock:
-            target_id = job_id or self._running_job_id
+            target_id = job_id
+            if target_id is None:
+                # Backward-compatible: cancel the first running job, else first queued job.
+                running = [j.job_id for j in self._jobs.values() if j.status == "running"]
+                queued = [j.job_id for j in self._jobs.values() if j.status == "queued"]
+                target_id = (running[0] if running else (queued[0] if queued else None))
 
             if not target_id or target_id not in self._jobs:
                 return (False, None)
 
             job = self._jobs[target_id]
             emit_debug("info", "backend", f"Cancelling job: {target_id}")
-            job.cancel()
+            job.cancel_requested = True
+
+            # If queued, it will be finalized by scheduler soon.
+            if job.status == "queued":
+                try:
+                    self._job_queue.remove(target_id)
+                except ValueError:
+                    pass
+                job.status = "cancelled"
+                job.end_time = datetime.now().isoformat()
+                send_notification("progress", {"job_id": target_id, "type": "cancelled", "message": "Job cancelled"})
+                self._cv.notify_all()
+                return (True, target_id)
+
+            # If running, terminate the worker process.
+            if job.status == "running" and job.process and job.process.poll() is None:
+                try:
+                    job.process.terminate()
+                except Exception:
+                    pass
+                self._cv.notify_all()
             return (True, target_id)
 
     def list_all_jobs(self) -> list[dict]:
@@ -212,27 +506,20 @@ class JobManager:
         """
         with self._lock:
             jobs_list = []
-
-            # Add running job
-            if self._running_job_id and self._running_job_id in self._jobs:
-                job = self._jobs[self._running_job_id]
+            for job in self._jobs.values():
                 jobs_list.append({
-                    "job_id": self._running_job_id,
-                    "status": "running",
+                    "job_id": job.job_id,
+                    "status": job.status,
                     "config": job.config,
-                    "cancelled": job.cancelled,
+                    "cancelled": job.cancel_requested or job.status == "cancelled",
+                    "requested_gpu": job.requested_gpu,
+                    "assigned_gpu": job.assigned_gpu,
+                    "external_gpu_busy": job.external_gpu_busy,
+                    "progress": job.progress,
+                    "error": job.error,
+                    "start_time": job.start_time,
+                    "end_time": job.end_time,
                 })
-
-            # Add queued jobs
-            for job_id in self._job_queue:
-                if job_id in self._jobs:
-                    job = self._jobs[job_id]
-                    jobs_list.append({
-                        "job_id": job_id,
-                        "status": "queued",
-                        "config": job.config,
-                        "cancelled": job.cancelled,
-                    })
 
             return jobs_list
 
@@ -240,7 +527,13 @@ class JobManager:
         """Cancel all jobs (for shutdown)."""
         with self._lock:
             for job in self._jobs.values():
-                job.cancel()
+                job.cancel_requested = True
+                if job.process and job.process.poll() is None:
+                    try:
+                        job.process.terminate()
+                    except Exception:
+                        pass
+            self._cv.notify_all()
 
 
 # Global job manager instance
@@ -272,21 +565,27 @@ def emit_debug(level: str, component: str, message: str, data: dict = None) -> N
     print(json.dumps(notification), flush=True)
 
 
-class DockingJob:
-    """Represents a running docking job."""
+class ManagedJob:
+    """Represents a docking job managed by the backend."""
 
-    def __init__(self, job_id: str, config: dict, progress_callback: Callable):
+    def __init__(self, job_id: str, config: dict):
         self.job_id = job_id
         self.config = config
-        self.progress_callback = progress_callback
-        self.cancelled = False
-        self.thread: Optional[threading.Thread] = None
+        self.requested_gpu: Optional[int] = config.get("gpu")
+        self.assigned_gpu: Optional[int] = None
+        self.external_gpu_busy: bool = False
+        self.status: str = "queued"  # queued, running, completed, failed, cancelled
+        self.cancel_requested: bool = False
 
-    def cancel(self) -> None:
-        self.cancelled = True
+        self.start_time: Optional[str] = None
+        self.end_time: Optional[str] = None
+        self.error: Optional[str] = None
+        self.progress: dict[str, Any] = {"stage": "init", "percent": 0}
 
-    def is_cancelled(self) -> bool:
-        return self.cancelled
+        self.process: Optional[subprocess.Popen[str]] = None
+        self.stdout_thread: Optional[threading.Thread] = None
+        self.stderr_thread: Optional[threading.Thread] = None
+        self.waiter_thread: Optional[threading.Thread] = None
 
 
 class RPCHandler:
@@ -492,26 +791,23 @@ class RPCHandler:
         # Generate unique job ID with milliseconds
         job_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
 
-        def progress_callback(event: ProgressEvent):
-            # Add job_id to progress event
-            event_dict = event.to_dict()
-            event_dict["job_id"] = job_id
-            send_notification("progress", event_dict)
-
-        # Create and add job to manager
-        job = DockingJob(job_id, config, progress_callback)
+        job = ManagedJob(job_id, config)
         _job_manager.add_job(job_id, job)
-
-        # Start immediately if no job is running
-        if _job_manager.get_running_job_id() is None:
-            _job_manager.start_next()
-
-        return {"job_id": job_id, "status": "queued"}
+        return {
+            "job_id": job_id,
+            "status": "queued",
+            "requested_gpu": job.requested_gpu,
+        }
 
     def get_progress(self, job_id: Optional[str] = None) -> dict:
         """Get progress of a specific job or the running job."""
-        # If no job_id specified, use running job
-        target_id = job_id or _job_manager.get_running_job_id()
+        target_id = job_id
+        if target_id is None:
+            # Backward-compatible: return first running job progress if present.
+            jobs = _job_manager.list_all_jobs()
+            running = [j for j in jobs if j.get("status") == "running"]
+            if running:
+                target_id = running[0].get("job_id")
 
         if not target_id:
             return {"status": "no_job"}
@@ -522,8 +818,13 @@ class RPCHandler:
 
         return {
             "job_id": job.job_id,
-            "cancelled": job.cancelled,
-            "running": job.thread.is_alive() if job.thread else False,
+            "status": job.status,
+            "cancelled": job.cancel_requested or job.status == "cancelled",
+            "running": job.status == "running",
+            "requested_gpu": job.requested_gpu,
+            "assigned_gpu": job.assigned_gpu,
+            "progress": job.progress,
+            "error": job.error,
         }
 
     def cancel_job(self, job_id: Optional[str] = None) -> dict:
@@ -790,6 +1091,7 @@ class RPCHandler:
 
     def shutdown(self) -> dict:
         """Shutdown the backend."""
+        _job_manager.shutdown()
         _shutdown_event.set()
         return {"status": "shutting_down"}
 
@@ -808,7 +1110,7 @@ def send_notification(method: str, params: dict) -> None:
 def handle_signal(signum: int, frame: Any) -> None:
     """Handle shutdown signals."""
     # Cancel all running and queued jobs
-    _job_manager.cancel_all_jobs()
+    _job_manager.shutdown()
     _shutdown_event.set()
 
 
@@ -820,6 +1122,9 @@ def run_backend() -> None:
 
     # Send ready notification
     send_notification("ready", {"version": "1.0.0"})
+
+    # Start background scheduler for queued jobs
+    _job_manager.start_scheduler()
 
     # Main loop - read requests from stdin
     while not _shutdown_event.is_set():

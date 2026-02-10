@@ -62,6 +62,7 @@ const SCREEN_SHORTCUTS: Record<Screen, Shortcut[]> = {
   ],
   jobs: [
     { key: '→/Enter', label: 'View progress' },
+    { key: 'c', label: 'Cancel' },
     { key: '←/Esc', label: 'Back' },
   ],
 };
@@ -80,7 +81,7 @@ export function Footer({ screen, isRunning }: FooterProps): React.ReactElement {
 
   const runningJob = getRunningJob();
   const queuedJobs = getQueuedJobs();
-  const totalJobs = activeJobs.size;
+  const totalJobs = (runningJob ? 1 : 0) + queuedJobs.length;
 
   // Show background task indicator if jobs exist and user is not on running/jobs screen
   const hasBackgroundJobs = totalJobs > 0 && screen !== 'running' && screen !== 'jobs';
