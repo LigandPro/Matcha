@@ -60,22 +60,73 @@ def _format_runtime(seconds: float) -> str:
     return " ".join(parts)
 
 
-def _normalize_ligand(src: Path, dest: Path) -> None:
+def _compute_center_from_mol(mol) -> Optional[np.ndarray]:
+    if mol is None or mol.GetNumConformers() == 0:
+        return None
+    conf = mol.GetConformer()
+    return np.array(conf.GetPositions()).mean(axis=0)
+
+
+def _compute_receptor_center_from_ca(receptor_mol) -> Optional[np.ndarray]:
+    if receptor_mol is None or receptor_mol.GetNumConformers() == 0:
+        return None
+
+    conf = receptor_mol.GetConformer()
+    ca_coords = []
+    for atom in receptor_mol.GetAtoms():
+        res_info = atom.GetPDBResidueInfo()
+        if res_info is None or res_info.GetName() != "CA":
+            continue
+        ca_coords.append(conf.GetAtomPosition(atom.GetIdx()))
+
+    if len(ca_coords) == 0:
+        return _compute_center_from_mol(receptor_mol)
+    return np.array([[p.x, p.y, p.z] for p in ca_coords]).mean(axis=0)
+
+
+def _shift_ligand_to_receptor_center(ligand, receptor_center: Optional[np.ndarray]) -> None:
+    if receptor_center is None or ligand is None or ligand.GetNumConformers() == 0:
+        return
+
+    ligand_center = _compute_center_from_mol(ligand)
+    if ligand_center is None:
+        return
+    shift = receptor_center - ligand_center
+    if np.allclose(shift, 0):
+        return
+
+    conformers = list(ligand.GetConformers())
+    for conf in conformers:
+        for atom_idx in range(conf.GetNumAtoms()):
+            pos = conf.GetAtomPosition(atom_idx)
+            conf.SetAtomPosition(atom_idx, (pos.x + shift[0], pos.y + shift[1], pos.z + shift[2]))
+
+
+def _normalize_ligand(src: Path, dest: Path, receptor_center: Optional[np.ndarray] = None) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     suffix = src.suffix.lower()
+    mol = None
     if suffix == ".sdf":
-        shutil.copyfile(src, dest)
-        return
-    if suffix in {".mol", ".mol2"}:
-        mol = Chem.MolFromMolFile(str(src), removeHs=False, sanitize=False)
+        supplier = Chem.SDMolSupplier(str(src), removeHs=False, sanitize=False)
+        for candidate in supplier:
+            if candidate is not None:
+                mol = candidate
+                break
+    elif suffix in {".mol", ".mol2"}:
+        mol = Chem.MolFromMol2File(str(src), sanitize=False) if suffix == ".mol2" else Chem.MolFromMolFile(str(src), removeHs=False, sanitize=False)
     elif suffix == ".pdb":
         mol = Chem.MolFromPDBFile(str(src), removeHs=False, sanitize=False)
     else:
         raise typer.BadParameter(f"Unsupported ligand format: {src}")
     if mol is None:
         raise typer.BadParameter(f"RDKit failed to read ligand: {src}")
+
+    if receptor_center is not None:
+        _shift_ligand_to_receptor_center(mol, receptor_center)
+
     writer = Chem.SDWriter(str(dest))
-    writer.write(mol)
+    for cid in range(mol.GetNumConformers()):
+        writer.write(mol, confId=cid)
     writer.close()
 
 
@@ -91,7 +142,10 @@ def _prepare_singleton_dataset(
     if receptor.suffix.lower() != ".pdb":
         raise typer.BadParameter("Receptor must be a .pdb file.")
     shutil.copyfile(receptor, receptor_dest)
-    _normalize_ligand(ligand, ligand_dest)
+    receptor_center = _compute_receptor_center_from_ca(
+        Chem.MolFromPDBFile(str(receptor), sanitize=False, removeHs=False)
+    )
+    _normalize_ligand(ligand, ligand_dest, receptor_center=receptor_center)
 
     if original_receptor is not None and original_receptor != receptor:
         receptor_orig = sample_dir / original_receptor.name
@@ -118,14 +172,32 @@ def _split_multi_sdf(sdf_path: Path) -> List[Tuple[str, Any]]:
     return molecules
 
 
+def _split_ligand_file(ligand_file: Path) -> List[Tuple[str, Any]]:
+    suffix = ligand_file.suffix.lower()
+    if suffix == ".sdf":
+        return _split_multi_sdf(ligand_file)
+    if suffix == ".mol2":
+        mol = Chem.MolFromMol2File(str(ligand_file), sanitize=False)
+        if mol is None:
+            console.print(f"[yellow]Warning: Failed to read ligand file {ligand_file.name}[/yellow]")
+            return []
+        name = ligand_file.stem
+        return [(name, mol)]
+    raise ValueError(f"Unsupported ligand file format: {ligand_file.suffix}")
+
+
 def _prepare_batch_dataset(protein: Path, molecules: List[Tuple[str, Any]], dataset_dir: Path) -> List[str]:
     dataset_dir.mkdir(parents=True, exist_ok=True)
+    receptor_center = _compute_receptor_center_from_ca(
+        Chem.MolFromPDBFile(str(protein), sanitize=False, removeHs=False)
+    )
     uids = []
     for name, mol in molecules:
         uid = name
         sample_dir = dataset_dir / uid
         sample_dir.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(protein, sample_dir / f"{uid}_protein.pdb")
+        _shift_ligand_to_receptor_center(mol, receptor_center)
         writer = Chem.SDWriter(str(sample_dir / f"{uid}_ligand.sdf"))
         writer.write(mol)
         writer.close()
@@ -211,7 +283,7 @@ def _print_usage_and_exit() -> None:
 [bold]Required:[/bold]
   -r, --receptor PATH     Protein structure (.pdb)
   -l, --ligand PATH       Ligand (.sdf/.mol/.mol2/.pdb)
-  --ligand-dir PATH       Multi-ligand file/dir (.sdf)
+  --ligand-dir PATH       Multi-ligand file/dir (.sdf/.mol2)
   -o, --out PATH          Output directory
 
 [bold]Options:[/bold]
@@ -230,7 +302,7 @@ def _print_usage_and_exit() -> None:
 def run_matcha(
     receptor: Optional[Path] = typer.Option(None, "-r", "--receptor", help="Protein structure (.pdb)."),
     ligand: Optional[Path] = typer.Option(None, "-l", "--ligand", help="Ligand with 3D coords (.sdf/.mol/.mol2/.pdb)."),
-    ligand_dir: Optional[Path] = typer.Option(None, "--ligand-dir", help="File/dir with multiple ligands (.sdf)."),
+    ligand_dir: Optional[Path] = typer.Option(None, "--ligand-dir", help="File/dir with multiple ligands (.sdf/.mol2)."),
     out: Optional[Path] = typer.Option(None, "-o", "--out", help="Output directory."),
     checkpoints: Optional[Path] = typer.Option(None, "--checkpoints", help="Folder containing Matcha checkpoints (optional)."),
     config: Optional[Path] = typer.Option(None, "--config", help="Optional base config to merge with defaults."),
@@ -369,11 +441,20 @@ def run_matcha(
     if batch_mode:
         console.print(f"[bold cyan][matcha][/bold cyan] Batch mode: processing multiple molecules from {ligand_dir.name}")
         if ligand_dir.is_file():
-            molecules = _split_multi_sdf(ligand_dir)
+            if ligand_dir.suffix.lower() not in {".sdf", ".mol2"}:
+                raise typer.BadParameter("--ligand-dir file input supports .sdf or .mol2")
+            molecules = _split_ligand_file(ligand_dir)
         elif ligand_dir.is_dir():
             molecules = []
-            for sdf_file in ligand_dir.glob("*.sdf"):
-                molecules.extend(_split_multi_sdf(sdf_file))
+            ligand_files = sorted(
+                list(ligand_dir.glob("*.sdf")) + list(ligand_dir.glob("*.mol2")),
+                key=lambda p: p.name.lower(),
+            )
+            for ligand_file in ligand_files:
+                try:
+                    molecules.extend(_split_ligand_file(ligand_file))
+                except ValueError as e:
+                    console.print(f"[yellow]Warning: {e}[/yellow]")
         else:
             raise typer.BadParameter("--ligand-dir must be a file or directory")
         if not molecules:
