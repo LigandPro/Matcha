@@ -3,19 +3,27 @@ Example:
     uv run matcha -r receptor.pdb -l ligand.sdf -o out.sdf --gpu 0
 """
 
+from __future__ import annotations
+
 import copy
 import json
 import os
 import shutil
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional, Tuple, List
 
+import numpy as np
+from rdkit import Chem
 import typer
 from rich.console import Console
 
+from matcha.utils.log import get_logger
+
 console = Console()
+logger = get_logger(__name__)
 
 
 DEFAULT_CONF = {
@@ -60,6 +68,12 @@ def _format_runtime(seconds: float) -> str:
     return " ".join(parts)
 
 
+def _write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+
+
 def _compute_center_from_mol(mol) -> Optional[np.ndarray]:
     if mol is None or mol.GetNumConformers() == 0:
         return None
@@ -79,7 +93,7 @@ def _compute_receptor_center_from_ca(receptor_mol) -> Optional[np.ndarray]:
             continue
         ca_coords.append(conf.GetAtomPosition(atom.GetIdx()))
 
-    if len(ca_coords) == 0:
+    if not ca_coords:
         return _compute_center_from_mol(receptor_mol)
     return np.array([[p.x, p.y, p.z] for p in ca_coords]).mean(axis=0)
 
@@ -112,8 +126,10 @@ def _normalize_ligand(src: Path, dest: Path, receptor_center: Optional[np.ndarra
             if candidate is not None:
                 mol = candidate
                 break
-    elif suffix in {".mol", ".mol2"}:
-        mol = Chem.MolFromMol2File(str(src), sanitize=False) if suffix == ".mol2" else Chem.MolFromMolFile(str(src), removeHs=False, sanitize=False)
+    elif suffix == ".mol2":
+        mol = Chem.MolFromMol2File(str(src), sanitize=False)
+    elif suffix == ".mol":
+        mol = Chem.MolFromMolFile(str(src), removeHs=False, sanitize=False)
     elif suffix == ".pdb":
         mol = Chem.MolFromPDBFile(str(src), removeHs=False, sanitize=False)
     else:
@@ -125,13 +141,20 @@ def _normalize_ligand(src: Path, dest: Path, receptor_center: Optional[np.ndarra
         _shift_ligand_to_receptor_center(mol, receptor_center)
 
     writer = Chem.SDWriter(str(dest))
+    writer.SetKekulize(False)
     for cid in range(mol.GetNumConformers()):
         writer.write(mol, confId=cid)
     writer.close()
 
 
 def _prepare_singleton_dataset(
-    receptor: Path, ligand: Path, dataset_dir: Path, uid: str, original_receptor: Optional[Path] = None
+    receptor: Path,
+    ligand: Path,
+    dataset_dir: Path,
+    uid: str,
+    *,
+    receptor_center: Optional[np.ndarray] = None,
+    original_receptor: Optional[Path] = None,
 ) -> None:
     sample_dir = dataset_dir / uid
     sample_dir.mkdir(parents=True, exist_ok=True)
@@ -142,9 +165,10 @@ def _prepare_singleton_dataset(
     if receptor.suffix.lower() != ".pdb":
         raise typer.BadParameter("Receptor must be a .pdb file.")
     shutil.copyfile(receptor, receptor_dest)
-    receptor_center = _compute_receptor_center_from_ca(
-        Chem.MolFromPDBFile(str(receptor), sanitize=False, removeHs=False)
-    )
+    if receptor_center is None:
+        receptor_center = _compute_receptor_center_from_ca(
+            Chem.MolFromPDBFile(str(receptor), sanitize=False, removeHs=False)
+        )
     _normalize_ligand(ligand, ligand_dest, receptor_center=receptor_center)
 
     if original_receptor is not None and original_receptor != receptor:
@@ -186,28 +210,54 @@ def _split_ligand_file(ligand_file: Path) -> List[Tuple[str, Any]]:
     raise ValueError(f"Unsupported ligand file format: {ligand_file.suffix}")
 
 
-def _prepare_batch_dataset(protein: Path, molecules: List[Tuple[str, Any]], dataset_dir: Path) -> List[str]:
+def _prepare_batch_dataset(
+    protein: Path,
+    molecules: List[Tuple[str, Any]],
+    dataset_dir: Path,
+    *,
+    receptor_center: Optional[np.ndarray] = None,
+) -> List[str]:
     dataset_dir.mkdir(parents=True, exist_ok=True)
-    receptor_center = _compute_receptor_center_from_ca(
-        Chem.MolFromPDBFile(str(protein), sanitize=False, removeHs=False)
-    )
+    if receptor_center is None:
+        receptor_center = _compute_receptor_center_from_ca(
+            Chem.MolFromPDBFile(str(protein), sanitize=False, removeHs=False)
+        )
     uids = []
+    uid_counts: dict[str, int] = {}
+    protein_real = protein.resolve()
     for name, mol in molecules:
-        uid = name
+        base_uid = name
+        seen = uid_counts.get(base_uid, 0)
+        uid_counts[base_uid] = seen + 1
+        uid = base_uid if seen == 0 else f"{base_uid}_{seen}"
         sample_dir = dataset_dir / uid
         sample_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(protein, sample_dir / f"{uid}_protein.pdb")
+        # Avoid copying the same receptor hundreds of times in batch mode.
+        # A symlink keeps a single underlying file and enables downstream caching.
+        receptor_dest = sample_dir / f"{uid}_protein.pdb"
+        if receptor_dest.exists() or receptor_dest.is_symlink():
+            receptor_dest.unlink()
+        try:
+            os.symlink(str(protein_real), str(receptor_dest))
+        except OSError:
+            shutil.copyfile(protein_real, receptor_dest)
         _shift_ligand_to_receptor_center(mol, receptor_center)
         writer = Chem.SDWriter(str(sample_dir / f"{uid}_ligand.sdf"))
+        writer.SetKekulize(False)
         writer.write(mol)
         writer.close()
         uids.append(uid)
     return uids
 
 
-def _create_pocket_centers_file(pocket_center: Tuple[float, float, float], molecule_uids: List[str], n_samples: int, output_path: Path) -> None:
+def _create_pocket_centers_file(
+    pocket_center: Tuple[float, float, float],
+    molecule_uids: List[str],
+    n_samples: int,
+    output_path: Path,
+) -> None:
     pocket_centers = {}
-    ligand_center = np.array(pocket_center)
+    ligand_center = np.array(pocket_center, dtype=np.float32)
     protein_center = np.zeros(3)
     for uid in molecule_uids:
         for conf_idx in range(n_samples):
@@ -238,9 +288,9 @@ def _build_conf(base_conf: "OmegaConf", workdir: Path, checkpoints: Path) -> "Om
             "any_data_dir": str(workdir / "datasets" / "any_conf"),
         },
     )
-    if not conf.get("llm_emb_dim"):
+    if conf.get("llm_emb_dim") is None:
         conf.llm_emb_dim = DEFAULT_CONF["llm_emb_dim"]
-    if not conf.get("use_all_chains"):
+    if conf.get("use_all_chains") is None:
         conf.use_all_chains = DEFAULT_CONF["use_all_chains"]
     return conf
 
@@ -260,8 +310,13 @@ def _ensure_checkpoints(path: Path) -> Path:
 
 
 def _autobox_from_ligand(ligand: Path) -> Tuple[float, float, float]:
-    mol = Chem.MolFromMolFile(str(ligand), removeHs=False, sanitize=False) if ligand.suffix.lower() in {".mol", ".mol2"} else None
-    if mol is None and ligand.suffix.lower() == ".pdb":
+    suffix = ligand.suffix.lower()
+    mol = None
+    if suffix == ".mol2":
+        mol = Chem.MolFromMol2File(str(ligand), sanitize=False)
+    elif suffix == ".mol":
+        mol = Chem.MolFromMolFile(str(ligand), removeHs=False, sanitize=False)
+    elif suffix == ".pdb":
         mol = Chem.MolFromPDBFile(str(ligand), removeHs=False, sanitize=False)
     if mol is None:
         suppl = Chem.SDMolSupplier(str(ligand), removeHs=False, sanitize=False)
@@ -270,6 +325,49 @@ def _autobox_from_ligand(ligand: Path) -> Tuple[float, float, float]:
         raise typer.BadParameter(f"Failed to read ligand for autobox: {ligand}")
     mol = Chem.RemoveAllHs(mol, sanitize=False)
     return tuple(mol.GetConformer().GetPositions().mean(axis=0).tolist())
+
+
+def _center_from_box_json(path: Path) -> Tuple[float, float, float]:
+    """Extract a docking box center from a JSON file.
+
+    Supports common formats, e.g.:
+      - {"center": [x, y, z]}
+      - {"center_x": x, "center_y": y, "center_z": z}
+      - {"box": {"center": [x, y, z]}}
+    """
+    with open(path) as f:
+        data = json.load(f)
+
+    def _as_center(val: Any) -> Optional[Tuple[float, float, float]]:
+        if isinstance(val, (list, tuple)) and len(val) == 3:
+            try:
+                return (float(val[0]), float(val[1]), float(val[2]))
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    if isinstance(data, dict):
+        if "center" in data:
+            center = _as_center(data["center"])
+            if center is not None:
+                return center
+        for key in ("box_center", "pocket_center", "centroid"):
+            if key in data:
+                center = _as_center(data[key])
+                if center is not None:
+                    return center
+        if all(k in data for k in ("center_x", "center_y", "center_z")):
+            return (float(data["center_x"]), float(data["center_y"]), float(data["center_z"]))
+        if "box" in data and isinstance(data["box"], dict):
+            box = data["box"]
+            if "center" in box:
+                center = _as_center(box["center"])
+                if center is not None:
+                    return center
+            if all(k in box for k in ("center_x", "center_y", "center_z")):
+                return (float(box["center_x"]), float(box["center_y"]), float(box["center_z"]))
+
+    raise typer.BadParameter(f"Unsupported box JSON format: {path}")
 
 
 def _print_usage_and_exit() -> None:
@@ -288,6 +386,7 @@ def _print_usage_and_exit() -> None:
 
 [bold]Options:[/bold]
   -g, --device TEXT        Device: auto, cpu, cuda, cuda:N, mps
+  --gpus TEXT              Multi-GPU ids for batch mode, e.g. 2,3
   --n-samples INT         Poses per ligand (default: 40)
   --scorer TEXT            gnina / custom / none (default: gnina)
   --autobox-ligand PATH   Box center from reference ligand
@@ -311,17 +410,25 @@ def run_matcha(
     center_y: Optional[float] = typer.Option(None, "--center-y", "--center_y", help="Y coordinate of box center (Å)"),
     center_z: Optional[float] = typer.Option(None, "--center-z", "--center_z", help="Z coordinate of box center (Å)"),
     autobox_ligand: Optional[Path] = typer.Option(None, "--autobox-ligand", "--autobox_ligand", help="Reference ligand file for autobox (.sdf/.mol/.pdb)"),
+    box_json: Optional[Path] = typer.Option(None, "--box-json", help="JSON with binding-site box center (e.g. *_box.json)."),
     run_name: str = typer.Option("matcha_cli_run", "--run-name", help="Name for this docking run."),
     n_samples: int = typer.Option(40, "--n-samples", help="Number of samples (poses) to generate per ligand."),
     n_confs: Optional[int] = typer.Option(None, "--n-confs", help="Number of ligand conformers to generate with RDKit (default min(10, n-samples))."),
     device: Optional[str] = typer.Option(None, "--device", "-g", "--gpu", help="Device: auto, cpu, cuda, cuda:N, or mps."),
+    gpus: Optional[str] = typer.Option(None, "--gpus", help="Comma-separated GPU ids for batch sharding, e.g. 2,3."),
     overwrite: bool = typer.Option(False, "--overwrite", help="Remove existing run folder if present."),
     keep_workdir: bool = typer.Option(False, "--keep-workdir/--no-keep-workdir", help="Keep working data (default: False)."),
     log: Optional[Path] = typer.Option(None, "--log", help="Path to log file (defaults to <out>/<run-name>.log)."),
     docking_batch_limit: int = typer.Option(15000, "--docking-batch-limit", help="Number of tokens per batch for docking models."),
+    recursive: bool = typer.Option(True, "--recursive/--no-recursive", help="Recursively search ligand-dir for .sdf/.mol2 files (default: recursive)."),
+    num_workers: Optional[int] = typer.Option(None, "--num-workers", help="DataLoader workers (default: auto for CUDA, else 0)."),
+    pin_memory: Optional[bool] = typer.Option(None, "--pin-memory/--no-pin-memory", help="Pin DataLoader memory for faster H2D on CUDA (default: on for CUDA)."),
+    prefetch_factor: int = typer.Option(2, "--prefetch-factor", help="DataLoader prefetch factor (workers only)."),
+    persistent_workers: Optional[bool] = typer.Option(None, "--persistent-workers/--no-persistent-workers", help="Keep DataLoader workers alive (default: on when num-workers>0)."),
     scorer_type: str = typer.Option("gnina", "--scorer", help="Pose scorer: gnina, custom, or none."),
     scorer_path: Optional[Path] = typer.Option(None, "--scorer-path", help="Path to gnina binary or custom scorer script."),
     scorer_minimize: bool = typer.Option(True, "--scorer-minimize/--no-scorer-minimize", help="Minimize poses during scoring (gnina)."),
+    gnina_batch_mode: str = typer.Option("combined", "--gnina-batch-mode", help="GNINA batch mode: combined or per-ligand (batch mode only)."),
     physical_only: bool = typer.Option(False, "--physical-only/--keep-all-poses", help="Keep only PoseBusters-passing poses in outputs (default: False)."),
 ) -> None:
     if out is None:
@@ -343,36 +450,63 @@ def run_matcha(
     from rdkit import Chem  # noqa: F811
     from matcha.utils.esm_utils import compute_esm_embeddings, compute_sequences
     from matcha.utils.inference_utils import run_v2_inference_pipeline
+    from matcha.utils.multigpu import parse_gpus, run_multigpu_batch
     from matcha.scoring import create_scorer
     from matcha.utils.device import resolve_device
     import torch
 
+    multi_gpu_ids: list[int] = []
+    if gpus is not None:
+        try:
+            multi_gpu_ids = parse_gpus(gpus)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+
     # Resolve device: auto, cpu, cuda, cuda:N, mps
-    cuda_device_idx = 0
-    if device is None or device == "auto":
+    if multi_gpu_ids:
+        resolved_device = f"cuda:{multi_gpu_ids[0]}"
+    elif device is None or device == "auto":
         resolved_device = resolve_device()
     elif device.isdigit():
         # Bare number → treat as CUDA index (backwards compat with --gpu N)
-        os.environ["CUDA_VISIBLE_DEVICES"] = device
-        resolved_device = "cuda"
-        cuda_device_idx = int(device)
+        resolved_device = f"cuda:{int(device)}"
     elif device.startswith("cuda:"):
-        idx = device.split(":")[1]
-        os.environ["CUDA_VISIBLE_DEVICES"] = idx
-        resolved_device = "cuda"
-        cuda_device_idx = int(idx)
+        # Explicit CUDA device string, e.g. cuda:0
+        try:
+            int(device.split(":")[1])
+        except Exception:
+            console.print(f"[bold red]Error:[/bold red] Invalid CUDA device '{device}'. Use cuda:N where N is an integer.")
+            raise typer.Exit(code=1)
+        resolved_device = device
     elif device in ("cuda", "mps", "cpu"):
         resolved_device = device
     else:
         console.print(f"[bold red]Error:[/bold red] Unknown device '{device}'. Use auto, cpu, cuda, cuda:N, or mps.")
         raise typer.Exit(code=1)
 
+    cuda_device_idx = int(resolved_device.split(":")[1]) if resolved_device.startswith("cuda:") else 0
+
     if resolved_device == "mps" and not (hasattr(torch.backends, "mps") and torch.backends.mps.is_available()):
         console.print("[bold red]Error:[/bold red] MPS (Apple Metal) requested but not available.")
         raise typer.Exit(code=1)
-    if resolved_device == "cuda" and not torch.cuda.is_available():
+    if resolved_device.startswith("cuda") and not torch.cuda.is_available():
         console.print("[bold red]Error:[/bold red] CUDA requested but not available.")
         raise typer.Exit(code=1)
+    if multi_gpu_ids and not torch.cuda.is_available():
+        console.print("[bold red]Error:[/bold red] --gpus requires CUDA, but CUDA is not available.")
+        raise typer.Exit(code=1)
+    if multi_gpu_ids:
+        visible_gpu_count = torch.cuda.device_count()
+        for gpu_id in multi_gpu_ids:
+            if gpu_id >= visible_gpu_count:
+                raise typer.BadParameter(
+                    f"--gpus contains GPU {gpu_id}, but only {visible_gpu_count} devices are visible."
+                )
+
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+        torch.set_float32_matmul_precision("highest")
 
     checkpoints = _ensure_checkpoints(checkpoints or Path("checkpoints"))
 
@@ -387,6 +521,13 @@ def run_matcha(
                 f"Working directory {run_workdir} already exists. Use --overwrite or change --run-name."
             )
     run_workdir.mkdir(parents=True, exist_ok=True)
+    run_timer_start = time.perf_counter()
+    prepare_input_start = run_timer_start
+    prepare_input_sec = 0.0
+    esm_sec = 0.0
+    inference_sec = 0.0
+    scoring_sec = 0.0
+    pipeline_timings: dict = {}
 
     work_dir = run_workdir / "work"
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -411,14 +552,15 @@ def run_matcha(
     console.print("")
 
     # Box handling
-    manual_box_specified = any([center_x, center_y, center_z])
+    manual_box_specified = center_x is not None or center_y is not None or center_z is not None
     autobox_specified = autobox_ligand is not None
+    box_json_specified = box_json is not None
     box_center_val: Optional[Tuple[float, float, float]] = None
 
-    if manual_box_specified and autobox_specified:
-        raise typer.BadParameter("Cannot use both manual box and autobox. Choose one method.")
+    if sum((manual_box_specified, autobox_specified, box_json_specified)) > 1:
+        raise typer.BadParameter("Cannot combine --box-json with manual box or --autobox-ligand.")
     if manual_box_specified:
-        if not all([center_x is not None, center_y is not None, center_z is not None]):
+        if center_x is None or center_y is None or center_z is None:
             raise typer.BadParameter("Manual box requires --center-x/--center-y/--center-z")
         box_center_val = (center_x, center_y, center_z)
         console.print(f"[bold green][matcha][/bold green] manual center: {box_center_val}")
@@ -428,8 +570,74 @@ def run_matcha(
         box_center_val = _autobox_from_ligand(autobox_ligand)
         console.print(f"[bold green][matcha][/bold green] autobox from reference ligand {autobox_ligand.name}")
         console.print(f"[bold green][matcha][/bold green] center: {box_center_val}")
+    elif box_json_specified:
+        if not box_json.exists():
+            raise typer.BadParameter(f"Box JSON not found: {box_json}")
+        box_center_val = _center_from_box_json(box_json)
+        console.print(f"[bold green][matcha][/bold green] box center from {box_json.name}")
+        console.print(f"[bold green][matcha][/bold green] center: {box_center_val}")
     else:
-        console.print(f"[bold yellow][matcha][/bold yellow] No box specified - running blind docking on entire protein")
+        console.print("[bold yellow][matcha][/bold yellow] No box specified - running blind docking on entire protein")
+
+    if multi_gpu_ids and len(multi_gpu_ids) > 1:
+        if not batch_mode:
+            raise typer.BadParameter("Multi-GPU mode (--gpus with 2+ devices) is supported only with --ligand-dir.")
+        if ligand_dir is None or not ligand_dir.is_dir():
+            raise typer.BadParameter("Multi-GPU mode requires --ligand-dir to be a directory.")
+
+        console.print(
+            f"[bold cyan][matcha][/bold cyan] Multi-GPU batch mode on GPUs {multi_gpu_ids}: "
+            "launching one shard process per GPU."
+        )
+        result = run_multigpu_batch(
+            gpu_ids=multi_gpu_ids,
+            run_workdir=run_workdir,
+            run_name=run_name,
+            receptor=receptor,
+            ligand_dir=ligand_dir,
+            recursive=recursive,
+            checkpoints=checkpoints,
+            config=config,
+            center_x=center_x,
+            center_y=center_y,
+            center_z=center_z,
+            autobox_ligand=autobox_ligand,
+            box_json=box_json,
+            n_samples=n_samples,
+            n_confs=n_confs,
+            docking_batch_limit=docking_batch_limit,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            prefetch_factor=prefetch_factor,
+            persistent_workers=persistent_workers,
+            scorer_type=scorer_type,
+            scorer_path=scorer_path,
+            scorer_minimize=scorer_minimize,
+            gnina_batch_mode=gnina_batch_mode,
+            physical_only=physical_only,
+        )
+        total_sec = time.perf_counter() - run_timer_start
+        _write_json(
+            run_workdir / "run_timing.json",
+            {
+                "mode": "multigpu",
+                "run_name": run_name,
+                "gpus": multi_gpu_ids,
+                "prepare_input_sec": 0.0,
+                "esm_sec": 0.0,
+                "inference_sec": 0.0,
+                "scoring_sec": 0.0,
+                "total_sec": total_sec,
+                "ligand_count": int(result["ligand_count"]),
+                "benchmark_summary_path": str((run_workdir / "benchmark_summary.json").resolve()),
+            },
+        )
+        console.print(f"[bold green][matcha][/bold green] merged output: {run_workdir / 'merged'}")
+        console.print(
+            f"[bold green][matcha][/bold green] benchmark summary: {run_workdir / 'benchmark_summary.json'}"
+        )
+        console.print(f"[bold green][matcha][/bold green] runtime: {_format_runtime(total_sec)}")
+        return
 
     receptor_for_run = receptor
     pocket_centers_filename = None
@@ -437,6 +645,12 @@ def run_matcha(
     dataset_dir = work_dir / "datasets" / "any_conf"
     dataset_dir.mkdir(parents=True, exist_ok=True)
     molecule_uids: List[str] = []
+
+    # Receptor CA center is used to (1) normalize ligands into the same centered frame and
+    # (2) convert absolute box centers into the centered coordinates expected by stage1_any_conf.npy.
+    receptor_center_abs = _compute_receptor_center_from_ca(
+        Chem.MolFromPDBFile(str(receptor), sanitize=False, removeHs=False)
+    )
 
     if batch_mode:
         console.print(f"[bold cyan][matcha][/bold cyan] Batch mode: processing multiple molecules from {ligand_dir.name}")
@@ -446,10 +660,11 @@ def run_matcha(
             molecules = _split_ligand_file(ligand_dir)
         elif ligand_dir.is_dir():
             molecules = []
-            ligand_files = sorted(
-                list(ligand_dir.glob("*.sdf")) + list(ligand_dir.glob("*.mol2")),
-                key=lambda p: p.name.lower(),
-            )
+            if recursive:
+                ligand_files = list(ligand_dir.rglob("*.sdf")) + list(ligand_dir.rglob("*.mol2"))
+            else:
+                ligand_files = list(ligand_dir.glob("*.sdf")) + list(ligand_dir.glob("*.mol2"))
+            ligand_files = sorted(ligand_files, key=lambda p: str(p).lower())
             for ligand_file in ligand_files:
                 try:
                     molecules.extend(_split_ligand_file(ligand_file))
@@ -460,18 +675,36 @@ def run_matcha(
         if not molecules:
             raise typer.BadParameter(f"No molecules found in {ligand_dir}")
         console.print(f"[bold green][matcha][/bold green] Found {len(molecules)} molecules to process")
-        molecule_uids = _prepare_batch_dataset(receptor, molecules, dataset_dir)
+        molecule_uids = _prepare_batch_dataset(receptor, molecules, dataset_dir, receptor_center=receptor_center_abs)
         if box_center_val is not None:
             pocket_centers_filename = work_dir / 'stage1_any_conf.npy'
-            _create_pocket_centers_file(box_center_val, molecule_uids, n_samples, pocket_centers_filename)
+            _create_pocket_centers_file(
+                box_center_val,
+                molecule_uids,
+                n_samples,
+                pocket_centers_filename,
+            )
     else:
         if box_center_val is not None:
             pocket_centers_filename = work_dir / 'stage1_any_conf.npy'
-            _create_pocket_centers_file(box_center_val, [run_name], n_samples, pocket_centers_filename)
-        _prepare_singleton_dataset(receptor_for_run, ligand, dataset_dir, run_name, original_receptor=receptor)
+            _create_pocket_centers_file(
+                box_center_val,
+                [run_name],
+                n_samples,
+                pocket_centers_filename,
+            )
+        _prepare_singleton_dataset(
+            receptor_for_run,
+            ligand,
+            dataset_dir,
+            run_name,
+            receptor_center=receptor_center_abs,
+            original_receptor=receptor,
+        )
         molecule_uids = [run_name]
 
     base_conf = _load_base_conf(config)
+    base_conf.device = resolved_device
     conf = _build_conf(base_conf, work_dir, checkpoints)
     if n_confs is not None and n_confs < 1:
         raise typer.BadParameter("--n-confs must be >= 1")
@@ -480,13 +713,34 @@ def run_matcha(
     console.print(f"[bold green][matcha][/bold green] samples per ligand: {n_samples}")
     console.print(f"[bold green][matcha][/bold green] device: {resolved_device}")
 
+    if num_workers is None:
+        if resolved_device.startswith("cuda"):
+            cpu = os.cpu_count() or 8
+            num_workers = min(8, max(1, cpu // 2))
+        else:
+            num_workers = 0
+    if pin_memory is None:
+        pin_memory = resolved_device.startswith("cuda")
+    if persistent_workers is None:
+        persistent_workers = num_workers > 0
+
+    prepare_input_sec = time.perf_counter() - prepare_input_start
+    esm_start = time.perf_counter()
     compute_sequences(conf)
     compute_esm_embeddings(conf)
-    run_v2_inference_pipeline(
+    esm_sec = time.perf_counter() - esm_start
+    inference_start = time.perf_counter()
+    pipeline_timings = run_v2_inference_pipeline(
         copy.deepcopy(conf), run_name, n_samples,
         pocket_centers_filename=pocket_centers_filename,
         docking_batch_limit=docking_batch_limit,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        prefetch_factor=prefetch_factor,
+        persistent_workers=persistent_workers,
+        compute_torsion_angles_pred=False,
     )
+    inference_sec = time.perf_counter() - inference_start
 
     preds_root = Path(conf.inference_results_folder) / run_name
     dataset_name = 'any_conf'
@@ -495,23 +749,36 @@ def run_matcha(
     scorer_used = False
     sdf_scored = preds_root / dataset_name / "scored_sdf_predictions"
     best_scored_dir = preds_root / dataset_name / "best_scored_predictions"
-    if scorer_type != "none" and scorer_type.startswith("gnina") and resolved_device != "cuda":
+    if scorer_type != "none" and scorer_type.startswith("gnina") and not resolved_device.startswith("cuda"):
         console.print(f"[bold yellow][matcha][/bold yellow] GNINA requires CUDA; skipping scoring on {resolved_device}")
         scorer_type = "none"
     if scorer_type != "none":
+        scoring_start = time.perf_counter()
         try:
             scorer = create_scorer(scorer_type, scorer_path=str(scorer_path) if scorer_path else None,
                                    minimize=scorer_minimize)
             sdf_input = preds_root / dataset_name / "sdf_predictions"
-            scorer.score_poses(str(receptor), str(sdf_input), str(sdf_scored), device=cuda_device_idx)
-
             filters_path = preds_root / dataset_name / "filters_results.json"
-            scorer.select_top_poses(str(sdf_scored), str(best_scored_dir),
-                                    filters_path=str(filters_path), n_samples=n_samples)
+            if scorer_type.startswith("gnina") and batch_mode:
+                if gnina_batch_mode not in {"combined", "per-ligand"}:
+                    raise typer.BadParameter("--gnina-batch-mode must be 'combined' or 'per-ligand'")
+            if scorer_type.startswith("gnina") and batch_mode and gnina_batch_mode == "combined":
+                scorer.score_poses_combined(
+                    str(receptor), str(sdf_input),
+                    str(sdf_scored), str(best_scored_dir),
+                    filters_path=str(filters_path),
+                    n_samples=n_samples,
+                    device=cuda_device_idx,
+                )
+            else:
+                scorer.score_poses(str(receptor), str(sdf_input), str(sdf_scored), device=cuda_device_idx)
+                scorer.select_top_poses(str(sdf_scored), str(best_scored_dir),
+                                        filters_path=str(filters_path), n_samples=n_samples)
             scorer_used = True
             console.print(f"[bold green][matcha][/bold green] scoring complete ({scorer.name})")
         except RuntimeError as e:
             console.print(f"[bold yellow][matcha][/bold yellow] scoring skipped: {e}")
+        scoring_sec = time.perf_counter() - scoring_start
 
     # Load final predictions for ranking/logging
     final_preds_path = preds_root / f"{dataset_name}_final_preds.npy"
@@ -583,6 +850,7 @@ def run_matcha(
         ranked_to_use = ranked_filtered if ranked_filtered else ranked
 
         writer = Chem.SDWriter(str(out_path))
+        writer.SetKekulize(False)
         for rank, sample in ranked_to_use:
             mol = copy.deepcopy(orig_mol)
             conf = Chem.Conformer(orig_mol.GetNumAtoms())
@@ -591,7 +859,10 @@ def run_matcha(
             mol.RemoveAllConformers()
             mol.AddConformer(conf, assignId=True)
             mol.SetProp("_Name", f"{uid}_rank{rank}")
-            writer.write(mol)
+            try:
+                writer.write(mol)
+            except Exception as exc:
+                logger.warning(f"Failed to write pose SDF for {uid} rank {rank}: {exc}")
         writer.close()
         return ranked_to_use, len(ranked_filtered), len(ranked)
 
@@ -621,6 +892,7 @@ def run_matcha(
             best_sample = mdata["sample_metrics"][best_idx]
             orig_mol = mdata["orig_mol"]
             writer = Chem.SDWriter(str(dest_path))
+            writer.SetKekulize(False)
             mol = copy.deepcopy(orig_mol)
             conf = Chem.Conformer(orig_mol.GetNumAtoms())
             for idx, (x, y, z) in enumerate(best_sample["pred_pos"]):
@@ -628,7 +900,10 @@ def run_matcha(
             mol.RemoveAllConformers()
             mol.AddConformer(conf, assignId=True)
             mol.SetProp("_Name", f"{uid_label}_best")
-            writer.write(mol)
+            try:
+                writer.write(mol)
+            except Exception as exc:
+                logger.warning(f"Failed to write best pose SDF for {uid_label}: {exc}")
             writer.close()
 
     def _format_pose_ranking_lines(ranked_samples, has_gnina):
@@ -646,7 +921,13 @@ def run_matcha(
                 "✓" if len(pb_flags) > j and pb_flags[j] else "✗"
                 for j in range(4)
             )
-            buried_frac = f"{pb_flags[4]:.2f}" if len(pb_flags) > 4 else " n/a"
+            buried_val = pb_flags[4] if len(pb_flags) > 4 else None
+            if isinstance(buried_val, (list, tuple)):
+                buried_val = buried_val[0] if buried_val else None
+            try:
+                buried_frac = f"{float(buried_val):.2f}" if buried_val is not None else " n/a"
+            except Exception:
+                buried_frac = " n/a"
             if has_gnina:
                 aff = f"{sample.get('gnina_score', float('inf')):>8.2f}"
                 lines.append(f"  {rank:<4}  {aff}  {pb_count}/4  {checks}   {buried_frac:>6}")
@@ -720,6 +1001,19 @@ def run_matcha(
 
         end_time = datetime.now(timezone.utc)
         runtime = (end_time - start_time).total_seconds()
+        _write_json(
+            run_workdir / "run_timing.json",
+            {
+                "mode": "single",
+                "run_name": run_name,
+                "prepare_input_sec": prepare_input_sec,
+                "esm_sec": esm_sec,
+                "inference_sec": inference_sec,
+                "scoring_sec": scoring_sec,
+                "total_sec": runtime,
+                "pipeline_timings": pipeline_timings or {},
+            },
+        )
 
         log_path = (log or run_workdir / f"{run_name}.log").resolve()
         receptor_abs = receptor.resolve()
@@ -880,6 +1174,20 @@ def run_matcha(
 
     end_time = datetime.now(timezone.utc)
     runtime = (end_time - start_time).total_seconds()
+    _write_json(
+        run_workdir / "run_timing.json",
+        {
+            "mode": "batch",
+            "run_name": run_name,
+            "prepare_input_sec": prepare_input_sec,
+            "esm_sec": esm_sec,
+            "inference_sec": inference_sec,
+            "scoring_sec": scoring_sec,
+            "total_sec": runtime,
+            "pipeline_timings": pipeline_timings or {},
+            "ligand_count": len(molecule_uids),
+        },
+    )
 
     log_path = (log or run_workdir / f"{run_name}.log").resolve()
     command_line = "uv run matcha " + " ".join(sys.argv[1:]) if ".venv/bin/matcha" in sys.argv[0] else " ".join(sys.argv)

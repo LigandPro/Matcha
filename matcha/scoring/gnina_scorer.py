@@ -1,9 +1,11 @@
+import base64
 import json
 import os
 import shutil
 import subprocess
 import sys
 import urllib.request
+from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -76,31 +78,78 @@ def _download_with_progress(url: str, dest: Path) -> None:
 
 
 def _gnina_env() -> dict:
-    """Return env dict with LD_LIBRARY_PATH pointing to CUDA/cuDNN libs."""
+    """Return env dict with LD_LIBRARY_PATH pointing to CUDA/cuDNN libs.
+
+    GNINA binaries are typically dynamically linked against CUDA + cuDNN.
+    On some systems these libraries are available only via Python wheels
+    (e.g. PyTorch + nvidia-*-cu12 packages). This helper makes GNINA runnable
+    without requiring a system-wide CUDA installation.
+    """
     env = os.environ.copy()
-    extra_paths = []
+    extra_paths: list[str] = []
 
     # 1. Current env's torch
     try:
         import torch
         torch_lib = Path(torch.__file__).parent / "lib"
-        if any(torch_lib.glob("libcudnn*")):
+        if torch_lib.exists():
             extra_paths.append(str(torch_lib))
     except ImportError:
         pass
 
-    # 2. Search conda environments for cudnn
-    if not extra_paths:
-        for base in [Path.home() / "miniforge", Path.home() / "miniconda3",
-                     Path.home() / "anaconda3", Path("/opt/conda")]:
-            candidates = sorted(base.glob("**/torch/lib/libcudnn.so*"))
-            if candidates:
-                extra_paths.append(str(candidates[0].parent))
-                break
+    # 2. CUDA/cuDNN libs shipped as Python wheels (nvidia-*-cu12).
+    try:
+        import nvidia  # type: ignore
+
+        roots: list[Path] = []
+        # `nvidia` is typically a namespace package, so __file__ may be None.
+        if getattr(nvidia, "__path__", None):
+            roots.extend([Path(p) for p in nvidia.__path__])
+        if getattr(nvidia, "__file__", None):
+            roots.append(Path(nvidia.__file__).resolve().parent)
+
+        for nvidia_root in roots:
+            for sub in (
+                "cudnn",
+                "cublas",
+                "cuda_runtime",
+                "cusparse",
+                "cusolver",
+                "cufft",
+                "nvjitlink",
+                "nvtx",
+                "cuda_nvrtc",
+                "cuda_cupti",
+            ):
+                lib_dir = nvidia_root / sub / "lib"
+                if lib_dir.exists():
+                    extra_paths.append(str(lib_dir))
+    except Exception:
+        pass
+
+    # 3. Conda environments (fallback)
+    for base in (
+        Path.home() / "miniforge",
+        Path.home() / "miniconda3",
+        Path.home() / "anaconda3",
+        Path("/opt/conda"),
+    ):
+        candidates = sorted(base.glob("**/libcudnn.so*"))
+        if candidates:
+            extra_paths.append(str(candidates[0].parent))
+            break
 
     if extra_paths:
+        # Deduplicate while preserving order.
+        seen = set()
+        deduped = []
+        for p in extra_paths:
+            if p not in seen:
+                deduped.append(p)
+                seen.add(p)
+
         existing = env.get("LD_LIBRARY_PATH", "")
-        new_path = ":".join(extra_paths)
+        new_path = ":".join(deduped)
         env["LD_LIBRARY_PATH"] = f"{new_path}:{existing}" if existing else new_path
 
     return env
@@ -217,6 +266,47 @@ def _extract_gnina_score(mol, score_type="CNNscore", use_minimized=True):
     return None
 
 
+def _normalize_uid(uid: str) -> str:
+    # Keep in sync with select_top_poses() uid normalization.
+    for suffix in ("_minimized", "_poses", "_predictions"):
+        if uid.endswith(suffix):
+            return uid[: -len(suffix)]
+    return uid
+
+
+_MATCHA_NAME_PREFIX = "MATCHA"
+
+
+def _encode_matcha_name(uid: str, pose_idx: int, orig_name: str) -> str:
+    uid_b64 = base64.urlsafe_b64encode(uid.encode("utf-8")).decode("ascii")
+    orig_b64 = base64.urlsafe_b64encode(orig_name.encode("utf-8")).decode("ascii")
+    return f"{_MATCHA_NAME_PREFIX}|{uid_b64}|{pose_idx}|{orig_b64}"
+
+
+def _decode_matcha_name(name: str) -> tuple[str, int, str]:
+    """Decode marker from molecule _Name.
+
+    Supports:
+      - New: MATCHA|<uid_b64>|<pose_idx>|<orig_name_b64>
+      - Legacy: <uid>::<pose_idx>
+    """
+    if name.startswith(f"{_MATCHA_NAME_PREFIX}|"):
+        parts = name.split("|", 3)
+        if len(parts) != 4:
+            raise ValueError(f"Invalid MATCHA _Name format: {name!r}")
+        _, uid_b64, idx_s, orig_b64 = parts
+        uid = base64.urlsafe_b64decode(uid_b64.encode("ascii")).decode("utf-8")
+        pose_idx = int(idx_s)
+        orig_name = base64.urlsafe_b64decode(orig_b64.encode("ascii")).decode("utf-8")
+        return uid, pose_idx, orig_name
+
+    if "::" in name:
+        uid, idx_s = name.rsplit("::", 1)
+        return uid, int(idx_s), ""
+
+    raise ValueError(f"Missing expected _Name markers in: {name!r}")
+
+
 def _find_top_scored_molecule(sdf_path, score_type="CNNscore", use_minimized=True,
                               filters_data=None, uid=None, n_samples=40):
     """Read SDF file and find the molecule with the best gnina score.
@@ -232,22 +322,25 @@ def _find_top_scored_molecule(sdf_path, score_type="CNNscore", use_minimized=Tru
     Returns:
         Tuple of (best_mol, best_score, best_idx) or None.
     """
-    supplier = Chem.SDMolSupplier(str(sdf_path), removeHs=False, sanitize=False)
+    try:
+        supplier = Chem.SDMolSupplier(str(sdf_path), removeHs=False, sanitize=False)
+    except OSError:
+        return None
 
     if use_minimized:
         prop_name = f"minimized{score_type}" if score_type != "Affinity" else "minimizedAffinity"
     else:
         prop_name = score_type
 
-    keep_mask = np.arange(3 * n_samples)
+    keep_limit = 3 * int(n_samples)
 
     mols = []
     scores = []
     for i, mol in enumerate(supplier):
         if mol is None:
             continue
-        if i not in keep_mask:
-            continue
+        if i >= keep_limit:
+            break
 
         # Try direct property access first
         if mol.HasProp(prop_name):
@@ -277,8 +370,8 @@ def _find_top_scored_molecule(sdf_path, score_type="CNNscore", use_minimized=Tru
             filters_data[uid]['posebusters_filters_passed_count_fast']
         )
         # Trim to keep_mask length if needed
-        if len(filter_counts) > len(keep_mask):
-            filter_counts = filter_counts[keep_mask]
+        if len(filter_counts) > keep_limit:
+            filter_counts = filter_counts[:keep_limit]
 
         if len(filter_counts) != len(mols):
             logger.warning(
@@ -366,6 +459,206 @@ class GninaScorer(PoseScorer):
                     "Please install gnina or use --scorer none."
                 )
 
+    def score_poses_combined(
+        self,
+        receptor_path,
+        sdf_input_dir,
+        sdf_output_dir,
+        best_output_dir,
+        filters_path=None,
+        n_samples=40,
+        device=0,
+    ):
+        """Score all per-ligand SDFs with a single GNINA invocation.
+
+        This reduces process startup overhead by:
+          1) concatenating all ligand pose SDFs into one combined SDF,
+          2) running GNINA once,
+          3) splitting results back into per-uid scored SDFs and selecting best poses.
+        """
+        sdf_input_dir = Path(sdf_input_dir)
+        sdf_output_dir = Path(sdf_output_dir)
+        best_output_dir = Path(best_output_dir)
+        sdf_output_dir.mkdir(parents=True, exist_ok=True)
+        best_output_dir.mkdir(parents=True, exist_ok=True)
+
+        sdf_files = sorted(sdf_input_dir.glob("*.sdf"))
+        if not sdf_files:
+            logger.warning(f"No SDF files found in {sdf_input_dir}")
+            return
+
+        # Avoid collisions with possible ligand uids and parallel runs.
+        pid = os.getpid()
+        combined_in = sdf_output_dir / f".matcha_combined_input.{pid}.sdf"
+        combined_out = sdf_output_dir / f".matcha_combined_scored.{pid}.sdf"
+
+        logger.info(f"Building combined SDF with {len(sdf_files)} ligands: {combined_in}")
+        writer = SDWriter(str(combined_in))
+        writer.SetKekulize(False)
+        for sdf_file in tqdm(sdf_files, desc="Preparing combined SDF"):
+            uid = sdf_file.stem
+            try:
+                supplier = Chem.SDMolSupplier(str(sdf_file), removeHs=False, sanitize=False)
+            except OSError as exc:
+                logger.warning(f"Skipping invalid SDF input for GNINA: {sdf_file} ({exc})")
+                continue
+            for idx, mol in enumerate(supplier):
+                if mol is None:
+                    continue
+                orig_name = mol.GetProp("_Name") if mol.HasProp("_Name") else ""
+                mol.SetProp("_Name", _encode_matcha_name(uid, idx, orig_name))
+                writer.write(mol)
+        writer.close()
+
+        cmd = [
+            self.gnina_path,
+            "--receptor", str(receptor_path),
+            "--ligand", str(combined_in),
+            "--device", str(device),
+            "--cnn_scoring", self.cnn_scoring,
+        ]
+        if self.minimize:
+            cmd.append("--minimize")
+        else:
+            cmd.append("--score_only")
+        cmd.extend(["-o", str(combined_out)])
+
+        logger.info(f"Running combined GNINA scoring (minimize={self.minimize})")
+        try:
+            subprocess.run(cmd, capture_output=True, text=True, check=True, env=_gnina_env())
+        except subprocess.CalledProcessError as e:
+            logger.error(f"gnina failed (combined): {e.stderr}")
+            raise RuntimeError("GNINA scoring failed") from e
+        except FileNotFoundError:
+            raise RuntimeError(
+                f"gnina binary not found at {self.gnina_path}. "
+                "Please install gnina or use --scorer none."
+            )
+
+        filters_data = None
+        if filters_path is not None:
+            filters_path = Path(filters_path)
+            if filters_path.exists():
+                logger.info(f"Loading filters from {filters_path}")
+                with open(filters_path) as f:
+                    filters_data = json.load(f)
+            else:
+                logger.warning(f"Filters file not found: {filters_path}")
+
+        def _score_better(a: float, b: float) -> bool:
+            if self.score_type in ("Affinity", "minimizedAffinity"):
+                return a < b
+            return a > b
+
+        keep_limit = 3 * int(n_samples)
+        supplier = Chem.SDMolSupplier(str(combined_out), removeHs=False, sanitize=False)
+
+        def _write_uid_outputs(uid_raw: str, entries: list[tuple[int, Chem.Mol, str]]) -> None:
+            uid_norm = _normalize_uid(uid_raw)
+
+            # Determine filter threshold (match select_top_poses behavior).
+            counts = []
+            max_filters = None
+            if filters_data is not None and uid_norm in filters_data:
+                counts = filters_data[uid_norm].get("posebusters_filters_passed_count_fast", [])
+                if counts:
+                    max_filters = max(counts[: min(len(counts), keep_limit)])
+
+            entries.sort(key=lambda t: t[0])
+
+            # Write scored per-uid SDF (all poses), preserving original names.
+            scored_path = sdf_output_dir / f"{uid_raw}.sdf"
+            w = SDWriter(str(scored_path))
+            w.SetKekulize(False)
+            try:
+                for _, mol, orig_name in entries:
+                    mol.SetProp("_Name", orig_name)
+                    w.write(mol)
+            finally:
+                w.close()
+
+            # Select and write best pose (first keep_limit, filtered by PB counts).
+            best_mol_local = None
+            best_score_local = None
+            best_orig_name = ""
+            for pose_idx, mol, orig_name in entries:
+                if pose_idx >= keep_limit:
+                    continue
+                if max_filters is not None:
+                    if pose_idx >= len(counts):
+                        continue
+                    if int(counts[pose_idx]) < int(max_filters):
+                        continue
+                score = _extract_gnina_score(mol, score_type=self.score_type, use_minimized=self.minimize)
+                if score is None:
+                    continue
+                if best_score_local is None or _score_better(score, best_score_local):
+                    best_score_local = score
+                    best_mol_local = mol
+                    best_orig_name = orig_name
+
+            if best_mol_local is not None:
+                best_mol_local.SetProp("_Name", best_orig_name)
+                best_path = best_output_dir / f"{uid_norm}.sdf"
+                bw = SDWriter(str(best_path))
+                try:
+                    bw.SetKekulize(False)
+                    bw.write(best_mol_local)
+                finally:
+                    bw.close()
+
+        logger.info("Splitting combined GNINA output and selecting best poses")
+        current_uid = None
+        current_entries: list[tuple[int, Chem.Mol, str]] = []
+        seen_uids = set()
+        non_contiguous = False
+
+        for mol in tqdm(supplier, desc="Processing combined GNINA output"):
+            if mol is None:
+                continue
+            name = mol.GetProp("_Name") if mol.HasProp("_Name") else ""
+            try:
+                uid, pose_idx, orig_name = _decode_matcha_name(name)
+            except Exception as e:
+                raise RuntimeError(
+                    "Combined GNINA output is missing expected _Name markers. "
+                    "Use --gnina-batch-mode per-ligand."
+                ) from e
+
+            if current_uid is None:
+                current_uid = uid
+                seen_uids.add(uid)
+
+            if uid != current_uid:
+                if uid in seen_uids:
+                    non_contiguous = True
+                    break
+                _write_uid_outputs(current_uid, current_entries)
+                current_uid = uid
+                seen_uids.add(uid)
+                current_entries = []
+
+            current_entries.append((pose_idx, mol, orig_name))
+
+        if not non_contiguous and current_uid is not None:
+            _write_uid_outputs(current_uid, current_entries)
+
+        if non_contiguous:
+            logger.warning(
+                "Non-contiguous uids detected in combined GNINA output; "
+                "re-grouping output by uid (slower)."
+            )
+            uid_to_entries = defaultdict(list)
+            supplier2 = Chem.SDMolSupplier(str(combined_out), removeHs=False, sanitize=False)
+            for mol in supplier2:
+                if mol is None:
+                    continue
+                name = mol.GetProp("_Name") if mol.HasProp("_Name") else ""
+                uid, pose_idx, orig_name = _decode_matcha_name(name)
+                uid_to_entries[uid].append((pose_idx, mol, orig_name))
+            for uid, entries in uid_to_entries.items():
+                _write_uid_outputs(uid, entries)
+
     def select_top_poses(self, sdf_dir, output_dir, filters_path=None, n_samples=40):
         sdf_dir = Path(sdf_dir)
         output_dir = Path(output_dir)
@@ -392,12 +685,7 @@ class GninaScorer(PoseScorer):
         failed = 0
 
         for sdf_file in tqdm(sdf_files, desc="Selecting top poses"):
-            uid = sdf_file.stem
-            # Remove common suffixes
-            for suffix in ("_minimized", "_poses", "_predictions"):
-                if uid.endswith(suffix):
-                    uid = uid[:-len(suffix)]
-                    break
+            uid = _normalize_uid(sdf_file.stem)
 
             result = _find_top_scored_molecule(
                 sdf_file,
@@ -415,6 +703,7 @@ class GninaScorer(PoseScorer):
 
             best_mol, best_score, best_idx = result
             writer = SDWriter(str(output_dir / f"{uid}.sdf"))
+            writer.SetKekulize(False)
             writer.write(best_mol)
             writer.close()
             successful += 1
@@ -482,7 +771,7 @@ class CustomScriptScorer(PoseScorer):
         failed = 0
 
         for sdf_file in tqdm(sdf_files, desc="Selecting top poses"):
-            uid = sdf_file.stem
+            uid = _normalize_uid(sdf_file.stem)
 
             result = _find_top_scored_molecule(
                 sdf_file,
@@ -499,6 +788,7 @@ class CustomScriptScorer(PoseScorer):
 
             best_mol, _, _ = result
             writer = SDWriter(str(output_dir / f"{uid}.sdf"))
+            writer.SetKekulize(False)
             writer.write(best_mol)
             writer.close()
             successful += 1
@@ -519,9 +809,8 @@ def create_scorer(scorer_type, scorer_path=None, minimize=True):
     """
     if scorer_type == "gnina":
         return GninaScorer(gnina_path=scorer_path, minimize=minimize)
-    elif scorer_type == "custom":
+    if scorer_type == "custom":
         if scorer_path is None:
             raise ValueError("--scorer-path is required for custom scorer")
         return CustomScriptScorer(script_path=scorer_path)
-    else:
-        raise ValueError(f"Unknown scorer type: {scorer_type}")
+    raise ValueError(f"Unknown scorer type: {scorer_type}")
