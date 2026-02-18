@@ -1,5 +1,5 @@
 import torch
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import numpy as np
 from rdkit import Chem
 from typing import List, Optional
@@ -132,6 +132,48 @@ class BondsBatch:
             self.angle_histograms = self.angle_histograms.to(*args, **kwargs)
         return self
 
+    def clone_structure(self) -> "BondsBatch":
+        """Return a cheap structural copy sharing tensor storage.
+
+        This is used to allow non-blocking H2D transfers from pinned CPU memory
+        without mutating the original batch object.
+        """
+        return replace(self)
+
+    def pin_memory(self):
+        self.bond_type = self.bond_type.pin_memory()
+        if self.start is not None:
+            self.start = self.start.pin_memory()
+        if self.end is not None:
+            self.end = self.end.pin_memory()
+        if self.neighbor_of_start is not None:
+            self.neighbor_of_start = self.neighbor_of_start.pin_memory()
+        if self.neighbor_of_end is not None:
+            self.neighbor_of_end = self.neighbor_of_end.pin_memory()
+        if self.length is not None:
+            self.length = self.length.pin_memory()
+        if self.mask_rotate is not None:
+            self.mask_rotate = self.mask_rotate.pin_memory()
+        if self.is_conjugated is not None:
+            self.is_conjugated = self.is_conjugated.pin_memory()
+        if self.is_in_ring is not None:
+            self.is_in_ring = self.is_in_ring.pin_memory()
+        if self.is_rotatable is not None:
+            self.is_rotatable = self.is_rotatable.pin_memory()
+        if self.num_rotatable_bonds is not None:
+            self.num_rotatable_bonds = self.num_rotatable_bonds.pin_memory()
+        if self.is_padded_mask is not None:
+            self.is_padded_mask = self.is_padded_mask.pin_memory()
+        if self.is_aromatic is not None:
+            self.is_aromatic = self.is_aromatic.pin_memory()
+        if self.bond_periods is not None:
+            self.bond_periods = self.bond_periods.pin_memory()
+        if self.angles is not None:
+            self.angles = self.angles.pin_memory()
+        if self.angle_histograms is not None:
+            self.angle_histograms = self.angle_histograms.pin_memory()
+        return self
+
 
 @dataclass
 class LigandBatch:
@@ -215,6 +257,49 @@ class LigandBatch:
     rotatable_bonds_ext: BondsBatch = field(default_factory=BondsBatch)
     num_rotatable_bonds_ext: torch.Tensor = torch.empty((0,))
 
+    def clone_structure(self) -> "LigandBatch":
+        """Return a cheap structural copy sharing tensor storage.
+
+        Nested dataclass fields are also structurally copied to keep the clone
+        independent when `.to(...)` mutates tensor attributes.
+        """
+        clone = replace(self)
+        clone.rotatable_bonds_ext = self.rotatable_bonds_ext.clone_structure()
+        return clone
+
+    def pin_memory(self):
+        self.x = self.x.pin_memory()
+        self.pos = self.pos.pin_memory()
+        self.rot = self.rot.pin_memory()
+        self.orig_pos = self.orig_pos.pin_memory()
+        self.orig_pos_before_augm = self.orig_pos_before_augm.pin_memory()
+        self.random_pos = self.random_pos.pin_memory()
+        self.rotatable_bonds = self.rotatable_bonds.pin_memory()
+        self.init_tr = self.init_tr.pin_memory()
+        if self.pred_tr is not None:
+            self.pred_tr = self.pred_tr.pin_memory()
+        self.init_rot = self.init_rot.pin_memory()
+        self.init_tor = self.init_tor.pin_memory()
+        self.init_tor_ext = self.init_tor_ext.pin_memory()
+        self.final_tr = self.final_tr.pin_memory()
+        self.final_rot = self.final_rot.pin_memory()
+        self.final_tor = self.final_tor.pin_memory()
+        self.final_tor_ext = self.final_tor_ext.pin_memory()
+        self.num_atoms = self.num_atoms.pin_memory()
+        self.is_padded_mask = self.is_padded_mask.pin_memory()
+        if self.true_pos is not None:
+            self.true_pos = self.true_pos.pin_memory()
+        self.t = self.t.pin_memory()
+        self.rmsd = self.rmsd.pin_memory()
+        self.stage_num = self.stage_num.pin_memory()
+        self.num_rotatable_bonds = self.num_rotatable_bonds.pin_memory()
+        self.bond_periods = self.bond_periods.pin_memory()
+        if self.mask_rotate is not None:
+            self.mask_rotate = [mr.pin_memory() for mr in self.mask_rotate]
+        self.rotatable_bonds_ext = self.rotatable_bonds_ext.pin_memory()
+        self.num_rotatable_bonds_ext = self.num_rotatable_bonds_ext.pin_memory()
+        return self
+
 
 @dataclass
 class ProteinBatch:
@@ -246,6 +331,26 @@ class ProteinBatch:
     full_protein_center: torch.Tensor = torch.empty(0)
     all_atom_names: np.ndarray = None
 
+    def clone_structure(self) -> "ProteinBatch":
+        """Return a cheap structural copy sharing tensor storage."""
+        return replace(self)
+
+    def pin_memory(self):
+        self.x = self.x.pin_memory()
+        self.pos = self.pos.pin_memory()
+        self.seq = self.seq.pin_memory()
+        self.is_padded_mask = self.is_padded_mask.pin_memory()
+        if self.all_atom_pos is not None:
+            self.all_atom_pos = self.all_atom_pos.pin_memory()
+        if self.all_atom_residue_ids is not None:
+            self.all_atom_residue_ids = self.all_atom_residue_ids.pin_memory()
+        if self.mask_all_atom_residue is not None:
+            self.mask_all_atom_residue = self.mask_all_atom_residue.pin_memory()
+        self.full_protein_center = self.full_protein_center.pin_memory()
+        if hasattr(self.all_atom_names, "pin_memory"):
+            self.all_atom_names = self.all_atom_names.pin_memory()
+        return self
+
 
 @dataclass
 class ComplexBatch:
@@ -265,6 +370,21 @@ class ComplexBatch:
     original_augm_rot: torch.Tensor = torch.empty(0)
     allbonds_mask: torch.Tensor = torch.empty((0, 0), dtype=torch.bool)
     rotbonds_mask: torch.Tensor = torch.empty((0, 0), dtype=torch.bool)
+
+    def clone_structure(self) -> "ComplexBatch":
+        """Return a cheap structural copy sharing tensor storage.
+
+        The clone is safe to call `.to(...)` on without mutating the original
+        batch object, while still preserving pinned-memory benefits for H2D.
+        """
+        return ComplexBatch(
+            ligand=self.ligand.clone_structure(),
+            protein=self.protein.clone_structure(),
+            names=self.names,
+            original_augm_rot=self.original_augm_rot,
+            allbonds_mask=self.allbonds_mask,
+            rotbonds_mask=self.rotbonds_mask,
+        )
 
     def __repr__(self):
         ligand_repr = (
@@ -368,10 +488,6 @@ class ComplexBatch:
             self.protein.all_atom_pos = self.protein.all_atom_pos.to(*args, **kwargs)
         if self.protein.mask_all_atom_residue is not None:
             self.protein.mask_all_atom_residue = self.protein.mask_all_atom_residue.to(*args, **kwargs)
-        # if self.protein.all_atom_residue_ids is not None:
-            # self.protein.all_atom_residue_ids = self.protein.all_atom_residue_ids.to(*args, **kwargs)
-        self.protein.all_atom_pos = self.protein.all_atom_pos.to(*args, **kwargs)
-        self.protein.mask_all_atom_residue = self.protein.mask_all_atom_residue.to(*args, **kwargs)
 
         # Transfer additional mask tensors to device
         self.ligand.is_padded_mask = self.ligand.is_padded_mask.to(
@@ -384,6 +500,14 @@ class ComplexBatch:
         self.allbonds_mask = self.allbonds_mask.to(*args, **kwargs)
         self.rotbonds_mask = self.rotbonds_mask.to(*args, **kwargs)
 
+        return self
+
+    def pin_memory(self):
+        self.ligand = self.ligand.pin_memory()
+        self.protein = self.protein.pin_memory()
+        self.original_augm_rot = self.original_augm_rot.pin_memory()
+        self.allbonds_mask = self.allbonds_mask.pin_memory()
+        self.rotbonds_mask = self.rotbonds_mask.pin_memory()
         return self
 
 

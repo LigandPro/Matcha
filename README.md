@@ -2,6 +2,10 @@
 
 This is an official implementation of the paper [Matcha: Multi-Stage Riemannian Flow Matching for Accurate and Physically Valid Molecular Docking](https://arxiv.org/abs/2510.14586).
 
+## News
+
+We have updated the repository and the [Hugging Face checkpoints](https://huggingface.co/LigandPro/Matcha): the current code and weights correspond to the improved pipeline and **much better results**! The previous version, however, remains available as tag `v1` (`git checkout v1`).
+
 ## Overview
 
 Matcha is a molecular docking pipeline that combines multi-stage flow matching with physical validity filtering. It consists of three sequential stages that progressively refine docking predictions, each implemented as a flow matching model operating on appropriate geometric spaces (R³, SO(3), and SO(2)). Physical validity filters eliminate unrealistic poses, and optional GNINA scoring ranks final predictions.
@@ -43,6 +47,54 @@ Or with pip:
 pip install -e .
 ```
 
+### Optional: isolated GPU conformer worker backend (nvMolKit)
+
+Matcha can offload conformer generation to an isolated GPU worker process based on NVIDIA nvMolKit. This keeps the main Matcha environment unchanged and avoids ABI/runtime conflicts.
+
+Runtime toggles (no CLI flags):
+- `MATCHA_CONFORMER_BACKEND=auto|rdkit|worker` (default: `auto`)
+- `MATCHA_CONFORMER_WORKER_CMD` (optional; overrides auto-discovery)
+- `MATCHA_CONFORMER_WORKER_TIMEOUT_SEC` (default: `300`)
+- `MATCHA_CONFORMER_WORKER_CHUNK_SIZE` (default: `128`)
+
+Auto-discovery:
+- If `.venv-nvmolkit-worker/bin/matcha-nvmolkit-worker` exists in the repository root, Matcha will use it automatically.
+- Legacy fallback is kept for compatibility: `.venv-nvmolkit-worker/bin/python scripts/nvmolkit_worker.py`.
+
+Auto-setup & download (recommended):
+
+```bash
+# Linux + NVIDIA GPU. Creates .venv-nvmolkit-worker/ and runs an end-to-end smoke test.
+uv run python scripts/setup_nvmolkit_worker.py
+```
+
+This script may download:
+- nvMolKit source from GitHub (`NVIDIA-Digital-Bio/nvMolKit`)
+- CUDA toolkit components from NVIDIA's CUDA repo (Ubuntu 24.04 only; user-space extract, no sudo)
+
+Verify the worker is ready:
+
+```bash
+# The setup script should end with:
+# [ok] worker smoke: ...
+# [ok] nvMolKit worker env is ready.
+
+# Optional: verify Matcha can invoke the worker (fail-fast if missing/broken)
+MATCHA_CONFORMER_BACKEND=worker uv run python - <<'PY'
+from rdkit import Chem
+from matcha.utils.preprocessing import generate_conformer_mols_batch
+
+out = generate_conformer_mols_batch([Chem.MolFromSmiles("CCO")], confs_per_mol=2)
+assert len(out) == 1 and len(out[0]) == 2
+print("ok: conformer worker")
+PY
+```
+
+Backend behavior:
+- `MATCHA_CONFORMER_BACKEND=auto`: use the worker when available; if it fails, fall back to RDKit.
+- `MATCHA_CONFORMER_BACKEND=worker`: require the worker (errors if missing or failing).
+- `MATCHA_CONFORMER_BACKEND=rdkit`: always use RDKit (no worker).
+
 ## CLI usage <a name="cli"></a>
 
 The `matcha` CLI wraps the full inference pipeline (ESM embeddings, 3-stage docking, PoseBusters filtering) with optional GNINA scoring into a single command.
@@ -70,6 +122,7 @@ All molecules are processed in a single pipeline pass (native batching).
 | `--ligand-dir` | Multi-ligand `.sdf` file or directory |
 | `-o`, `--out` | Output directory |
 | `-g`, `--device` | `auto`, `cpu`, `cuda`, `cuda:N`, or `mps` (Apple Metal) |
+| `--gpus` | Multi-GPU batch sharding, e.g. `--gpus 2,3` (batch dir mode only) |
 | `--n-samples` | Poses per ligand (default: 40) |
 | `--scorer` | `gnina` (default), `custom`, or `none` |
 | `--scorer-minimize` / `--no-scorer-minimize` | GNINA minimization (default: on) |
@@ -78,6 +131,23 @@ All molecules are processed in a single pipeline pass (native batching).
 | `--overwrite` | Overwrite existing run |
 
 Run `matcha --help` for the full list.
+
+### Multi-GPU batch mode (2/3 GPUs)
+
+For large ligand directories, Matcha can shard ligands across multiple GPUs by launching one process per GPU.
+
+```bash
+# 2 GPUs
+uv run matcha -r protein.pdb --ligand-dir ligands/ --gpus 2,3 --box-json target_box.json -o out_2gpu
+
+# 3 GPUs
+uv run matcha -r protein.pdb --ligand-dir ligands/ --gpus 1,2,3 --box-json target_box.json -o out_3gpu
+```
+
+Outputs are merged into:
+- `out_<...>/<run-name>/merged/`
+- `out_<...>/<run-name>/benchmark_summary.json`
+- `out_<...>/<run-name>/benchmark_summary.md`
 
 ### Search space
 

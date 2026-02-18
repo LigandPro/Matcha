@@ -54,18 +54,25 @@ def compute_sequences(conf):
 
             id2seq = {}
             bad_ids = []
+            seq_cache = {}
             for name in tqdm(names, desc=f'Preparing {dataset_name} sequences'):
                 dataset_name_real = dataset_name
                 real_name = name
                 rec_path = get_protein_path(name, dataset_name_real, dataset_data_dir, 
                                             crop_mol=False)
                 try:
-                    l = get_structure_from_file(rec_path)
+                    st = os.stat(rec_path)
+                    cache_key = (st.st_ino, st.st_size, getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)))
+                    if cache_key in seq_cache:
+                        chain_sequences = seq_cache[cache_key]
+                    else:
+                        chain_sequences = get_structure_from_file(rec_path)
+                        seq_cache[cache_key] = chain_sequences
                 except Exception as e:
                     bad_ids.append(name)
                     continue
 
-                for i, seq in enumerate(l):
+                for i, seq in enumerate(chain_sequences):
                     id2seq[f'{real_name}_chain_{i}'] = seq
 
             logger.info(f'{split}, {dataset_name} has {len(bad_ids)} bad IDs')
@@ -86,7 +93,7 @@ def get_embeddings_residue(tokens, esm_model, device):
     embeddings = []
     with torch.no_grad():
         for i, batch in enumerate(tqdm(tokens, desc='Computing ESM embeddings')):
-            if not i % 1000 and i != 0:
+            if i % 1000 == 0 and i != 0:
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 gc.collect()
@@ -104,34 +111,41 @@ def save_dataset_embeddings(dataset_sequence_path, save_emb_path, model, tokeniz
     all_data = load(dataset_sequence_path)
     logger.info('Sequences loaded')
 
+    def _normalize_seq(val):
+        return val if isinstance(val, str) else ''.join(val)
+
+    id_to_seq = {k: _normalize_seq(v) for k, v in all_data.items()}
+
     if reduce_to_unique_sequences:
         logger.info('Reducing to unique sequences')
-        logger.info(f'Number of sequences: {len(all_data)}')
-        prepared_sequences = list(
-            set([''.join(seq) for seq in all_data.values()]))
-        logger.info(f'Number of unique sequences: {len(prepared_sequences)}')
-    else:
-        prepared_sequences = [''.join(seq) for seq in all_data.values()]
+        logger.info(f'Number of sequences: {len(id_to_seq)}')
+        unique_sequences = sorted(set(id_to_seq.values()))
+        logger.info(f'Number of unique sequences: {len(unique_sequences)}')
 
+        tokens = get_tokens(unique_sequences, tokenizer)
+        embeddings = get_embeddings_residue(tokens=tokens, esm_model=model, device=device)
+        seq_to_emb = {seq: emb for seq, emb in zip(unique_sequences, embeddings)}
+        save_data = {k: seq_to_emb[seq] for k, seq in id_to_seq.items()}
+        logger.info(f'Number of protein chains: {len(save_data)}')
+        torch.save(save_data, save_emb_path)
+        return
+
+    prepared_sequences = list(id_to_seq.values())
     tokens = get_tokens(prepared_sequences, tokenizer)
-    embeddings = get_embeddings_residue(
-        tokens=tokens, esm_model=model, device=device)
+    embeddings = get_embeddings_residue(tokens=tokens, esm_model=model, device=device)
 
-    if reduce_to_unique_sequences:
-        names = prepared_sequences
-    else:
-        names = all_data.keys()
-
+    names = list(id_to_seq.keys())
     logger.info(f'Number of protein chains: {len(names)}')
     save_data = {name: emb for name, emb in zip(names, embeddings)}
     torch.save(save_data, save_emb_path)
 
 
 def compute_esm_embeddings(conf, model_type='hf_esm_12'):
-    reduce_to_unique_sequences = False
+    reduce_to_unique_sequences = True
 
     from matcha.utils.device import resolve_device
-    device = torch.device(resolve_device())
+    requested_device = conf.get("device", None) if hasattr(conf, "get") else getattr(conf, "device", None)
+    device = torch.device(resolve_device(requested_device))
     logger.info(f'Available device: {device}')
 
     if model_type == 'hf_esm_6':
@@ -152,11 +166,10 @@ def compute_esm_embeddings(conf, model_type='hf_esm_12'):
 
     num_params_trainable = 0
     num_params_all = 0
-    for name, param in model.named_parameters():
+    for _, param in model.named_parameters():
+        num_params_all += param.numel()
         if param.requires_grad:
-            num_params_trainable += int(
-                torch.prod(torch.tensor(param.data.shape)))
-        num_params_all += int(torch.prod(torch.tensor(param.data.shape)))
+            num_params_trainable += param.numel()
     logger.info(f'Trainable parameters: {num_params_trainable}')
     logger.info(f'All parameters: {num_params_all}')
 
