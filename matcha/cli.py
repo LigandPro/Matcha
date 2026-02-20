@@ -112,8 +112,10 @@ def _normalize_ligand(src: Path, dest: Path, receptor_center: Optional[np.ndarra
             if candidate is not None:
                 mol = candidate
                 break
-    elif suffix in {".mol", ".mol2"}:
-        mol = Chem.MolFromMol2File(str(src), sanitize=False) if suffix == ".mol2" else Chem.MolFromMolFile(str(src), removeHs=False, sanitize=False)
+    elif suffix == ".mol2":
+        mol = Chem.MolFromMol2File(str(src), sanitize=False)
+    elif suffix == ".mol":
+        mol = Chem.MolFromMolFile(str(src), removeHs=False, sanitize=False)
     elif suffix == ".pdb":
         mol = Chem.MolFromPDBFile(str(src), removeHs=False, sanitize=False)
     else:
