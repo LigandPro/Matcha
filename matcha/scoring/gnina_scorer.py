@@ -140,14 +140,7 @@ def _gnina_env() -> dict:
             break
 
     if extra_paths:
-        # Deduplicate while preserving order.
-        seen = set()
-        deduped = []
-        for p in extra_paths:
-            if p not in seen:
-                deduped.append(p)
-                seen.add(p)
-
+        deduped = list(dict.fromkeys(extra_paths))
         existing = env.get("LD_LIBRARY_PATH", "")
         new_path = ":".join(deduped)
         env["LD_LIBRARY_PATH"] = f"{new_path}:{existing}" if existing else new_path
