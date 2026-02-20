@@ -42,7 +42,7 @@ class ColoredFormatter(logging.Formatter):
         if self.use_colors:
             # Shorten module name for readability (e.g., matcha.dataset.pdbbind -> dataset.pdbbind)
             if record.name.startswith('matcha.'):
-                record.name = record.name[9:]  # Remove 'matcha.' prefix
+                record.name = record.name[7:]  # Remove 'matcha.' prefix
             
             # Color the level name
             levelname = record.levelname
@@ -58,7 +58,7 @@ class ColoredFormatter(logging.Formatter):
         else:
             # No colors - just shorten module names
             if record.name.startswith('matcha.'):
-                record.name = record.name[9:]
+                record.name = record.name[7:]
             return super().format(record)
 
 
