@@ -156,8 +156,6 @@ def main():
             np.save(predicted_ligand_transforms_path, [metrics])
             logger.info(f"Saved metrics to {predicted_ligand_transforms_path}")
 
-            np.save(predicted_ligand_transforms_path, [metrics])
-
             updated_metrics = construct_output_dict(
                 metrics, test_dataset_docking.dataset)
             final_metrics_path = os.path.join(
