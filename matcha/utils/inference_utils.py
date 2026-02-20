@@ -11,7 +11,6 @@ from collections import defaultdict
 
 from rdkit.Chem import RemoveAllHs
 from rdkit import Chem
-import prody
 from prody import confProDy
 import torch
 import datamol as dm
@@ -195,14 +194,10 @@ def save_all_to_sdf(conf, inference_run_name, one_file: bool = False, merge_stag
 
 
 def calc_posebusters_for_data(data, lig_pos, orig_mol):
-    lig_pos_for_posebusters = lig_pos
-    lig_types_for_posebusters = data.ligand.x[:, 0] - 1
-    pro_types_for_posebusters = data.protein.all_atom_names
-    pro_pos_for_posebusters = data.protein.all_atom_pos + data.protein.full_protein_center
-    lig_mol_for_posebusters = orig_mol
-    names = data.name
-    posebusters_results = calc_posebusters(lig_pos_for_posebusters, pro_pos_for_posebusters,
-                                           lig_types_for_posebusters, pro_types_for_posebusters, names, lig_mol_for_posebusters)
+    lig_types = data.ligand.x[:, 0] - 1
+    pro_types = data.protein.all_atom_names
+    pro_pos = data.protein.all_atom_pos + data.protein.full_protein_center
+    posebusters_results = calc_posebusters(lig_pos, pro_pos, lig_types, pro_types, data.name, orig_mol)
     if posebusters_results is None:
         return None
     return np.array([posebusters_results[key] for key in KEYS_VALID if key in posebusters_results.keys()], dtype=object).transpose()

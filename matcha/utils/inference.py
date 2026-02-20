@@ -2,7 +2,7 @@ import os
 import numpy as np
 import copy
 from copy import deepcopy
-import safetensors
+import safetensors.torch
 from tqdm import tqdm
 import torch
 from matcha.utils.rotation import expm_SO3
@@ -123,8 +123,6 @@ def run_evaluation(dataloader, num_steps, solver, model, progress_callback=None,
 
         all_names = batch.names
         tor_true = optimized.ligand.final_tor.cpu().numpy()
-
-        compute_metrics = True
         tor_pred = tor_agg.cpu().numpy()
 
         for full_idx, name in enumerate(all_names):

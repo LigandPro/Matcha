@@ -6,7 +6,6 @@ Example:
 import copy
 import os
 import shutil
-import socket
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -122,14 +121,13 @@ def _prepare_batch_dataset(protein: Path, molecules: List[Tuple[str, Any]], data
     dataset_dir.mkdir(parents=True, exist_ok=True)
     uids = []
     for name, mol in molecules:
-        uid = name
-        sample_dir = dataset_dir / uid
+        sample_dir = dataset_dir / name
         sample_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(protein, sample_dir / f"{uid}_protein.pdb")
-        writer = Chem.SDWriter(str(sample_dir / f"{uid}_ligand.sdf"))
+        shutil.copyfile(protein, sample_dir / f"{name}_protein.pdb")
+        writer = Chem.SDWriter(str(sample_dir / f"{name}_ligand.sdf"))
         writer.write(mol)
         writer.close()
-        uids.append(uid)
+        uids.append(name)
     return uids
 
 
@@ -188,12 +186,18 @@ def _ensure_checkpoints(path: Path) -> Path:
 
 
 def _autobox_from_ligand(ligand: Path) -> Tuple[float, float, float]:
-    mol = Chem.MolFromMolFile(str(ligand), removeHs=False, sanitize=False) if ligand.suffix.lower() in {".mol", ".mol2"} else None
-    if mol is None and ligand.suffix.lower() == ".pdb":
+    suffix = ligand.suffix.lower()
+    if suffix in {".mol", ".mol2"}:
+        mol = Chem.MolFromMolFile(str(ligand), removeHs=False, sanitize=False)
+    elif suffix == ".pdb":
         mol = Chem.MolFromPDBFile(str(ligand), removeHs=False, sanitize=False)
+    else:
+        mol = None
+
     if mol is None:
         suppl = Chem.SDMolSupplier(str(ligand), removeHs=False, sanitize=False)
         mol = suppl[0] if suppl and len(suppl) > 0 else None
+
     if mol is None or mol.GetNumConformers() == 0:
         raise typer.BadParameter(f"Failed to read ligand for autobox: {ligand}")
     mol = Chem.RemoveAllHs(mol, sanitize=False)
@@ -313,14 +317,14 @@ def run_matcha(
     console.print("")
 
     # Box handling
-    manual_box_specified = any([center_x, center_y, center_z])
+    manual_box_specified = any(v is not None for v in (center_x, center_y, center_z))
     autobox_specified = autobox_ligand is not None
     box_center_val: Optional[Tuple[float, float, float]] = None
 
     if manual_box_specified and autobox_specified:
         raise typer.BadParameter("Cannot use both manual box and autobox. Choose one method.")
     if manual_box_specified:
-        if not all([center_x is not None, center_y is not None, center_z is not None]):
+        if center_x is None or center_y is None or center_z is None:
             raise typer.BadParameter("Manual box requires --center-x/--center-y/--center-z")
         box_center_val = (center_x, center_y, center_z)
         console.print(f"[bold green][matcha][/bold green] manual center: {box_center_val}")
@@ -360,14 +364,7 @@ def run_matcha(
     else:
         if box_center_val is not None:
             pocket_centers_filename = work_dir / 'stage1_any_conf.npy'
-            def _create_pocket_centers_file(box_center_val: Tuple[float, float, float], n_samples: int, complex_name: str, pocket_centers_filename: Path) -> None:
-                pocket_centers = {}
-                ligand_center = np.array(box_center_val)
-                protein_center = np.zeros(3)
-                for i in range(n_samples):
-                    pocket_centers[f'{complex_name}_mol0_conf{i}'] = [{'tr_pred_init': ligand_center, 'full_protein_center': protein_center}]
-                np.save(pocket_centers_filename, [pocket_centers])
-            _create_pocket_centers_file(box_center_val, n_samples, complex_name=run_name, pocket_centers_filename=pocket_centers_filename)
+            _create_batch_pocket_centers(box_center_val, [run_name], n_samples, pocket_centers_filename)
         _prepare_singleton_dataset(receptor_for_run, ligand, dataset_dir, run_name, original_receptor=receptor)
         molecule_uids = [run_name]
 
@@ -422,6 +419,10 @@ def run_matcha(
             pb_filters = json.load(f)
 
     # Enrich metrics with PB filter data
+    def _safe_get_filter(fdata, key, idx, default):
+        values = fdata.get(key, [])
+        return values[idx] if idx < len(values) else default
+
     for uid_key, uid_data in metrics.items():
         uid_real = uid_key.split('_mol')[0] if '_mol' in uid_key else uid_key
         if uid_real in pb_filters:
@@ -430,12 +431,129 @@ def run_matcha(
                 if i < len(fdata.get('posebusters_filters_passed_count_fast', [])):
                     sample['posebusters_filters_passed_count_fast'] = fdata['posebusters_filters_passed_count_fast'][i]
                     sample['posebusters_filters_fast'] = [
-                        fdata.get('not_too_far_away', [False])[i] if i < len(fdata.get('not_too_far_away', [])) else False,
-                        fdata.get('no_internal_clash', [False])[i] if i < len(fdata.get('no_internal_clash', [])) else False,
-                        fdata.get('no_clashes', [False])[i] if i < len(fdata.get('no_clashes', [])) else False,
-                        fdata.get('no_volume_clash', [False])[i] if i < len(fdata.get('no_volume_clash', [])) else False,
-                        fdata.get('is_buried_fraction', [0.0])[i] if i < len(fdata.get('is_buried_fraction', [])) else 0.0,
+                        _safe_get_filter(fdata, 'not_too_far_away', i, False),
+                        _safe_get_filter(fdata, 'no_internal_clash', i, False),
+                        _safe_get_filter(fdata, 'no_clashes', i, False),
+                        _safe_get_filter(fdata, 'no_volume_clash', i, False),
+                        _safe_get_filter(fdata, 'is_buried_fraction', i, 0.0),
                     ]
+
+    def _format_pb_flags(pb_flags: list) -> Tuple[str, str, str, str, str]:
+        not_far = "\u2713" if len(pb_flags) > 0 and pb_flags[0] else "\u2717"
+        no_int_clash = "\u2713" if len(pb_flags) > 1 and pb_flags[1] else "\u2717"
+        no_clash = "\u2713" if len(pb_flags) > 2 and pb_flags[2] else "\u2717"
+        no_vol_clash = "\u2713" if len(pb_flags) > 3 and pb_flags[3] else "\u2717"
+        buried_frac = f"{pb_flags[4]:.2f}" if len(pb_flags) > 4 else "n/a"
+        return not_far, no_int_clash, no_clash, no_vol_clash, buried_frac
+
+    def _format_pose_line(rank: int, sample: dict) -> str:
+        err = float(sample.get("error_estimate_0", float("inf")))
+        pb_count = int(sample.get("posebusters_filters_passed_count_fast", 0))
+        not_far, no_int_clash, no_clash, no_vol_clash, buried_frac = _format_pb_flags(
+            sample.get("posebusters_filters_fast", []))
+        return f"  {rank:<3}     {err:>7.3f}       {pb_count}/4      {not_far:^4}     {no_int_clash:^8}     {no_clash:^5}     {no_vol_clash:^8}      {buried_frac:>6}"
+
+    def _build_log_header(start_time, command_line, workdir_abs, runtime) -> List[str]:
+        return [
+            banner.rstrip("\n"),
+            "MATCHA DOCKING ENGINE  v2.0.0",
+            "============================================================",
+            "",
+            "",
+            "[ RUN INFO ]",
+            f"  Start time       : {start_time.isoformat()}Z",
+            f"  Command          : {command_line}",
+            f"  Workdir          : {workdir_abs}",
+            f"  Runtime          : {_format_runtime(runtime)}",
+            "",
+            "",
+        ]
+
+    def _build_box_section() -> List[str]:
+        if box_center_val is not None:
+            return [
+                "[ AUTODOCKING BOX ]",
+                f"  Mode             : {'manual center' if not autobox_specified else f'autobox from {autobox_ligand.name}'}",
+                f"  Center (\u00c5)       : ({box_center_val[0]:.3f}, {box_center_val[1]:.3f}, {box_center_val[2]:.3f})",
+                "",
+                "",
+            ]
+        return [
+            "[ DOCKING MODE ]",
+            "  Mode             : blind docking (entire protein)",
+            "",
+            "",
+        ]
+
+    def _build_summary_section(errs, pb_counts, best_idx, kept_physical, total_samples) -> List[str]:
+        lines = [
+            "[ SUMMARY ]",
+            f"  Samples per ligand     : {n_samples}",
+            f"  error_estimate_0 (\u00c5)   : min={min(errs):.3f}, mean={float(np.mean(errs)):.3f}, max={max(errs):.3f}",
+            f"  posebusters_fast checks: min={min(pb_counts)}/4, max={max(pb_counts)}/4",
+            f"  Best sample            : rank={best_idx+1}, error_estimate_0={errs[best_idx]:.3f}, posebusters_pass_fast={pb_counts[best_idx]}/4",
+            f"  Filtered poses (pb_4/4): kept {kept_physical}/{total_samples}" + ("  [WARNING: none passed, keeping originals]" if physical_only and kept_physical==0 else ""),
+            "",
+            "",
+            "  Note: error_estimate_0 is a lower-is-better RMSD-like metric (\u00c5).",
+            "        Negative values indicate high model confidence, positive values indicate uncertainty.",
+            "        Lower values = higher confidence in the predicted pose.",
+            "",
+            "",
+            "  PoseBusters checks (4 boolean tests):",
+            "    1. not_too_far_away   : ligand is close to protein (distance check)",
+            "    2. no_internal_clash  : no bad bonds/angles in ligand geometry",
+            "    3. no_clashes         : no inter-molecular clashes (ligand-protein)",
+            "    4. no_volume_clash    : no vdW volume overlaps",
+            "  Additional metric:",
+            "    - buried_fraction     : fraction of ligand buried in protein (shown separately)",
+            "",
+        ]
+        return lines
+
+    def _build_pose_ranking_section(ranked_samples) -> List[str]:
+        lines = [
+            "[ POSE RANKING ]",
+            "  mode  error_est_0(\u00c5)  pb_4/4  not_far  no_int_clash  no_clash  no_vol_clash  buried_frac",
+            "  --------------------------------------------------------------------------------------------",
+        ]
+        for rank, sample in ranked_samples:
+            lines.append(_format_pose_line(rank, sample))
+        lines.extend([
+            "",
+            "Legend: \u2713 = passed, \u2717 = failed",
+            "",
+            "",
+        ])
+        return lines
+
+    def _build_warnings_section(errs, pb_counts) -> List[str]:
+        lines = []
+        if any(e > 0 for e in errs):
+            lines.extend([
+                "WARNING: Some poses have positive error_est_0 values.",
+                "         This indicates reduced model confidence in those predictions.",
+                "         Consider generating more samples or inspecting poses manually.",
+                "",
+                "",
+            ])
+        if max(pb_counts) < 4:
+            lines.extend([
+                "WARNING: No poses passed all PoseBusters checks (pb_4/4).",
+                "         Inspect poses or regenerate with more samples/box adjustments.",
+                "",
+                "",
+            ])
+        return lines
+
+    def _build_log_footer(end_time, runtime, workdir_abs) -> List[str]:
+        return [
+            "[ END ]",
+            f"  Run finished at    : {end_time.isoformat()}Z",
+            f"  Total runtime      : {_format_runtime(runtime)}",
+            f"  Workdir preserved  : {workdir_abs}",
+            "============================================================",
+        ]
 
     def _rank_samples(sample_metrics: List[dict]) -> List[Tuple[int, dict]]:
         ranked_indices = sorted(
@@ -502,37 +620,9 @@ def run_matcha(
         resolved_out_abs = resolved_out.resolve()
         all_poses_abs = all_poses_dest.resolve()
         command_line = "uv run matcha " + " ".join(sys.argv[1:]) if ".venv/bin/matcha" in sys.argv[0] else " ".join(sys.argv)
-        log_lines = [
-            banner.rstrip("\n"),
-            "MATCHA DOCKING ENGINE  v2.0.0",
-            "============================================================",
-            "",
-            "",
-            "[ RUN INFO ]",
-            f"  Start time       : {start_time.isoformat()}Z",
-            f"  Command          : {command_line}",
-            f"  Workdir          : {run_workdir.resolve()}",
-            f"  Runtime          : {_format_runtime(runtime)}",
-            "",
-            "",
-        ]
 
-        if box_center_val is not None:
-            log_lines.extend([
-                "[ AUTODOCKING BOX ]",
-                f"  Mode             : {'manual center' if not autobox_specified else f'autobox from {autobox_ligand.name}'}",
-                f"  Center (Å)       : ({box_center_val[0]:.3f}, {box_center_val[1]:.3f}, {box_center_val[2]:.3f})",
-                "",
-                "",
-            ])
-        else:
-            log_lines.extend([
-                "[ DOCKING MODE ]",
-                "  Mode             : blind docking (entire protein)",
-                "",
-                "",
-            ])
-
+        log_lines = _build_log_header(start_time, command_line, run_workdir.resolve(), runtime)
+        log_lines.extend(_build_box_section())
         log_lines.extend([
             "[ INPUT / OUTPUT FILES ]",
             f"  Receptor         : {receptor_abs}",
@@ -542,76 +632,11 @@ def run_matcha(
             f"  Log file         : {log_path}",
             "",
             "",
-            "[ SUMMARY ]",
-            f"  Samples per ligand     : {n_samples}",
-            f"  error_estimate_0 (Å)   : min={min(errs):.3f}, mean={float(np.mean(errs)):.3f}, max={max(errs):.3f}",
-            f"  posebusters_fast checks: min={min(pb_counts)}/4, max={max(pb_counts)}/4",
-            f"  Best sample            : rank={best_idx+1}, error_estimate_0={errs[best_idx]:.3f}, posebusters_pass_fast={pb_counts[best_idx]}/4",
-            f"  Filtered poses (pb_4/4): kept {kept_physical}/{total_samples}" + ("  [WARNING: none passed, keeping originals]" if physical_only and kept_physical==0 else ""),
-            "",
-            "",
-            "  Note: error_estimate_0 is a lower-is-better RMSD-like metric (Å).",
-            "        Negative values indicate high model confidence, positive values indicate uncertainty.",
-            "        Lower values = higher confidence in the predicted pose.",
-            "",
-            "",
-            "  PoseBusters checks (4 boolean tests):",
-            "    1. not_too_far_away   : ligand is close to protein (distance check)",
-            "    2. no_internal_clash  : no bad bonds/angles in ligand geometry",
-            "    3. no_clashes         : no inter-molecular clashes (ligand-protein)",
-            "    4. no_volume_clash    : no vdW volume overlaps",
-            "  Additional metric:",
-            "    - buried_fraction     : fraction of ligand buried in protein (shown separately)",
-            "",
-            "[ POSE RANKING ]",
-            "  mode  error_est_0(Å)  pb_4/4  not_far  no_int_clash  no_clash  no_vol_clash  buried_frac",
-            "  --------------------------------------------------------------------------------------------",
         ])
-        for mode, sample in ranked_samples:
-            err = float(sample.get("error_estimate_0", float("inf")))
-            pb_count = int(sample.get("posebusters_filters_passed_count_fast", 0))
-            pb_flags = sample.get("posebusters_filters_fast", [])
-
-            not_far = "✓" if len(pb_flags) > 0 and pb_flags[0] else "✗"
-            no_int_clash = "✓" if len(pb_flags) > 1 and pb_flags[1] else "✗"
-            no_clash = "✓" if len(pb_flags) > 2 and pb_flags[2] else "✗"
-            no_vol_clash = "✓" if len(pb_flags) > 3 and pb_flags[3] else "✗"
-            buried_frac = f"{pb_flags[4]:.2f}" if len(pb_flags) > 4 else "n/a"
-
-            log_lines.append(
-                f"  {mode:<3}     {err:>7.3f}       {pb_count}/4      {not_far:^4}     {no_int_clash:^8}     {no_clash:^5}     {no_vol_clash:^8}      {buried_frac:>6}"
-            )
-
-        log_lines.extend([
-            "",
-            "Legend: ✓ = passed, ✗ = failed",
-            "",
-            "",
-        ])
-
-        if any(e > 0 for e in errs):
-            log_lines.extend([
-                "WARNING: Some poses have positive error_est_0 values.",
-                "         This indicates reduced model confidence in those predictions.",
-                "         Consider generating more samples or inspecting poses manually.",
-                "",
-                "",
-            ])
-        if max(pb_counts) < 4:
-            log_lines.extend([
-                "WARNING: No poses passed all PoseBusters checks (pb_4/4).",
-                "         Inspect poses or regenerate with more samples/box adjustments.",
-                "",
-                "",
-            ])
-
-        log_lines.extend([
-            "[ END ]",
-            f"  Run finished at    : {end_time.isoformat()}Z",
-            f"  Total runtime      : {_format_runtime(runtime)}",
-            f"  Workdir preserved  : {run_workdir}",
-            "============================================================",
-        ])
+        log_lines.extend(_build_summary_section(errs, pb_counts, best_idx, kept_physical, total_samples))
+        log_lines.extend(_build_pose_ranking_section(ranked_samples))
+        log_lines.extend(_build_warnings_section(errs, pb_counts))
+        log_lines.extend(_build_log_footer(end_time, runtime, run_workdir))
         with open(log_path, "w") as log_file:
             log_file.write("\n".join(log_lines))
 
@@ -658,37 +683,8 @@ def run_matcha(
         end_time_local = datetime.now(timezone.utc)
         runtime_local = (end_time_local - start_time).total_seconds()
 
-        log_lines = [
-            banner.rstrip("\n"),
-            "MATCHA DOCKING ENGINE  v2.0.0",
-            "============================================================",
-            "",
-            "",
-            "[ RUN INFO ]",
-            f"  Start time       : {start_time.isoformat()}Z",
-            f"  Command          : batch run {run_name} (ligand {mol_uid})",
-            f"  Workdir          : {run_workdir_abs}",
-            f"  Runtime          : {_format_runtime(runtime_local)}",
-            "",
-            "",
-        ]
-
-        if box_center_val is not None:
-            log_lines.extend([
-                "[ AUTODOCKING BOX ]",
-                f"  Mode             : {'manual center' if not autobox_specified else f'autobox from {autobox_ligand.name}'}",
-                f"  Center (Å)       : ({box_center_val[0]:.3f}, {box_center_val[1]:.3f}, {box_center_val[2]:.3f})",
-                "",
-                "",
-            ])
-        else:
-            log_lines.extend([
-                "[ DOCKING MODE ]",
-                "  Mode             : blind docking (entire protein)",
-                "",
-                "",
-            ])
-
+        log_lines = _build_log_header(start_time, f"batch run {run_name} (ligand {mol_uid})", run_workdir_abs, runtime_local)
+        log_lines.extend(_build_box_section())
         log_lines.extend([
             "[ INPUT / OUTPUT FILES ]",
             f"  Receptor         : {receptor_abs}",
@@ -698,76 +694,11 @@ def run_matcha(
             f"  Log file         : {per_log_path.resolve()}",
             "",
             "",
-            "[ SUMMARY ]",
-            f"  Samples per ligand     : {n_samples}",
-            f"  error_estimate_0 (Å)   : min={min(errs):.3f}, mean={float(np.mean(errs)):.3f}, max={max(errs):.3f}",
-            f"  posebusters_fast checks: min={min(pb_counts)}/4, max={max(pb_counts)}/4",
-            f"  Best sample            : rank={best_idx+1}, error_estimate_0={errs[best_idx]:.3f}, posebusters_pass_fast={pb_counts[best_idx]}/4",
-            f"  Filtered poses (pb_4/4): kept {kept_physical}/{total_samples}" + ("  [WARNING: none passed, keeping originals]" if physical_only and kept_physical==0 else ""),
-            "",
-            "",
-            "  Note: error_estimate_0 is a lower-is-better RMSD-like metric (Å).",
-            "        Negative values indicate high model confidence, positive values indicate uncertainty.",
-            "        Lower values = higher confidence in the predicted pose.",
-            "",
-            "",
-            "  PoseBusters checks (4 boolean tests):",
-            "    1. not_too_far_away   : ligand is close to protein (distance check)",
-            "    2. no_internal_clash  : no bad bonds/angles in ligand geometry",
-            "    3. no_clashes         : no inter-molecular clashes (ligand-protein)",
-            "    4. no_volume_clash    : no vdW volume overlaps",
-            "  Additional metric:",
-            "    - buried_fraction     : fraction of ligand buried in protein (shown separately)",
-            "",
-            "[ POSE RANKING ]",
-            "  mode  error_est_0(Å)  pb_4/4  not_far  no_int_clash  no_clash  no_vol_clash  buried_frac",
-            "  --------------------------------------------------------------------------------------------",
         ])
-        for mode, sample in ranked_samples:
-            err = float(sample.get("error_estimate_0", float("inf")))
-            pb_count_val = int(sample.get("posebusters_filters_passed_count_fast", 0))
-            pb_flags = sample.get("posebusters_filters_fast", [])
-
-            not_far = "✓" if len(pb_flags) > 0 and pb_flags[0] else "✗"
-            no_int_clash = "✓" if len(pb_flags) > 1 and pb_flags[1] else "✗"
-            no_clash = "✓" if len(pb_flags) > 2 and pb_flags[2] else "✗"
-            no_vol_clash = "✓" if len(pb_flags) > 3 and pb_flags[3] else "✗"
-            buried_frac = f"{pb_flags[4]:.2f}" if len(pb_flags) > 4 else "n/a"
-
-            log_lines.append(
-                f"  {mode:<3}     {err:>7.3f}       {pb_count_val}/4      {not_far:^4}     {no_int_clash:^8}     {no_clash:^5}     {no_vol_clash:^8}      {buried_frac:>6}"
-            )
-
-        log_lines.extend([
-            "",
-            "Legend: ✓ = passed, ✗ = failed",
-            "",
-            "",
-        ])
-
-        if any(e > 0 for e in errs):
-            log_lines.extend([
-                "WARNING: Some poses have positive error_est_0 values.",
-                "         This indicates reduced model confidence in those predictions.",
-                "         Consider generating more samples or inspecting poses manually.",
-                "",
-                "",
-            ])
-        if max(pb_counts) < 4:
-            log_lines.extend([
-                "WARNING: No poses passed all PoseBusters checks (pb_4/4).",
-                "         Inspect poses or regenerate with more samples/box adjustments.",
-                "",
-                "",
-            ])
-
-        log_lines.extend([
-            "[ END ]",
-            f"  Run finished at    : {end_time_local.isoformat()}Z",
-            f"  Total runtime      : {_format_runtime(runtime_local)}",
-            f"  Workdir preserved  : {run_workdir_abs}",
-            "============================================================",
-        ])
+        log_lines.extend(_build_summary_section(errs, pb_counts, best_idx, kept_physical, total_samples))
+        log_lines.extend(_build_pose_ranking_section(ranked_samples))
+        log_lines.extend(_build_warnings_section(errs, pb_counts))
+        log_lines.extend(_build_log_footer(end_time_local, runtime_local, run_workdir_abs))
 
         with open(per_log_path, "w") as log_file:
             log_file.write("\n".join(log_lines))
