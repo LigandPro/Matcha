@@ -26,7 +26,7 @@ def get_structure_from_file(file_path):
     res_chain_ids = np.asarray(
         [s + c for s, c in zip(res_seg_ids, res_chain_ids)])
     chain_ids = np.unique(res_chain_ids)
-    seq = np.array(list(seq))
+    seq = np.array([s for s in seq])
 
     chain_sequences = []
     for i, id in enumerate(chain_ids):
@@ -54,17 +54,26 @@ def compute_sequences(conf):
 
             id2seq = {}
             bad_ids = []
+            seq_cache = {}
             for name in tqdm(names, desc=f'Preparing {dataset_name} sequences'):
-                rec_path = get_protein_path(name, dataset_name, dataset_data_dir,
+                dataset_name_real = dataset_name
+                real_name = name
+                rec_path = get_protein_path(name, dataset_name_real, dataset_data_dir, 
                                             crop_mol=False)
                 try:
-                    chain_sequences = get_structure_from_file(rec_path)
-                except Exception:
+                    st = os.stat(rec_path)
+                    cache_key = (st.st_ino, st.st_size, getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)))
+                    if cache_key in seq_cache:
+                        chain_sequences = seq_cache[cache_key]
+                    else:
+                        chain_sequences = get_structure_from_file(rec_path)
+                        seq_cache[cache_key] = chain_sequences
+                except Exception as e:
                     bad_ids.append(name)
                     continue
 
                 for i, seq in enumerate(chain_sequences):
-                    id2seq[f'{name}_chain_{i}'] = seq
+                    id2seq[f'{real_name}_chain_{i}'] = seq
 
             logger.info(f'{split}, {dataset_name} has {len(bad_ids)} bad IDs')
             logger.info(f'total chains: {len(id2seq)}')
@@ -74,14 +83,17 @@ def compute_sequences(conf):
 
 
 def get_tokens(seqs, tokenizer):
-    return tokenizer(seqs, padding=False, truncation=True)['input_ids']
+    # batch_encode_plus was deprecated in transformers; use __call__ instead
+    encoded = tokenizer(seqs, padding=False, truncation=True)
+    tokens = encoded['input_ids']
+    return tokens
 
 
 def get_embeddings_residue(tokens, esm_model, device):
     embeddings = []
     with torch.no_grad():
         for i, batch in enumerate(tqdm(tokens, desc='Computing ESM embeddings')):
-            if i > 0 and i % 1000 == 0:
+            if i % 1000 == 0 and i != 0:
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 gc.collect()
@@ -99,43 +111,51 @@ def save_dataset_embeddings(dataset_sequence_path, save_emb_path, model, tokeniz
     all_data = load(dataset_sequence_path)
     logger.info('Sequences loaded')
 
+    def _normalize_seq(val):
+        return val if isinstance(val, str) else ''.join(val)
+
+    id_to_seq = {k: _normalize_seq(v) for k, v in all_data.items()}
+
     if reduce_to_unique_sequences:
         logger.info('Reducing to unique sequences')
-        logger.info(f'Number of sequences: {len(all_data)}')
-        prepared_sequences = list(
-            set([''.join(seq) for seq in all_data.values()]))
-        logger.info(f'Number of unique sequences: {len(prepared_sequences)}')
-    else:
-        prepared_sequences = [''.join(seq) for seq in all_data.values()]
+        logger.info(f'Number of sequences: {len(id_to_seq)}')
+        unique_sequences = sorted(set(id_to_seq.values()))
+        logger.info(f'Number of unique sequences: {len(unique_sequences)}')
 
+        tokens = get_tokens(unique_sequences, tokenizer)
+        embeddings = get_embeddings_residue(tokens=tokens, esm_model=model, device=device)
+        seq_to_emb = {seq: emb for seq, emb in zip(unique_sequences, embeddings)}
+        save_data = {k: seq_to_emb[seq] for k, seq in id_to_seq.items()}
+        logger.info(f'Number of protein chains: {len(save_data)}')
+        torch.save(save_data, save_emb_path)
+        return
+
+    prepared_sequences = list(id_to_seq.values())
     tokens = get_tokens(prepared_sequences, tokenizer)
-    embeddings = get_embeddings_residue(
-        tokens=tokens, esm_model=model, device=device)
+    embeddings = get_embeddings_residue(tokens=tokens, esm_model=model, device=device)
 
-    if reduce_to_unique_sequences:
-        names = prepared_sequences
-    else:
-        names = all_data.keys()
-
+    names = list(id_to_seq.keys())
     logger.info(f'Number of protein chains: {len(names)}')
     save_data = {name: emb for name, emb in zip(names, embeddings)}
     torch.save(save_data, save_emb_path)
 
 
 def compute_esm_embeddings(conf, model_type='hf_esm_12'):
-    reduce_to_unique_sequences = False
+    reduce_to_unique_sequences = True
 
     from matcha.utils.device import resolve_device
-    device = torch.device(resolve_device())
+    requested_device = conf.get("device", None) if hasattr(conf, "get") else getattr(conf, "device", None)
+    device = torch.device(resolve_device(requested_device))
     logger.info(f'Available device: {device}')
 
-    model_checkpoints = {
-        'hf_esm_6': 'facebook/esm2_t6_8M_UR50D',
-        'hf_esm_12': 'facebook/esm2_t12_35M_UR50D',
-        'hf_esm_33': 'facebook/esm2_t33_650M_UR50D',
-    }
-    model_checkpoint = model_checkpoints.get(model_type)
-    if model_checkpoint is None:
+    if model_type == 'hf_esm_6':
+        model_checkpoint = 'facebook/esm2_t6_8M_UR50D'
+    elif model_type == 'hf_esm_12':
+        model_checkpoint = 'facebook/esm2_t12_35M_UR50D'
+    elif model_type == 'hf_esm_33':
+        model_checkpoint = 'facebook/esm2_t33_650M_UR50D'
+    else:
+        logger.error(f'Model {model_type} not found')
         raise ValueError(f'Model {model_type} not found')
 
     model = AutoModelForMaskedLM.from_pretrained(model_checkpoint)
@@ -144,8 +164,12 @@ def compute_esm_embeddings(conf, model_type='hf_esm_12'):
     model.to(device=device)
     logger.info('ESM model loaded')
 
-    num_params_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    num_params_all = sum(p.numel() for p in model.parameters())
+    num_params_trainable = 0
+    num_params_all = 0
+    for _, param in model.named_parameters():
+        num_params_all += param.numel()
+        if param.requires_grad:
+            num_params_trainable += param.numel()
     logger.info(f'Trainable parameters: {num_params_trainable}')
     logger.info(f'All parameters: {num_params_all}')
 
