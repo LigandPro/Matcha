@@ -1,13 +1,16 @@
-import os
-import numpy as np
 import copy
+import inspect
+import os
+
+import numpy as np
 import safetensors
-from tqdm import tqdm
 import torch
+from tqdm import tqdm
+
+from matcha.utils.log import get_logger
 from matcha.utils.rotation import expm_SO3
 from matcha.utils.transforms import (apply_tr_rot_changes_to_batch_inplace, apply_tor_changes_to_batch_inplace,
                                        get_torsion_angles, find_rigid_alignment)
-from matcha.utils.log import get_logger
 
 logger = get_logger(__name__)
 
@@ -91,7 +94,6 @@ def run_evaluation(
         device = resolve_device()
     metrics_dict = {}
     total_batches = len(dataloader)
-    import inspect
     solver_signature = inspect.signature(solver)
     solver_supports_copy_batch = "copy_batch" in solver_signature.parameters
     use_non_blocking = torch.cuda.is_available() and str(device).startswith("cuda")
@@ -170,16 +172,8 @@ def run_evaluation(
             complex_metrics['orig_pos_before_augm'] = optimized.ligand.orig_pos_before_augm[sample_idx, :optimized.ligand.num_atoms[sample_idx]].cpu().numpy()
             complex_metrics['transformed_orig'] = transformed_orig[full_idx, :optimized.ligand.num_atoms[sample_idx]].cpu().numpy()
 
-            # Handle cases where aggregated values might be None
-            if tr_agg is not None:
-                complex_metrics['tr_pred_init'] = tr_agg_init_coord[full_idx].cpu().numpy()
-            else:
-                complex_metrics['tr_pred_init'] = np.zeros(3)
-
-            if R_agg is not None:
-                complex_metrics['rot_pred'] = R_agg[full_idx].cpu().numpy()
-            else:
-                complex_metrics['rot_pred'] = np.eye(3)
+            complex_metrics['tr_pred_init'] = tr_agg_init_coord[full_idx].cpu().numpy()
+            complex_metrics['rot_pred'] = R_agg[full_idx].cpu().numpy()
             complex_metrics['rot_augm'] = optimized.original_augm_rot[sample_idx].cpu().numpy()
             complex_metrics['full_protein_center'] = optimized.protein.full_protein_center[sample_idx].cpu().numpy()
 
