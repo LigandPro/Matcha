@@ -26,7 +26,7 @@ def get_structure_from_file(file_path):
     res_chain_ids = np.asarray(
         [s + c for s, c in zip(res_seg_ids, res_chain_ids)])
     chain_ids = np.unique(res_chain_ids)
-    seq = np.array([s for s in seq])
+    seq = np.array(list(seq))
 
     chain_sequences = []
     for i, id in enumerate(chain_ids):
@@ -55,18 +55,16 @@ def compute_sequences(conf):
             id2seq = {}
             bad_ids = []
             for name in tqdm(names, desc=f'Preparing {dataset_name} sequences'):
-                dataset_name_real = dataset_name
-                real_name = name
-                rec_path = get_protein_path(name, dataset_name_real, dataset_data_dir, 
+                rec_path = get_protein_path(name, dataset_name, dataset_data_dir,
                                             crop_mol=False)
                 try:
-                    l = get_structure_from_file(rec_path)
-                except Exception as e:
+                    chain_sequences = get_structure_from_file(rec_path)
+                except Exception:
                     bad_ids.append(name)
                     continue
 
-                for i, seq in enumerate(l):
-                    id2seq[f'{real_name}_chain_{i}'] = seq
+                for i, seq in enumerate(chain_sequences):
+                    id2seq[f'{name}_chain_{i}'] = seq
 
             logger.info(f'{split}, {dataset_name} has {len(bad_ids)} bad IDs')
             logger.info(f'total chains: {len(id2seq)}')
@@ -76,17 +74,14 @@ def compute_sequences(conf):
 
 
 def get_tokens(seqs, tokenizer):
-    # batch_encode_plus was deprecated in transformers; use __call__ instead
-    encoded = tokenizer(seqs, padding=False, truncation=True)
-    tokens = encoded['input_ids']
-    return tokens
+    return tokenizer(seqs, padding=False, truncation=True)['input_ids']
 
 
 def get_embeddings_residue(tokens, esm_model, device):
     embeddings = []
     with torch.no_grad():
         for i, batch in enumerate(tqdm(tokens, desc='Computing ESM embeddings')):
-            if not i % 1000 and i != 0:
+            if i > 0 and i % 1000 == 0:
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 gc.collect()
@@ -134,14 +129,13 @@ def compute_esm_embeddings(conf, model_type='hf_esm_12'):
     device = torch.device(resolve_device())
     logger.info(f'Available device: {device}')
 
-    if model_type == 'hf_esm_6':
-        model_checkpoint = 'facebook/esm2_t6_8M_UR50D'
-    elif model_type == 'hf_esm_12':
-        model_checkpoint = 'facebook/esm2_t12_35M_UR50D'
-    elif model_type == 'hf_esm_33':
-        model_checkpoint = 'facebook/esm2_t33_650M_UR50D'
-    else:
-        logger.error(f'Model {model_type} not found')
+    model_checkpoints = {
+        'hf_esm_6': 'facebook/esm2_t6_8M_UR50D',
+        'hf_esm_12': 'facebook/esm2_t12_35M_UR50D',
+        'hf_esm_33': 'facebook/esm2_t33_650M_UR50D',
+    }
+    model_checkpoint = model_checkpoints.get(model_type)
+    if model_checkpoint is None:
         raise ValueError(f'Model {model_type} not found')
 
     model = AutoModelForMaskedLM.from_pretrained(model_checkpoint)
@@ -150,13 +144,8 @@ def compute_esm_embeddings(conf, model_type='hf_esm_12'):
     model.to(device=device)
     logger.info('ESM model loaded')
 
-    num_params_trainable = 0
-    num_params_all = 0
-    for name, param in model.named_parameters():
-        if param.requires_grad:
-            num_params_trainable += int(
-                torch.prod(torch.tensor(param.data.shape)))
-        num_params_all += int(torch.prod(torch.tensor(param.data.shape)))
+    num_params_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    num_params_all = sum(p.numel() for p in model.parameters())
     logger.info(f'Trainable parameters: {num_params_trainable}')
     logger.info(f'All parameters: {num_params_all}')
 
