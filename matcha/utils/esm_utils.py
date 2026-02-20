@@ -164,12 +164,8 @@ def compute_esm_embeddings(conf, model_type='hf_esm_12'):
     model.to(device=device)
     logger.info('ESM model loaded')
 
-    num_params_trainable = 0
-    num_params_all = 0
-    for _, param in model.named_parameters():
-        num_params_all += param.numel()
-        if param.requires_grad:
-            num_params_trainable += param.numel()
+    num_params_all = sum(p.numel() for p in model.parameters())
+    num_params_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info(f'Trainable parameters: {num_params_trainable}')
     logger.info(f'All parameters: {num_params_all}')
 
