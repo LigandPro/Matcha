@@ -47,6 +47,54 @@ Or with pip:
 pip install -e .
 ```
 
+### Optional: isolated GPU conformer worker backend (nvMolKit)
+
+Matcha can offload conformer generation to an isolated GPU worker process based on NVIDIA nvMolKit. This keeps the main Matcha environment unchanged and avoids ABI/runtime conflicts.
+
+Runtime toggles (no CLI flags):
+- `MATCHA_CONFORMER_BACKEND=auto|rdkit|worker` (default: `auto`)
+- `MATCHA_CONFORMER_WORKER_CMD` (optional; overrides auto-discovery)
+- `MATCHA_CONFORMER_WORKER_TIMEOUT_SEC` (default: `300`)
+- `MATCHA_CONFORMER_WORKER_CHUNK_SIZE` (default: `128`)
+
+Auto-discovery:
+- If `.venv-nvmolkit-worker/bin/matcha-nvmolkit-worker` exists in the repository root, Matcha will use it automatically.
+- Legacy fallback is kept for compatibility: `.venv-nvmolkit-worker/bin/python scripts/nvmolkit_worker.py`.
+
+Auto-setup & download (recommended):
+
+```bash
+# Linux + NVIDIA GPU. Creates .venv-nvmolkit-worker/ and runs an end-to-end smoke test.
+uv run python scripts/setup_nvmolkit_worker.py
+```
+
+This script may download:
+- nvMolKit source from GitHub (`NVIDIA-Digital-Bio/nvMolKit`)
+- CUDA toolkit components from NVIDIA's CUDA repo (Ubuntu 24.04 only; user-space extract, no sudo)
+
+Verify the worker is ready:
+
+```bash
+# The setup script should end with:
+# [ok] worker smoke: ...
+# [ok] nvMolKit worker env is ready.
+
+# Optional: verify Matcha can invoke the worker (fail-fast if missing/broken)
+MATCHA_CONFORMER_BACKEND=worker uv run python - <<'PY'
+from rdkit import Chem
+from matcha.utils.preprocessing import generate_conformer_mols_batch
+
+out = generate_conformer_mols_batch([Chem.MolFromSmiles("CCO")], confs_per_mol=2)
+assert len(out) == 1 and len(out[0]) == 2
+print("ok: conformer worker")
+PY
+```
+
+Backend behavior:
+- `MATCHA_CONFORMER_BACKEND=auto`: use the worker when available; if it fails, fall back to RDKit.
+- `MATCHA_CONFORMER_BACKEND=worker`: require the worker (errors if missing or failing).
+- `MATCHA_CONFORMER_BACKEND=rdkit`: always use RDKit (no worker).
+
 ## CLI usage <a name="cli"></a>
 
 The `matcha` CLI wraps the full inference pipeline (ESM embeddings, 3-stage docking, PoseBusters filtering) with GNINA minimization and scoring into a single command.

@@ -142,6 +142,8 @@ celerybeat.pid
 .env
 .envrc
 .venv
+# Matcha: isolated nvMolKit conformer worker env
+.venv-nvmolkit-worker/
 env/
 venv/
 ENV/
