@@ -1,7 +1,7 @@
 import os
-import numpy as np
-import copy
 from copy import deepcopy
+
+import numpy as np
 import safetensors
 from tqdm import tqdm
 import torch
@@ -88,10 +88,10 @@ def run_evaluation(dataloader, num_steps, solver, model, progress_callback=None,
             tr_agg = torch.zeros(batch_size, 3, device=device)
             R_agg = torch.eye(3, device=device).repeat(batch_size, 1, 1)
             tor_agg = torch.zeros_like(batch.ligand.init_tor, device=device)
-            aligned_batch = copy.deepcopy(batch).to(device)
+            aligned_batch = deepcopy(batch).to(device)
         else:
             # Normal alignment process
-            aligned_batch = copy.deepcopy(batch).to(device)
+            aligned_batch = deepcopy(batch).to(device)
             tr_aligned = torch.zeros_like(tr_agg, device=device)
             rot_aligned = torch.eye(3, device=device).repeat(
                 tr_agg.shape[0], 1, 1)
@@ -114,7 +114,7 @@ def run_evaluation(dataloader, num_steps, solver, model, progress_callback=None,
         tr_agg_init_coord = torch.bmm(
             (tr_agg)[:, None, :], optimized.original_augm_rot)[:, 0]
 
-        init_batch = copy.deepcopy(batch).to(device)
+        init_batch = deepcopy(batch).to(device)
         init_batch.ligand.pos = optimized.ligand.pos.clone().to(device)
         transformed_orig = revert_augm(init_batch)
 
@@ -122,9 +122,11 @@ def run_evaluation(dataloader, num_steps, solver, model, progress_callback=None,
 
         for full_idx, name in enumerate(all_names):
             sample_idx = full_idx % len(batch.names)
-            complex_metrics = {}
-            complex_metrics['orig_pos_before_augm'] = optimized.ligand.orig_pos_before_augm[sample_idx, :optimized.ligand.num_atoms[sample_idx]].cpu().numpy()
-            complex_metrics['transformed_orig'] = transformed_orig[full_idx, :optimized.ligand.num_atoms[sample_idx]].cpu().numpy()
+            num_atoms = optimized.ligand.num_atoms[sample_idx]
+            complex_metrics = {
+                'orig_pos_before_augm': optimized.ligand.orig_pos_before_augm[sample_idx, :num_atoms].cpu().numpy(),
+                'transformed_orig': transformed_orig[full_idx, :num_atoms].cpu().numpy(),
+            }
 
             # Handle cases where aggregated values might be None
             if tr_agg is not None:
@@ -140,17 +142,15 @@ def run_evaluation(dataloader, num_steps, solver, model, progress_callback=None,
             complex_metrics['full_protein_center'] = optimized.protein.full_protein_center[sample_idx].cpu().numpy()
 
             # compute torsion angles
-            bond_properties_for_angles = {}
-            bond_properties_for_angles['start'] = optimized.ligand.rotatable_bonds_ext.start[sample_idx,
-                                                                                             :optimized.ligand.num_rotatable_bonds[sample_idx]]
-            bond_properties_for_angles['end'] = optimized.ligand.rotatable_bonds_ext.end[sample_idx,
-                                                                                         :optimized.ligand.num_rotatable_bonds[sample_idx]]
-            bond_properties_for_angles['neighbor_of_start'] = optimized.ligand.rotatable_bonds_ext.neighbor_of_start[sample_idx,
-                                                                                                                     :optimized.ligand.num_rotatable_bonds[sample_idx]]
-            bond_properties_for_angles['neighbor_of_end'] = optimized.ligand.rotatable_bonds_ext.neighbor_of_end[sample_idx,
-                                                                                                                 :optimized.ligand.num_rotatable_bonds[sample_idx]]
-            bond_properties_for_angles['bond_periods'] = optimized.ligand.rotatable_bonds_ext.bond_periods[sample_idx,
-                                                                                                           :optimized.ligand.num_rotatable_bonds[sample_idx]]
+            rot_bonds = optimized.ligand.rotatable_bonds_ext
+            n_rot = optimized.ligand.num_rotatable_bonds[sample_idx]
+            bond_properties_for_angles = {
+                'start': rot_bonds.start[sample_idx, :n_rot],
+                'end': rot_bonds.end[sample_idx, :n_rot],
+                'neighbor_of_start': rot_bonds.neighbor_of_start[sample_idx, :n_rot],
+                'neighbor_of_end': rot_bonds.neighbor_of_end[sample_idx, :n_rot],
+                'bond_periods': rot_bonds.bond_periods[sample_idx, :n_rot],
+            }
 
             torsion_angles_pred = get_torsion_angles(torch.from_numpy(np.copy(complex_metrics['transformed_orig'])).to(device),
                                                      bond_atoms_for_angles=bond_properties_for_angles)

@@ -99,9 +99,8 @@ def _gnina_env() -> dict:
                 break
 
     if extra_paths:
-        existing = env.get("LD_LIBRARY_PATH", "")
-        new_path = ":".join(extra_paths)
-        env["LD_LIBRARY_PATH"] = f"{new_path}:{existing}" if existing else new_path
+        parts = extra_paths + ([env["LD_LIBRARY_PATH"]] if env.get("LD_LIBRARY_PATH") else [])
+        env["LD_LIBRARY_PATH"] = ":".join(parts)
 
     return env
 
@@ -265,7 +264,7 @@ def _find_top_scored_molecule(sdf_path, score_type="CNNscore", use_minimized=Tru
             mols.append(mol)
             scores.append(score)
 
-    if len(mols) == 0:
+    if not mols:
         return None
 
     scores = np.array(scores)
@@ -311,10 +310,7 @@ class GninaScorer(PoseScorer):
 
     def __init__(self, gnina_path=None, minimize=True, score_type="Affinity",
                  cnn_scoring="none"):
-        if gnina_path is not None:
-            self._gnina_path = str(gnina_path)
-        else:
-            self._gnina_path = ensure_gnina()
+        self._gnina_path = str(gnina_path) if gnina_path is not None else ensure_gnina()
         self.minimize = minimize
         self.score_type = score_type
         self.cnn_scoring = cnn_scoring
@@ -519,9 +515,8 @@ def create_scorer(scorer_type, scorer_path=None, minimize=True):
     """
     if scorer_type == "gnina":
         return GninaScorer(gnina_path=scorer_path, minimize=minimize)
-    elif scorer_type == "custom":
+    if scorer_type == "custom":
         if scorer_path is None:
             raise ValueError("--scorer-path is required for custom scorer")
         return CustomScriptScorer(script_path=scorer_path)
-    else:
-        raise ValueError(f"Unknown scorer type: {scorer_type}")
+    raise ValueError(f"Unknown scorer type: {scorer_type}")

@@ -122,14 +122,13 @@ def _prepare_batch_dataset(protein: Path, molecules: List[Tuple[str, Any]], data
     dataset_dir.mkdir(parents=True, exist_ok=True)
     uids = []
     for name, mol in molecules:
-        uid = name
-        sample_dir = dataset_dir / uid
+        sample_dir = dataset_dir / name
         sample_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(protein, sample_dir / f"{uid}_protein.pdb")
-        writer = Chem.SDWriter(str(sample_dir / f"{uid}_ligand.sdf"))
+        shutil.copyfile(protein, sample_dir / f"{name}_protein.pdb")
+        writer = Chem.SDWriter(str(sample_dir / f"{name}_ligand.sdf"))
         writer.write(mol)
         writer.close()
-        uids.append(uid)
+        uids.append(name)
     return uids
 
 
@@ -188,12 +187,14 @@ def _ensure_checkpoints(path: Path) -> Path:
 
 
 def _autobox_from_ligand(ligand: Path) -> Tuple[float, float, float]:
-    mol = Chem.MolFromMolFile(str(ligand), removeHs=False, sanitize=False) if ligand.suffix.lower() in {".mol", ".mol2"} else None
-    if mol is None and ligand.suffix.lower() == ".pdb":
+    suffix = ligand.suffix.lower()
+    if suffix in {".mol", ".mol2"}:
+        mol = Chem.MolFromMolFile(str(ligand), removeHs=False, sanitize=False)
+    elif suffix == ".pdb":
         mol = Chem.MolFromPDBFile(str(ligand), removeHs=False, sanitize=False)
-    if mol is None:
+    else:
         suppl = Chem.SDMolSupplier(str(ligand), removeHs=False, sanitize=False)
-        mol = suppl[0] if suppl and len(suppl) > 0 else None
+        mol = suppl[0] if len(suppl) > 0 else None
     if mol is None or mol.GetNumConformers() == 0:
         raise typer.BadParameter(f"Failed to read ligand for autobox: {ligand}")
     mol = Chem.RemoveAllHs(mol, sanitize=False)
@@ -339,14 +340,14 @@ def run_matcha(
     console.print("")
 
     # Box handling
-    manual_box_specified = any([center_x, center_y, center_z])
+    manual_box_specified = any((center_x, center_y, center_z))
     autobox_specified = autobox_ligand is not None
     box_center_val: Optional[Tuple[float, float, float]] = None
 
     if manual_box_specified and autobox_specified:
         raise typer.BadParameter("Cannot use both manual box and autobox. Choose one method.")
     if manual_box_specified:
-        if not all([center_x is not None, center_y is not None, center_z is not None]):
+        if center_x is None or center_y is None or center_z is None:
             raise typer.BadParameter("Manual box requires --center-x/--center-y/--center-z")
         box_center_val = (center_x, center_y, center_z)
         console.print(f"[bold green][matcha][/bold green] manual center: {box_center_val}")
@@ -380,15 +381,13 @@ def run_matcha(
             raise typer.BadParameter(f"No molecules found in {ligand_dir}")
         console.print(f"[bold green][matcha][/bold green] Found {len(molecules)} molecules to process")
         molecule_uids = _prepare_batch_dataset(receptor, molecules, dataset_dir)
-        if box_center_val is not None:
-            pocket_centers_filename = work_dir / 'stage1_any_conf.npy'
-            _create_pocket_centers_file(box_center_val, molecule_uids, n_samples, pocket_centers_filename)
     else:
-        if box_center_val is not None:
-            pocket_centers_filename = work_dir / 'stage1_any_conf.npy'
-            _create_pocket_centers_file(box_center_val, [run_name], n_samples, pocket_centers_filename)
         _prepare_singleton_dataset(receptor_for_run, ligand, dataset_dir, run_name, original_receptor=receptor)
         molecule_uids = [run_name]
+
+    if box_center_val is not None:
+        pocket_centers_filename = work_dir / 'stage1_any_conf.npy'
+        _create_pocket_centers_file(box_center_val, molecule_uids, n_samples, pocket_centers_filename)
 
     base_conf = _load_base_conf(config)
     conf = _build_conf(base_conf, work_dir, checkpoints)
@@ -856,11 +855,11 @@ def run_matcha(
     console.print(f"  Runtime          : {_format_runtime(runtime)}")
     console.print("")
 
-    if keep_workdir:
-        console.print(f"[bold green][matcha][/bold green] keeping workdir at {work_dir}")
-    else:
+    if not keep_workdir:
         shutil.rmtree(work_dir, ignore_errors=True)
         console.print(f"[bold green][matcha][/bold green] cleaned workdir {work_dir}")
+    else:
+        console.print(f"[bold green][matcha][/bold green] keeping workdir at {work_dir}")
 
 
 def main() -> None:

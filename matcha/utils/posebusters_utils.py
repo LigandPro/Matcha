@@ -219,27 +219,20 @@ def check_intermolecular_distance(  # noqa: PLR0913
     radius_protein_all = vdw_radius.to(
         device)[atoms_protein_all]  # [n_protein_atoms]
 
-    # select atoms that are close to ligand to check for clash
     # [n_preds, n_lig_atoms, n_protein_atoms]
-    distances_all = (coords_ligand[:, :, None] -
-                     coords_protein[None, None, :]).norm(dim=-1)
-    distances = distances_all  # [n_preds, n_lig_atoms, n_protein_atoms]
-    radius_protein = radius_protein_all  # [n_protein_atoms]
+    distances = (coords_ligand[:, :, None] -
+                 coords_protein[None, None, :]).norm(dim=-1)
 
     is_buried_fraction = (distances < 5).any(
         dim=-1).sum(dim=-1) / distances.size(1)
 
     # [1, n_lig_atoms, n_protein_atoms]
-    radius_sum = radius_ligand[None, :, None] + radius_protein[None, None, :]
-    distance = distances  # [n_preds, n_lig_atoms, n_protein_atoms]
+    radius_sum = radius_ligand[None, :, None] + radius_protein_all[None, None, :]
     sum_radii_scaled = radius_sum * radius_scale
-    # [n_preds, n_lig_atoms, n_protein_atoms]
-    relative_distance = distance / sum_radii_scaled
-    # [n_preds, n_lig_atoms, n_protein_atoms]
+    relative_distance = distances / sum_radii_scaled
     clash = relative_distance < clash_cutoff
 
-    candidates = distance < (
-        (radius_ligand[None, :, None] + radius_protein_all[None, None, :]) * vdw_scale + 2 * 3 * 0.25)
+    candidates = distances < (radius_sum * vdw_scale + 2 * 3 * 0.25)
     ids_conds = candidates.any(dim=1).cpu().numpy()
     overlap = []
     for i in range(coords_ligand.size(0)):
@@ -254,7 +247,7 @@ def check_intermolecular_distance(  # noqa: PLR0913
         ) < clash_cutoff_volume)
 
     results = {
-        "not_too_far_away": (distance.reshape(distance.size(0), -1).min(dim=-1)[0] <= max_distance).tolist(),
+        "not_too_far_away": (distances.reshape(distances.size(0), -1).min(dim=-1)[0] <= max_distance).tolist(),
         "no_clashes": torch.logical_not(clash.any(dim=(1, 2))).tolist(),
         "no_volume_clash": overlap,
         "is_buried_fraction": is_buried_fraction.tolist(),
