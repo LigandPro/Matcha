@@ -278,13 +278,13 @@ def fix_torsion_angles(angles, bond_periods):
 
 
 def get_bond_properties_for_angles(rotatable_bonds_ext):
-    bond_properties_for_angles = {}
-    bond_properties_for_angles['start'] = rotatable_bonds_ext.start
-    bond_properties_for_angles['end'] = rotatable_bonds_ext.end
-    bond_properties_for_angles['neighbor_of_start'] = rotatable_bonds_ext.neighbor_of_start
-    bond_properties_for_angles['neighbor_of_end'] = rotatable_bonds_ext.neighbor_of_end
-    bond_properties_for_angles['bond_periods'] = rotatable_bonds_ext.bond_periods
-    return bond_properties_for_angles
+    return {
+        'start': rotatable_bonds_ext.start,
+        'end': rotatable_bonds_ext.end,
+        'neighbor_of_start': rotatable_bonds_ext.neighbor_of_start,
+        'neighbor_of_end': rotatable_bonds_ext.neighbor_of_end,
+        'bond_periods': rotatable_bonds_ext.bond_periods,
+    }
 
 
 def find_rigid_alignment(pos_a, pos_b):

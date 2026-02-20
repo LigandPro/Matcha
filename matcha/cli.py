@@ -302,14 +302,13 @@ def _ensure_checkpoints(path: Path) -> Path:
 
 def _autobox_from_ligand(ligand: Path) -> Tuple[float, float, float]:
     suffix = ligand.suffix.lower()
-    mol = None
-    if suffix == ".mol2":
-        mol = Chem.MolFromMol2File(str(ligand), sanitize=False)
-    elif suffix == ".mol":
-        mol = Chem.MolFromMolFile(str(ligand), removeHs=False, sanitize=False)
-    elif suffix == ".pdb":
-        mol = Chem.MolFromPDBFile(str(ligand), removeHs=False, sanitize=False)
-    else:
+    readers = {
+        ".mol2": lambda: Chem.MolFromMol2File(str(ligand), sanitize=False),
+        ".mol": lambda: Chem.MolFromMolFile(str(ligand), removeHs=False, sanitize=False),
+        ".pdb": lambda: Chem.MolFromPDBFile(str(ligand), removeHs=False, sanitize=False),
+    }
+    mol = readers[suffix]() if suffix in readers else None
+    if mol is None:
         suppl = Chem.SDMolSupplier(str(ligand), removeHs=False, sanitize=False)
         mol = suppl[0] if len(suppl) > 0 else None
     if mol is None or mol.GetNumConformers() == 0:
@@ -515,7 +514,6 @@ def run_matcha(
             )
     run_workdir.mkdir(parents=True, exist_ok=True)
     run_timer_start = time.perf_counter()
-    prepare_input_start = run_timer_start
     prepare_input_sec = 0.0
     esm_sec = 0.0
     inference_sec = 0.0
@@ -547,10 +545,9 @@ def run_matcha(
     # Box handling
     manual_box_specified = center_x is not None or center_y is not None or center_z is not None
     autobox_specified = autobox_ligand is not None
-    box_json_specified = box_json is not None
     box_center_val: Optional[Tuple[float, float, float]] = None
 
-    if sum((manual_box_specified, autobox_specified, box_json_specified)) > 1:
+    if sum((manual_box_specified, autobox_specified, box_json is not None)) > 1:
         raise typer.BadParameter("Cannot combine --box-json with manual box or --autobox-ligand.")
     if manual_box_specified:
         if center_x is None or center_y is None or center_z is None:
@@ -563,7 +560,7 @@ def run_matcha(
         box_center_val = _autobox_from_ligand(autobox_ligand)
         console.print(f"[bold green][matcha][/bold green] autobox from reference ligand {autobox_ligand.name}")
         console.print(f"[bold green][matcha][/bold green] center: {box_center_val}")
-    elif box_json_specified:
+    elif box_json is not None:
         if not box_json.exists():
             raise typer.BadParameter(f"Box JSON not found: {box_json}")
         box_center_val = _center_from_box_json(box_json)
@@ -705,7 +702,7 @@ def run_matcha(
     if persistent_workers is None:
         persistent_workers = num_workers > 0
 
-    prepare_input_sec = time.perf_counter() - prepare_input_start
+    prepare_input_sec = time.perf_counter() - run_timer_start
     esm_start = time.perf_counter()
     compute_sequences(conf)
     compute_esm_embeddings(conf)

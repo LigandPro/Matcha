@@ -72,6 +72,16 @@ def shard_ligand_files(files: list[Path], n_shards: int) -> list[list[Path]]:
     return shards
 
 
+def _link_or_copy_overwrite(src: Path, dst: Path) -> None:
+    """Symlink src to dst, overwriting if dst already exists. Falls back to copy."""
+    if dst.exists() or dst.is_symlink():
+        dst.unlink()
+    try:
+        os.symlink(str(src.resolve()), str(dst))
+    except OSError:
+        shutil.copy2(src, dst)
+
+
 def materialize_shards(sharded_files: list[list[Path]], target_dir: Path) -> list[Path]:
     target_dir.mkdir(parents=True, exist_ok=True)
     shard_dirs: list[Path] = []
@@ -79,14 +89,8 @@ def materialize_shards(sharded_files: list[list[Path]], target_dir: Path) -> lis
         shard_dir = target_dir / f"shard_{shard_idx:02d}"
         shard_dir.mkdir(parents=True, exist_ok=True)
         for file_idx, src in enumerate(shard_files):
-            dst_name = f"{file_idx:05d}__{src.name}"
-            dst = shard_dir / dst_name
-            if dst.exists() or dst.is_symlink():
-                dst.unlink()
-            try:
-                os.symlink(str(src.resolve()), str(dst))
-            except OSError:
-                shutil.copy2(src, dst)
+            dst = shard_dir / f"{file_idx:05d}__{src.name}"
+            _link_or_copy_overwrite(src, dst)
         shard_dirs.append(shard_dir)
     return shard_dirs
 
@@ -151,15 +155,9 @@ def build_shard_command(
         "--overwrite",
         "--keep-workdir",
     ]
-    if recursive:
-        cmd.append("--recursive")
-    else:
-        cmd.append("--no-recursive")
+    cmd.append("--recursive" if recursive else "--no-recursive")
 
-    if checkpoints is not None:
-        cmd.extend(["--checkpoints", str(checkpoints)])
-    if config is not None:
-        cmd.extend(["--config", str(config)])
+    # Box specification (mutually exclusive)
     if box_json is not None:
         cmd.extend(["--box-json", str(box_json)])
     elif autobox_ligand is not None:
@@ -167,14 +165,15 @@ def build_shard_command(
     elif center_x is not None and center_y is not None and center_z is not None:
         cmd.extend(["--center-x", str(center_x), "--center-y", str(center_y), "--center-z", str(center_z)])
 
-    if n_confs is not None:
-        cmd.extend(["--n-confs", str(n_confs)])
-    if num_workers is not None:
-        cmd.extend(["--num-workers", str(num_workers)])
+    # Optional path arguments
+    for flag, value in [("--checkpoints", checkpoints), ("--config", config),
+                        ("--n-confs", n_confs), ("--num-workers", num_workers),
+                        ("--scorer-path", scorer_path)]:
+        if value is not None:
+            cmd.extend([flag, str(value)])
+
     _append_optional_flag(cmd, pin_memory, "--pin-memory", "--no-pin-memory")
     _append_optional_flag(cmd, persistent_workers, "--persistent-workers", "--no-persistent-workers")
-    if scorer_path is not None:
-        cmd.extend(["--scorer-path", str(scorer_path)])
     cmd.append("--scorer-minimize" if scorer_minimize else "--no-scorer-minimize")
     cmd.append("--physical-only" if physical_only else "--keep-all-poses")
     return cmd
@@ -210,7 +209,7 @@ def _make_shard_specs(
     physical_only: bool,
 ) -> list[ShardSpec]:
     specs: list[ShardSpec] = []
-    for idx, (gpu_id, shard_dir, ligand_count) in enumerate(zip(gpu_ids, shard_dirs, shard_counts)):
+    for gpu_id, shard_dir, ligand_count in zip(gpu_ids, shard_dirs, shard_counts):
         if ligand_count <= 0:
             continue
         shard_run_name = f"{run_name}__gpu{gpu_id}"
@@ -264,11 +263,11 @@ def _make_shard_specs(
 
 
 def launch_shards(specs: list[ShardSpec], *, cwd: Path) -> list[dict]:
-    processes: dict[int, tuple[ShardSpec, subprocess.Popen, object, float]] = {}
+    processes: list[tuple[ShardSpec, subprocess.Popen, object, float]] = []
     run_records: list[dict] = []
     failure: Optional[tuple[ShardSpec, int]] = None
 
-    for idx, spec in enumerate(specs):
+    for spec in specs:
         spec.run_dir.mkdir(parents=True, exist_ok=True)
         log_handle = open(spec.launcher_log_path, "w", encoding="utf-8")
         log_handle.write(f"Command: {shlex.join(spec.command)}\n")
@@ -282,9 +281,9 @@ def launch_shards(specs: list[ShardSpec], *, cwd: Path) -> list[dict]:
             stderr=subprocess.STDOUT,
             text=True,
         )
-        processes[idx] = (spec, proc, log_handle, time.time())
+        processes.append((spec, proc, log_handle, time.time()))
 
-    running = set(processes.keys())
+    running = set(range(len(processes)))
     while running:
         for idx in list(running):
             spec, proc, log_handle, started_at = processes[idx]
@@ -305,12 +304,11 @@ def launch_shards(specs: list[ShardSpec], *, cwd: Path) -> list[dict]:
                     "launcher_log_path": str(spec.launcher_log_path),
                 }
             )
-            running.remove(idx)
+            running.discard(idx)
             if rc != 0 and failure is None:
                 failure = (spec, int(rc))
                 for other_idx in list(running):
-                    _, other_proc, _, _ = processes[other_idx]
-                    other_proc.terminate()
+                    processes[other_idx][1].terminate()
         if running:
             time.sleep(0.5)
 
@@ -333,35 +331,36 @@ def _link_or_copy(src: Path, dst: Path) -> None:
         shutil.copy2(src, dst)
 
 
-def _merge_prediction_dict_npy(paths: list[Path], output_path: Path) -> dict:
+def _load_keyed_data(path: Path) -> dict:
+    """Load a keyed dict from either .npy or .json file."""
+    if path.suffix == ".npy":
+        return np.load(path, allow_pickle=True).item()  # noqa: S301
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _save_keyed_data(data: dict, output_path: Path) -> None:
+    """Save a keyed dict to either .npy or .json based on extension."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.suffix == ".npy":
+        np.save(output_path, [data])
+    else:
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+
+
+def _merge_keyed_files(paths: list[Path], output_path: Path, label: str) -> dict:
+    """Merge multiple keyed dict files, raising on duplicate keys."""
     merged: dict = {}
     for path in paths:
         if not path.exists():
             continue
-        loaded = np.load(path, allow_pickle=True).item()
+        loaded = _load_keyed_data(path)
         for uid, value in loaded.items():
             if uid in merged:
-                raise RuntimeError(f"Duplicate uid in merged predictions: {uid}")
+                raise RuntimeError(f"Duplicate uid in merged {label}: {uid}")
             merged[uid] = value
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    np.save(output_path, [merged])
-    return merged
-
-
-def _merge_filters_json(paths: list[Path], output_path: Path) -> dict:
-    merged: dict = {}
-    for path in paths:
-        if not path.exists():
-            continue
-        with open(path, "r", encoding="utf-8") as f:
-            loaded = json.load(f)
-        for uid, value in loaded.items():
-            if uid in merged:
-                raise RuntimeError(f"Duplicate uid in merged filters: {uid}")
-            merged[uid] = value
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(merged, f, indent=2)
+    _save_keyed_data(merged, output_path)
     return merged
 
 
@@ -383,39 +382,33 @@ def merge_shard_outputs(
         run_dir = Path(record["run_dir"])
         run_name = str(record["run_name"])
 
-        for src_name, dst_name in (
-            ("best_poses", "best_poses"),
-            ("all_poses", "all_poses"),
-        ):
-            src_dir = run_dir / src_name
+        for folder in ("best_poses", "all_poses"):
+            src_dir = run_dir / folder
             if not src_dir.exists():
                 continue
             for src_file in sorted(src_dir.glob("*.sdf")):
                 uid = src_file.stem
-                if src_name == "all_poses" and uid.endswith("_poses"):
+                if folder == "all_poses" and uid.endswith("_poses"):
                     uid = uid[:-6]
-                if src_name == "best_poses":
+                if folder == "best_poses":
                     if uid in merged_uids_from_best:
                         raise RuntimeError(f"Duplicate uid in best_poses merge: {uid}")
                     merged_uids_from_best.add(uid)
-                _link_or_copy(src_file, merged_root / dst_name / src_file.name)
+                _link_or_copy(src_file, merged_root / folder / src_file.name)
 
         shard_run_inner = run_dir / "work" / "runs" / run_name / "any_conf"
-        for src_name, dst_name in (
-            ("best_scored_predictions", "best_scored_predictions"),
-            ("scored_sdf_predictions", "scored_sdf_predictions"),
-        ):
-            src_dir = shard_run_inner / src_name
+        for folder in ("best_scored_predictions", "scored_sdf_predictions"):
+            src_dir = shard_run_inner / folder
             if not src_dir.exists():
                 continue
             for src_file in sorted(src_dir.glob("*.sdf")):
-                _link_or_copy(src_file, merged_root / dst_name / src_file.name)
+                _link_or_copy(src_file, merged_root / folder / src_file.name)
 
         pred_paths.append(run_dir / "work" / "runs" / run_name / "any_conf_final_preds.npy")
         filter_paths.append(run_dir / "work" / "runs" / run_name / "any_conf" / "filters_results.json")
 
-    merged_preds = _merge_prediction_dict_npy(pred_paths, merged_root / "any_conf_final_preds.npy")
-    merged_filters = _merge_filters_json(filter_paths, merged_root / "filters_results.json")
+    merged_preds = _merge_keyed_files(pred_paths, merged_root / "any_conf_final_preds.npy", "predictions")
+    merged_filters = _merge_keyed_files(filter_paths, merged_root / "filters_results.json", "filters")
 
     if expected_ligands > 0 and len(merged_preds) != expected_ligands:
         raise RuntimeError(
@@ -444,15 +437,10 @@ def write_benchmark_report(
     total_ligands: int,
     shard_records: list[dict],
 ) -> dict:
+    stage_keys = ("stage1_sec", "stage2_sec", "stage3_sec", "sdf_save_sec", "posebusters_sec")
+    pipeline_stage_sums = dict.fromkeys(stage_keys, 0.0)
     shard_reports = []
     total_sec_values = []
-    pipeline_stage_sums = {
-        "stage1_sec": 0.0,
-        "stage2_sec": 0.0,
-        "stage3_sec": 0.0,
-        "sdf_save_sec": 0.0,
-        "posebusters_sec": 0.0,
-    }
 
     for record in shard_records:
         run_dir = Path(record["run_dir"])
@@ -462,7 +450,7 @@ def write_benchmark_report(
         total_sec = float(timing.get("total_sec", record.get("elapsed_sec", 0.0)))
         total_sec_values.append(total_sec)
 
-        for key in pipeline_stage_sums:
+        for key in stage_keys:
             pipeline_stage_sums[key] += float(pipeline_timing.get(key, 0.0))
 
         shard_reports.append(
