@@ -383,11 +383,10 @@ def generate_multiple_conformers(orig_mol, num_conformers):
     mol = copy.deepcopy(orig_mol)
     ps = AllChem.ETKDGv3()
     failures, ids = 0, []
-    max_failures = 3
-    max_iterations = max_failures  # Prevent infinite loops
+    max_attempts = 3
 
     iteration = 0
-    while mol.GetNumConformers() < num_conformers and iteration < max_iterations:
+    while mol.GetNumConformers() < num_conformers and iteration < max_attempts:
         current_count = mol.GetNumConformers()
         needed = num_conformers - current_count
 
@@ -405,20 +404,18 @@ def generate_multiple_conformers(orig_mol, num_conformers):
 
         ids = [id for id in ids if id != -1]
 
-        # Manually add each new conformer to the main molecule
         added_count = 0
         for conf_id in ids:
-                conf = temp_mol.GetConformer(conf_id)
-                mol.AddConformer(conf, assignId=True)
-                added_count += 1
-        
+            conf = temp_mol.GetConformer(conf_id)
+            mol.AddConformer(conf, assignId=True)
+            added_count += 1
+
         new_count = mol.GetNumConformers()
 
         if added_count == 0:
-            # No new conformers were added
-            logger.debug(f"No new conformers added. Retrying {iteration + 1}/{max_iterations}")
+            logger.debug(f"No new conformers added. Retrying {iteration + 1}/{max_attempts}")
             failures += 1
-            if failures >= max_failures:
+            if failures >= max_attempts:
                 break
         else:
             # Successfully added some conformers, reset failure counter
@@ -452,9 +449,9 @@ def generate_multiple_conformers(orig_mol, num_conformers):
     if mol.GetNumConformers() == 0:
         logger.warning("No conformers generated, using original molecule")
         return orig_mol
-    else:
-        logger.debug(f"Generated {mol.GetNumConformers()} conformers")
-        return mol
+
+    logger.debug(f"Generated {mol.GetNumConformers()} conformers")
+    return mol
 
 
 def generate_conformer_mols(orig_mol, num_conformers, backend: str | None = None):
@@ -501,7 +498,6 @@ def generate_conformer_mols_batch(
 
     results = [None] * len(mols)
 
-    # Prepare molecules: keep originals intact for safety.
     prepared = []
     for mol in mols:
         init = copy.deepcopy(mol)
@@ -519,6 +515,17 @@ def generate_conformer_mols_batch(
 
     use_worker = backend == "worker" or (backend == "auto" and worker_cmd_configured)
     worker_disabled = False
+
+    def _rdkit_generate_chunk(chunk_mols):
+        result = []
+        for m in chunk_mols:
+            m_with_confs = generate_multiple_conformers(m, int(confs_per_mol))
+            m_with_confs = _remove_hs_safe(m_with_confs)
+            result.append(_split_single_conformer_mols(m_with_confs, int(confs_per_mol)))
+        if "rdkit" not in _CONFORMER_BACKEND_LOGGED:
+            logger.info("Conformer backend: RDKit")
+            _CONFORMER_BACKEND_LOGGED.add("rdkit")
+        return result
 
     for start in range(0, len(prepared), chunk_size):
         end = min(len(prepared), start + chunk_size)
@@ -538,29 +545,13 @@ def generate_conformer_mols_batch(
                     logger.info("Conformer backend: worker")
                     _CONFORMER_BACKEND_LOGGED.add("worker")
             else:
-                chunk_results = []
-                for mol in chunk:
-                    mol_with_confs = generate_multiple_conformers(mol, int(confs_per_mol))
-                    mol_with_confs = _remove_hs_safe(mol_with_confs)
-                    chunk_results.append(
-                        _split_single_conformer_mols(mol_with_confs, int(confs_per_mol))
-                    )
-                if "rdkit" not in _CONFORMER_BACKEND_LOGGED:
-                    logger.info("Conformer backend: RDKit")
-                    _CONFORMER_BACKEND_LOGGED.add("rdkit")
+                chunk_results = _rdkit_generate_chunk(chunk)
         except Exception as exc:
             if backend == "worker":
                 raise RuntimeError(f"Worker conformer generation failed: {exc}") from exc
             worker_disabled = True
             logger.warning(f"Worker conformer backend failed, falling back to RDKit: {exc}")
-            chunk_results = []
-            for mol in chunk:
-                mol_with_confs = generate_multiple_conformers(mol, int(confs_per_mol))
-                mol_with_confs = _remove_hs_safe(mol_with_confs)
-                chunk_results.append(_split_single_conformer_mols(mol_with_confs, int(confs_per_mol)))
-            if "rdkit" not in _CONFORMER_BACKEND_LOGGED:
-                logger.info("Conformer backend: RDKit")
-                _CONFORMER_BACKEND_LOGGED.add("rdkit")
+            chunk_results = _rdkit_generate_chunk(chunk)
 
         for local_idx, conformer_mols in enumerate(chunk_results):
             processed = []
@@ -582,7 +573,6 @@ def generate_conformer_mols_batch(
                 processed = _split_single_conformer_mols(fallback, 1)
             results[start + local_idx] = processed
 
-    # Satisfy type checker: results is fully populated.
     return [r if r is not None else [copy.deepcopy(mols[i])] for i, r in enumerate(results)]
 
 
@@ -615,8 +605,7 @@ def safe_index(items, element):
 
 
 def parse_receptor(pdbid, pdbbind_dir, dataset_type):
-    rec = parsePDB(pdbid, pdbbind_dir, dataset_type)
-    return rec
+    return parsePDB(pdbid, pdbbind_dir, dataset_type)
 
 
 def parsePDB(pdbid, pdbbind_dir, dataset_type):
