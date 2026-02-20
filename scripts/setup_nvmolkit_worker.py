@@ -58,22 +58,16 @@ def _site_packages(python: Path, repo_root: Path) -> Path:
 
 def _cmake_bin_dir(python: Path, repo_root: Path) -> Path | None:
     """Return directory that contains the real `cmake` binary from the pip package."""
-    code = r"""
-from pathlib import Path
-import cmake
-
-root = Path(cmake.__file__).resolve().parent
-bin_dir = root / "data" / "bin"
-print(str(bin_dir))
-"""
+    code = (
+        "from pathlib import Path; import cmake; "
+        "print(Path(cmake.__file__).resolve().parent / 'data' / 'bin')"
+    )
     try:
         out = subprocess.check_output([str(python), "-c", code], cwd=str(repo_root), text=True).strip()
     except Exception:
         return None
     p = Path(out)
-    if (p / "cmake").exists():
-        return p
-    return None
+    return p if (p / "cmake").exists() else None
 
 
 def _make_rdkit_lib_symlink_farm(python: Path, repo_root: Path, out_dir: Path) -> Path:
@@ -98,7 +92,6 @@ print("\n".join(str(p) for p in so_files))
             continue
         dst.symlink_to(src)
 
-    # Validate: nvMolKit build expects only files in this directory.
     non_files = [p for p in out_dir.iterdir() if not p.is_file()]
     if non_files:
         raise RuntimeError(f"Unexpected non-files in RDKit lib dir: {non_files[:3]}")
@@ -109,15 +102,13 @@ def _find_include_dir(python: Path, repo_root: Path, module_name: str) -> Path:
     code = (
         "import importlib, pathlib; "
         f"m=importlib.import_module({module_name!r}); "
-        "p=pathlib.Path(m.__file__).resolve().parent/'include'; "
-        "print(str(p))"
+        "print(pathlib.Path(m.__file__).resolve().parent / 'include')"
     )
     out = subprocess.check_output([str(python), "-c", code], cwd=str(repo_root), text=True).strip()
     inc = Path(out)
     if not inc.exists():
         raise RuntimeError(f"Include dir not found for {module_name}: {inc}")
-    # `rdkit-headers` wheels vendor headers under `include/rdkit/...`, while many
-    # CMake projects expect `GraphMol/...` directly in the include path.
+    # rdkit-headers wheels vendor headers under include/rdkit/; CMake expects GraphMol/ directly.
     if (inc / "rdkit" / "GraphMol").exists() and not (inc / "GraphMol").exists():
         return inc / "rdkit"
     return inc
@@ -155,13 +146,12 @@ print(str(module_dir))
     return root
 
 
-def _os_release_id(repo_root: Path) -> tuple[str, str]:
+def _os_release_id() -> tuple[str, str]:
     path = Path("/etc/os-release")
     if not path.exists():
         return ("", "")
-    data = path.read_text(encoding="utf-8", errors="ignore").splitlines()
     kv = {}
-    for line in data:
+    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
         if "=" not in line:
             continue
         k, v = line.split("=", 1)
@@ -176,20 +166,15 @@ def _parse_cuda_repo_packages(repo_url: str) -> dict[str, str]:
         raw = r.read()
     text = gzip.decompress(raw).decode("utf-8", errors="replace")
     package = None
-    filename = None
     mapping: dict[str, str] = {}
     for line in text.splitlines():
         if line.startswith("Package: "):
             package = line.split(":", 1)[1].strip()
-            filename = None
         elif line.startswith("Filename: ") and package is not None:
-            filename = line.split(":", 1)[1].strip()
-            if filename.startswith("./"):
-                filename = filename[2:]
+            filename = line.split(":", 1)[1].strip().removeprefix("./")
             mapping[package] = filename
         elif not line.strip():
             package = None
-            filename = None
     return mapping
 
 
@@ -279,12 +264,9 @@ def _rdkit_version_tuple(python: Path, repo_root: Path) -> tuple[int, int, int]:
     if len(parts) < 3:
         raise RuntimeError(f"Unexpected RDKit version string: {out!r}")
     try:
-        year = int(parts[0])
-        month = int(parts[1])
-        rev = int(parts[2])
+        return (int(parts[0]), int(parts[1]), int(parts[2]))
     except ValueError as e:
         raise RuntimeError(f"Unexpected RDKit version string: {out!r}") from e
-    return (year, month, rev)
 
 
 def _patch_rdkit_versions_header(*, rdkit_incdir: Path, python: Path, repo_root: Path) -> None:
@@ -331,17 +313,12 @@ RDKIT_RDGENERAL_EXPORT extern const char* rdkitBuild;
 
 
 def _prepare_nvmolkit_source(*, venv_dir: Path, repo_root: Path, ref: str) -> Path:
-    """Clone nvMolKit source (not vendored) and apply minimal build patches.
-
-    We patch nvMolKit's pip-RDKit build to use the C++11 ABI, matching pip RDKit
-    wheels on modern Linux distros.
-    """
+    """Clone nvMolKit source and patch the build to use the C++11 ABI."""
     src_root = venv_dir / ".cache" / "matcha" / "nvmolkit_src"
     if src_root.exists():
         shutil.rmtree(src_root)
     src_root.parent.mkdir(parents=True, exist_ok=True)
 
-    # Tags like `v0.4.0` are supported by `--branch`.
     _run(
         [
             "git",
@@ -372,19 +349,16 @@ def _prepare_nvmolkit_source(*, venv_dir: Path, repo_root: Path, ref: str) -> Pa
 
 def _ensure_nvcc_from_nvidia_debs(*, venv_dir: Path, repo_root: Path, cuda_ver: str = "12.8") -> Path:
     """Install a user-space CUDA toolkit by downloading NVIDIA .deb packages."""
-    os_id, os_ver = _os_release_id(repo_root)
+    os_id, os_ver = _os_release_id()
     if os_id != "ubuntu":
         raise RuntimeError(f"Unsupported OS for auto nvcc download: {os_id} {os_ver}")
 
-    # Only implement the known-good path for Ubuntu 24.04 (noble) used on Kolmogorov.
     if not os_ver.startswith("24.04"):
         raise RuntimeError(f"Unsupported Ubuntu version for auto nvcc download: {os_ver}")
 
     repo_url = "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64"
     pkg_to_file = _parse_cuda_repo_packages(repo_url)
 
-    # Pick a stable set of packages that provides nvcc + the CUDA math libraries
-    # required by nvMolKit (cuSolver + deps).
     suffix = "12-8"
     required = [
         f"cuda-nvcc-{suffix}",
@@ -441,21 +415,20 @@ def _smoke_worker(python: Path, repo_root: Path) -> None:
         output_sdf = tmp_dir / "output.sdf"
         meta_json = tmp_dir / "meta.json"
 
-        # Generate input SDF in the worker env (RDKit is installed there).
-        gen = r"""
+        gen_script = f"""
 from rdkit import Chem
 from rdkit.Chem import AllChem
 
-writer = Chem.SDWriter(r""" + repr(str(input_sdf)) + r""")
+writer = Chem.SDWriter({str(input_sdf)!r})
 writer.SetKekulize(False)
 for i, smi in enumerate(["CCO", "c1ccccc1"]):
     mol = Chem.AddHs(Chem.MolFromSmiles(smi))
     AllChem.EmbedMolecule(mol, AllChem.ETKDGv3())
-    mol.SetProp("_Name", f"mol_{i}")
+    mol.SetProp("_Name", f"mol_{{i}}")
     writer.write(mol)
 writer.close()
 """
-        _run([str(python), "-c", gen], cwd=repo_root)
+        _run([str(python), "-c", gen_script], cwd=repo_root)
         params_json.write_text(
             json.dumps({"confs_per_mol": 2, "seed": 1, "optimize": True, "chunk_size": 32}, indent=2),
             encoding="utf-8",
@@ -463,17 +436,11 @@ writer.close()
 
         _run(
             [
-                str(python),
-                "-m",
-                "matcha_nvmolkit_worker.cli",
-                "--input-sdf",
-                str(input_sdf),
-                "--params-json",
-                str(params_json),
-                "--output-sdf",
-                str(output_sdf),
-                "--meta-json",
-                str(meta_json),
+                str(python), "-m", "matcha_nvmolkit_worker.cli",
+                "--input-sdf", str(input_sdf),
+                "--params-json", str(params_json),
+                "--output-sdf", str(output_sdf),
+                "--meta-json", str(meta_json),
             ],
             cwd=repo_root,
         )
@@ -522,14 +489,12 @@ def main() -> int:
     print(f"[matcha] repo_root: {repo_root}", flush=True)
     print(f"[matcha] worker_venv: {venv_dir}", flush=True)
 
-    # Create venv
     _run(["uv", "venv", "--seed", "--clear", str(venv_dir)], cwd=repo_root)
     python = _venv_python(venv_dir)
     if not python.exists():
         print(f"ERROR: venv python not found: {python}", file=sys.stderr)
         return 2
 
-    # Install build tools + runtime deps in worker venv via uv.
     _uv_pip_install(
         python,
         ["pip", "setuptools", "wheel"],
@@ -543,7 +508,6 @@ def main() -> int:
         upgrade=True,
     )
 
-    # Worker env is isolated, so we can pin versions without affecting Matcha.
     _uv_pip_install(
         python,
         [
@@ -577,8 +541,8 @@ def main() -> int:
     env["CUDA_HOME"] = str(cuda_root)
     env["CUDAToolkit_ROOT"] = str(cuda_root)
     cmake_bin = _cmake_bin_dir(python, repo_root)
-    cmake_prefix = f"{cmake_bin}:" if cmake_bin is not None else ""
-    env["PATH"] = f"{cmake_prefix}{venv_dir / 'bin'}:{cuda_root / 'bin'}:{env.get('PATH','')}"
+    path_parts = [p for p in [cmake_bin, venv_dir / "bin", cuda_root / "bin"] if p is not None]
+    env["PATH"] = ":".join([str(p) for p in path_parts] + [env.get("PATH", "")])
     year, month, rev = _rdkit_version_tuple(python, repo_root)
     cmake_args = env.get("CMAKE_ARGS", "")
     extra = (
@@ -594,7 +558,6 @@ def main() -> int:
     nvmolkit_src = _prepare_nvmolkit_source(venv_dir=venv_dir, repo_root=repo_root, ref=args.nvMolKit_ref)
     _uv_pip_install(python, [str(nvmolkit_src)], cwd=repo_root, env=env)
 
-    # Smoke test: run the worker end-to-end.
     if not args.skip_smoke:
         _smoke_worker(python, repo_root)
 
