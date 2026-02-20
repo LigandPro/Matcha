@@ -108,7 +108,7 @@ def main():
     for dataset_name in dataset_names:
         predicted_ligand_transforms_path = None
 
-        # # Load datasets
+        # Load datasets
         conf.use_sorted_batching = True
         conf.test_dataset_types = [dataset_name]
         test_dataset_docking = get_datasets(conf, splits=['test'],
@@ -123,7 +123,6 @@ def main():
                 for ds_name, ds in test_dataset_docking.items()})
         test_dataset_docking = test_dataset_docking[dataset_name]
 
-        # for stage_idx in [0, 1, 2]:
         for stage_idx in [0, 1, 2]:
             module = pipeline['docking'][min(
                 stage_idx, len(pipeline['docking']) - 1)]
@@ -143,11 +142,6 @@ def main():
             # Dataloaders
             test_loader = get_dataloader_docking(test_dataset_docking)
 
-            # In case of using true translations
-            # if stage_idx == 0:
-            #     predicted_ligand_transforms_path = path_to_true_translations
-            #     continue
-
             metrics = run_evaluation(test_loader, num_steps=num_steps, solver=solver, model=model)
 
             # Save results
@@ -165,7 +159,6 @@ def main():
         final_metrics_path = os.path.join(
             conf.inference_results_folder, run_name, f'{dataset_name}_final_preds.npy')
         np.save(final_metrics_path, [updated_metrics])
-
 
 
 if __name__ == "__main__":
