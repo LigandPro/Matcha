@@ -537,7 +537,7 @@ def run_v2_inference_pipeline(
     CLI and TUI.
 
     Args:
-        conf: OmegaConf config (must contain v2 fields such as ``results_folder``).
+        conf: OmegaConf config (uses ``results_folder`` or ``checkpoints_folder`` for checkpoints root).
         run_name: Name of the inference run (folder under ``inference_results_folder``).
         n_preds_to_use: Number of pose samples to generate per ligand.
         pocket_centers_filename: Optional path to precomputed pocket centres (skip stage 1).
@@ -591,12 +591,26 @@ def run_v2_inference_pipeline(
     with open(os.path.join(conf.inference_results_folder, run_name, 'config.json'), 'w') as f:
         json.dump(pipeline, f)
 
+    checkpoint_root = (
+        conf.get("results_folder", None)
+        if hasattr(conf, "get")
+        else getattr(conf, "results_folder", None)
+    )
+    if checkpoint_root is None:
+        checkpoint_root = (
+            conf.get("checkpoints_folder", None)
+            if hasattr(conf, "get")
+            else getattr(conf, "checkpoints_folder", None)
+        )
+    if checkpoint_root is None:
+        raise ValueError("Missing checkpoints root in config: set `results_folder` or `checkpoints_folder`.")
+
     # Load all stage models
     docking_modules = pipeline['docking']
     for module in docking_modules:
         model = MatchaModel(**module['model_kwargs'], conf=conf)
         model = load_from_checkpoint(model, os.path.join(
-            conf.results_folder, module['model_path']))
+            checkpoint_root, module['model_path']))
         model.to(device)
         model.eval()
         module['model'] = model
