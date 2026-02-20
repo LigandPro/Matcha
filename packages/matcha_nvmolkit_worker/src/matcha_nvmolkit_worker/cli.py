@@ -119,7 +119,6 @@ def _read_input_molecules(input_sdf: Path):
     molecules = []
     names = []
     valid_mask = []
-    invalid_count = 0
     for idx, mol in enumerate(supplier):
         if mol is None:
             continue
@@ -133,41 +132,39 @@ def _read_input_molecules(input_sdf: Path):
             current.RemoveAllConformers()
             valid_mask.append(True)
         except Exception:
-            invalid_count += 1
             valid_mask.append(False)
         molecules.append(current)
         names.append(uid)
+    invalid_count = valid_mask.count(False)
     return molecules, names, valid_mask, invalid_count
 
 
 def _ensure_minimum_conformers(mol, confs_per_mol: int, seed: int | None):
-    target = max(1, int(confs_per_mol))
-    if mol.GetNumConformers() >= target:
+    if mol.GetNumConformers() >= max(1, int(confs_per_mol)):
+        return False
+    if mol.GetNumConformers() > 0:
         return False
 
-    before = mol.GetNumConformers()
+    conf = Chem.Conformer(mol.GetNumAtoms())
+    for atom_idx in range(mol.GetNumAtoms()):
+        conf.SetAtomPosition(atom_idx, Point3D(0.0, 0.0, 0.0))
+    mol.AddConformer(conf, assignId=True)
+    return True
 
-    if mol.GetNumConformers() == 0:
-        conf = Chem.Conformer(mol.GetNumAtoms())
-        for atom_idx in range(mol.GetNumAtoms()):
-            conf.SetAtomPosition(atom_idx, Point3D(0.0, 0.0, 0.0))
-        mol.AddConformer(conf, assignId=True)
 
-    return mol.GetNumConformers() != before
+def _conf_has_finite_coords(conf) -> bool:
+    for atom_idx in range(conf.GetNumAtoms()):
+        pos = conf.GetAtomPosition(atom_idx)
+        if not (math.isfinite(pos.x) and math.isfinite(pos.y) and math.isfinite(pos.z)):
+            return False
+    return True
 
 
 def _drop_non_finite_conformers(mol):
-    bad_ids = []
-    for cid in range(mol.GetNumConformers()):
-        conf = mol.GetConformer(cid)
-        ok = True
-        for atom_idx in range(conf.GetNumAtoms()):
-            pos = conf.GetAtomPosition(atom_idx)
-            if not (math.isfinite(pos.x) and math.isfinite(pos.y) and math.isfinite(pos.z)):
-                ok = False
-                break
-        if not ok:
-            bad_ids.append(cid)
+    bad_ids = [
+        cid for cid in range(mol.GetNumConformers())
+        if not _conf_has_finite_coords(mol.GetConformer(cid))
+    ]
     for cid in reversed(bad_ids):
         mol.RemoveConformer(cid)
     return len(bad_ids)
