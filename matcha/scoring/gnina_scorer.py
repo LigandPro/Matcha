@@ -652,7 +652,7 @@ class GninaScorer(PoseScorer):
             for uid, entries in uid_to_entries.items():
                 _write_uid_outputs(uid, entries)
 
-    def select_top_poses(self, sdf_dir, output_dir, filters_path=None, n_samples=40):
+    def select_top_poses(self, sdf_dir, output_dir, filters_path=None, n_samples=20):
         sdf_dir = Path(sdf_dir)
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
