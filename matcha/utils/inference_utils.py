@@ -355,7 +355,7 @@ def run_v2_inference_pipeline(
 ):
     """Run the full v2 3-stage inference pipeline.
 
-    Replaces the v1 ``run_inference_pipeline``, ``compute_fast_filters`` and
+    Replaces the v1 ``run_inference_pipeline``, and
     ``save_best_pred_to_sdf`` stubs with a single entry-point used by both
     CLI and TUI.
 
@@ -493,24 +493,12 @@ def run_v2_inference_pipeline(
                 conf.inference_results_folder, run_name, f'{dataset_name}_final_preds_{stage_idx + 1}stage.npy')
             np.save(final_metrics_path, [updated_metrics])
 
-        # Save final predictions (last stage)
-        final_preds_path = os.path.join(
-            conf.inference_results_folder, run_name, f'{dataset_name}_final_preds.npy')
-        np.save(final_preds_path, [updated_metrics])
-        logger.info(f"Saved final predictions to {final_preds_path}")
-
     # Save all predictions to SDF
     if progress_callback is not None:
         progress_callback('stage_start', 'sdf_save', 'Saving predictions to SDF', None, None)
     sdf_start = time.time()
-    save_all_to_sdf(conf, run_name, one_file=True)
+    # Merge all prediction stages and save merged predictions to SDF
+    load_and_merge_all_stages(conf, run_name)
+    save_all_to_sdf(conf, run_name, one_file=True, merge_stages=True)
     if progress_callback is not None:
         progress_callback('stage_done', 'sdf_save', None, time.time() - sdf_start, None)
-
-    # Compute PoseBusters fast filters from SDF
-    if progress_callback is not None:
-        progress_callback('stage_start', 'posebusters', 'Physical validation', None, None)
-    pb_start = time.time()
-    compute_fast_filters_from_sdf(conf, run_name, n_preds_to_use=n_preds_to_use)
-    if progress_callback is not None:
-        progress_callback('stage_done', 'posebusters', None, time.time() - pb_start, None)

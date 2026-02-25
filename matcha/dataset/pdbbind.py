@@ -369,7 +369,6 @@ class PDBBind(Dataset):
 
         self.predicted_ligand_transforms = np.load(
             predicted_ligand_transforms_path, allow_pickle=True)[0]
-        self.n_repeats = 1
         self.complexes = [
             c for c in self.complexes if c.name in self.predicted_ligand_transforms]
         if not self.complexes:
@@ -466,8 +465,6 @@ class PDBBind(Dataset):
                     [self.aa_mapping.get(aa, 0) for aa in id_to_sequence[key]])[:, None]
                 aa_sequence = np.array(list(id_to_sequence[key]))
 
-                if '_superlig' in key_name:
-                    key_name = key_name.split('_superlig')[0]
                 chain_embeddings_dictlist[key_name].append(embedding)
                 chain_sequences_dictlist[key_name].append(aa_sequence)
                 tokenized_chain_sequences_dictlist[key_name].append(

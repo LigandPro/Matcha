@@ -223,7 +223,6 @@ def process_all_predictions(preds_path, dataset_name, has_pred_proteins,
                     writer.close()
 
                     new_sample = {
-                        'error_estimate_0': 0,
                         'pred_pos': pred_pos,
                     }
                     if f'{uid}_mol0' not in predicted_positions:
