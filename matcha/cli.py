@@ -428,7 +428,7 @@ def run_matcha(
 
     # Load PB filters from JSON
     import json
-    filters_json_path = preds_root / dataset_name / "filters_results.json"
+    filters_json_path = preds_root / dataset_name / "filters_results_minimized.json"
     pb_filters = {}
     if filters_json_path.exists():
         with open(filters_json_path) as f:
