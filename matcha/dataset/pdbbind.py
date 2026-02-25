@@ -478,10 +478,7 @@ class PDBBind(Dataset):
 
                     tokenized_aa_sequence = np.array(
                         [self.aa_mapping.get(aa, 0) for aa in id_to_sequence[key]])[:, None]
-                    aa_sequence = np.array([aa for aa in id_to_sequence[key]])
-
-                    if '_superlig' in key_name:
-                        key_name = key_name.split('_superlig')[0]
+                    aa_sequence = np.array(list(id_to_sequence[key]))
                     chain_embeddings_dictlist[key_name].append(embedding)
                     chain_sequences_dictlist[key_name].append(aa_sequence)
                     tokenized_chain_sequences_dictlist[key_name].append(
