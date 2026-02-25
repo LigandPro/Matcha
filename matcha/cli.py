@@ -376,7 +376,6 @@ def _print_usage_and_exit() -> None:
 
 [bold]Options:[/bold]
   -g, --device TEXT        Device: auto, cpu, cuda, cuda:N, mps
-  --n-samples INT         Poses per ligand (default: 20)
   --gpus TEXT              Multi-GPU ids for batch mode, e.g. 2,3
   --n-samples INT          Poses per ligand (default: 20)
   --scorer TEXT            gnina / custom / none (default: gnina)
@@ -441,7 +440,7 @@ def run_matcha(
     from omegaconf import OmegaConf  # noqa: F811
     from rdkit import Chem  # noqa: F811
     from matcha.utils.esm_utils import compute_esm_embeddings, compute_sequences
-    from matcha.utils.inference_utils import run_v2_inference_pipeline
+    from matcha.utils.inference_utils import run_v2_inference_pipeline, compute_fast_filters_from_sdf
     from matcha.utils.multigpu import parse_gpus, run_multigpu_batch
     from matcha.scoring import create_scorer
     from matcha.utils.device import resolve_device
@@ -746,8 +745,8 @@ def run_matcha(
 
     # Optional GNINA scoring
     scorer_used = False
-    sdf_scored = preds_root / dataset_name / "scored_sdf_predictions"
-    best_scored_dir = preds_root / dataset_name / "best_scored_predictions"
+    sdf_scored = preds_root / dataset_name / "minimized_sdf_predictions"
+    best_scored_dir = preds_root / dataset_name / "best_minimized_predictions"
     if scorer_type != "none" and scorer_type.startswith("gnina") and not resolved_device.startswith("cuda"):
         console.print(f"[bold yellow][matcha][/bold yellow] GNINA requires CUDA; skipping scoring on {resolved_device}")
         scorer_type = "none"
@@ -757,7 +756,7 @@ def run_matcha(
             scorer = create_scorer(scorer_type, scorer_path=str(scorer_path) if scorer_path else None,
                                    minimize=scorer_minimize)
             sdf_input = preds_root / dataset_name / "sdf_predictions"
-            filters_path = preds_root / dataset_name / "filters_results.json"
+            filters_path = preds_root / dataset_name / "filters_results_minimized.json"
             if scorer_type.startswith("gnina") and batch_mode:
                 if gnina_batch_mode not in {"combined", "per-ligand"}:
                     raise typer.BadParameter("--gnina-batch-mode must be 'combined' or 'per-ligand'")
@@ -769,8 +768,14 @@ def run_matcha(
                     n_samples=n_samples,
                     device=cuda_device_idx,
                 )
+                compute_fast_filters_from_sdf(conf, run_name, sdf_type='minimized', n_preds_to_use=n_samples)
+                scorer.select_top_poses(
+                    str(sdf_scored), str(best_scored_dir),
+                    filters_path=str(filters_path), n_samples=n_samples
+                )
             else:
                 scorer.score_poses(str(receptor), str(sdf_input), str(sdf_scored), device=cuda_device_idx)
+                compute_fast_filters_from_sdf(conf, run_name, sdf_type='minimized', n_preds_to_use=n_samples)
                 scorer.select_top_poses(str(sdf_scored), str(best_scored_dir),
                                         filters_path=str(filters_path), n_samples=n_samples)
             scorer_used = True
