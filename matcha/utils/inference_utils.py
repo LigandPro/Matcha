@@ -705,6 +705,15 @@ def run_v2_inference_pipeline(
         logger.info(f"Saved final predictions to {final_preds_path}")
         final_preds_by_dataset[dataset_name] = updated_metrics
 
+    # Merge stage outputs and prefer merged metrics downstream.
+    load_and_merge_all_stages(conf, run_name)
+    for dataset_name in dataset_names:
+        merged_path = os.path.join(
+            conf.inference_results_folder, run_name, f'{dataset_name}_final_preds_merged.npy'
+        )
+        if os.path.exists(merged_path):
+            final_preds_by_dataset[dataset_name] = np.load(merged_path, allow_pickle=True).item()
+
     # Save all predictions to SDF (used by GNINA scoring and for inspection)
     if progress_callback is not None:
         progress_callback('stage_start', 'sdf_save', 'Saving predictions to SDF', None, None)
