@@ -532,7 +532,7 @@ def run_v2_inference_pipeline(
 ):
     """Run the full v2 3-stage inference pipeline.
 
-    Replaces the v1 ``run_inference_pipeline``, ``compute_fast_filters`` and
+    Replaces the v1 ``run_inference_pipeline``, and
     ``save_best_pred_to_sdf`` stubs with a single entry-point used by both
     CLI and TUI.
 
