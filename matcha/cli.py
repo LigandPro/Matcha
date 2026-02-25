@@ -30,7 +30,7 @@ DEFAULT_CONF = {
     "num_transformer_blocks": 12,
     "predict_torsion_angles": True,
     "stage_num": 1,
-    "use_all_chains": False,
+    "use_all_chains": True,
     # Inference overrides (disable noise/masking)
     "ligand_mask_ratio": 0.0,
     "protein_mask_ratio": 0.0,
@@ -80,7 +80,7 @@ def _normalize_ligand(src: Path, dest: Path) -> None:
 
 
 def _prepare_singleton_dataset(
-    receptor: Path, ligand: Path, dataset_dir: Path, uid: str, original_receptor: Optional[Path] = None
+    receptor: Path, ligand: Path, dataset_dir: Path, uid: str
 ) -> None:
     sample_dir = dataset_dir / uid
     sample_dir.mkdir(parents=True, exist_ok=True)
@@ -92,15 +92,6 @@ def _prepare_singleton_dataset(
         raise typer.BadParameter("Receptor must be a .pdb file.")
     shutil.copyfile(receptor, receptor_dest)
     _normalize_ligand(ligand, ligand_dest)
-
-    if original_receptor is not None and original_receptor != receptor:
-        receptor_orig = sample_dir / original_receptor.name
-        if receptor_orig != receptor_dest:
-            shutil.copyfile(original_receptor, receptor_orig)
-
-    ligand_orig = sample_dir / ligand.name
-    if ligand_orig != ligand_dest:
-        _normalize_ligand(ligand, ligand_orig)
 
 
 def _split_multi_sdf(sdf_path: Path) -> List[Tuple[str, Any]]:
@@ -241,7 +232,7 @@ def run_matcha(
     center_z: Optional[float] = typer.Option(None, "--center-z", "--center_z", help="Z coordinate of box center (Å)"),
     autobox_ligand: Optional[Path] = typer.Option(None, "--autobox-ligand", "--autobox_ligand", help="Reference ligand file for autobox (.sdf/.mol/.pdb)"),
     run_name: str = typer.Option("matcha_cli_run", "--run-name", help="Name for this docking run."),
-    n_samples: int = typer.Option(40, "--n-samples", help="Number of samples (poses) to generate per ligand."),
+    n_samples: int = typer.Option(20, "--n-samples", help="Number of samples (poses) to generate per ligand."),
     n_confs: Optional[int] = typer.Option(None, "--n-confs", help="Number of ligand conformers to generate with RDKit (default min(10, n-samples))."),
     device: Optional[str] = typer.Option(None, "--device", "-g", "--gpu", help="Device: auto, cpu, cuda, cuda:N, or mps."),
     overwrite: bool = typer.Option(False, "--overwrite", help="Remove existing run folder if present."),
@@ -252,6 +243,7 @@ def run_matcha(
     scorer_path: Optional[Path] = typer.Option(None, "--scorer-path", help="Path to gnina binary or custom scorer script."),
     scorer_minimize: bool = typer.Option(True, "--scorer-minimize/--no-scorer-minimize", help="Minimize poses during scoring (gnina)."),
     physical_only: bool = typer.Option(False, "--physical-only/--keep-all-poses", help="Keep only PoseBusters-passing poses in outputs (default: False)."),
+    num_dataloader_workers: int = typer.Option(32, "--num-dataloader-workers", help="Number of workers for dataloader."),
 ) -> None:
     if out is None:
         _print_usage_and_exit()
@@ -271,7 +263,7 @@ def run_matcha(
     from omegaconf import OmegaConf  # noqa: F811
     from rdkit import Chem  # noqa: F811
     from matcha.utils.esm_utils import compute_esm_embeddings, compute_sequences
-    from matcha.utils.inference_utils import run_v2_inference_pipeline
+    from matcha.utils.inference_utils import run_v2_inference_pipeline, compute_fast_filters_from_sdf
     from matcha.scoring import create_scorer
     from matcha.utils.device import resolve_device
     import torch
@@ -404,7 +396,29 @@ def run_matcha(
         copy.deepcopy(conf), run_name, n_samples,
         pocket_centers_filename=pocket_centers_filename,
         docking_batch_limit=docking_batch_limit,
+        num_workers=num_dataloader_workers,
     )
+
+    def _read_scored_sdf_affinity(sdf_path: Path) -> List[float]:
+        """Read minimizedAffinity values from a GNINA-scored SDF file (one value per pose)."""
+        if sdf_path is None or not sdf_path.exists():
+            return []
+        scores = []
+        suppl = Chem.SDMolSupplier(str(sdf_path), removeHs=False, sanitize=False)
+        for mol in suppl:
+            if mol is None:
+                scores.append(float("inf"))
+                continue
+            for prop in ("minimizedAffinity", "Affinity"):
+                if mol.HasProp(prop):
+                    try:
+                        scores.append(float(mol.GetProp(prop)))
+                        break
+                    except (ValueError, TypeError):
+                        continue
+            else:
+                scores.append(float("inf"))
+        return scores
 
     preds_root = Path(conf.inference_results_folder) / run_name
     dataset_name = 'any_conf'
@@ -431,9 +445,7 @@ def run_matcha(
         except RuntimeError as e:
             console.print(f"[bold yellow][matcha][/bold yellow] scoring skipped: {e}")
 
-    # Load final predictions for ranking/logging
-    final_preds_path = preds_root / f"{dataset_name}_final_preds.npy"
-    metrics = np.load(final_preds_path, allow_pickle=True).item()
+    metrics = np.load(preds_root / f"{dataset_name}_final_preds_merged.npy", allow_pickle=True).item()
 
     # Load PB filters from JSON
     filters_json_path = preds_root / dataset_name / "filters_results.json"

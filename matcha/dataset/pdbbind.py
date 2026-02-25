@@ -379,7 +379,6 @@ class PDBBind(Dataset):
 
         self.predicted_ligand_transforms = np.load(
             predicted_ligand_transforms_path, allow_pickle=True)[0]
-        self.n_repeats = 1
         self.complexes = [
             c for c in self.complexes if c.name in self.predicted_ligand_transforms]
         if not self.complexes:
