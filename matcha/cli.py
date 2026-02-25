@@ -208,7 +208,7 @@ def _print_usage_and_exit() -> None:
 
 [bold]Options:[/bold]
   -g, --device TEXT        Device: auto, cpu, cuda, cuda:N, mps
-  --n-samples INT         Poses per ligand (default: 40)
+  --n-samples INT         Poses per ligand (default: 20)
   --scorer TEXT            gnina / custom / none (default: gnina)
   --autobox-ligand PATH   Box center from reference ligand
   --center-x/y/z FLOAT    Manual box center (Å)
@@ -425,8 +425,8 @@ def run_matcha(
 
     # Optional GNINA scoring
     scorer_used = False
-    sdf_scored = preds_root / dataset_name / "scored_sdf_predictions"
-    best_scored_dir = preds_root / dataset_name / "best_scored_predictions"
+    sdf_scored = preds_root / dataset_name / "minimized_sdf_predictions"
+    best_scored_dir = preds_root / dataset_name / "best_minimized_predictions"
     if scorer_type != "none" and scorer_type.startswith("gnina") and resolved_device != "cuda":
         console.print(f"[bold yellow][matcha][/bold yellow] GNINA requires CUDA; skipping scoring on {resolved_device}")
         scorer_type = "none"
@@ -437,7 +437,8 @@ def run_matcha(
             sdf_input = preds_root / dataset_name / "sdf_predictions"
             scorer.score_poses(str(receptor), str(sdf_input), str(sdf_scored), device=cuda_device_idx)
 
-            filters_path = preds_root / dataset_name / "filters_results.json"
+            compute_fast_filters_from_sdf(conf, run_name, sdf_type='minimized', n_preds_to_use=n_samples)
+            filters_path = preds_root / dataset_name / "filters_results_minimized.json"
             scorer.select_top_poses(str(sdf_scored), str(best_scored_dir),
                                     filters_path=str(filters_path), n_samples=n_samples)
             scorer_used = True
@@ -448,7 +449,7 @@ def run_matcha(
     metrics = np.load(preds_root / f"{dataset_name}_final_preds_merged.npy", allow_pickle=True).item()
 
     # Load PB filters from JSON
-    filters_json_path = preds_root / dataset_name / "filters_results.json"
+    filters_json_path = preds_root / dataset_name / "filters_results_minimized.json"
     pb_filters = {}
     if filters_json_path.exists():
         with open(filters_json_path) as f:
