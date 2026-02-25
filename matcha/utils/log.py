@@ -42,7 +42,7 @@ class ColoredFormatter(logging.Formatter):
         if self.use_colors:
             # Shorten module name for readability (e.g., matcha.dataset.pdbbind -> dataset.pdbbind)
             if record.name.startswith('matcha.'):
-                record.name = record.name[9:]  # Remove 'matcha.' prefix
+                record.name = record.name[7:]  # Remove 'matcha.' prefix
             
             # Color the level name
             levelname = record.levelname
@@ -58,7 +58,7 @@ class ColoredFormatter(logging.Formatter):
         else:
             # No colors - just shorten module names
             if record.name.startswith('matcha.'):
-                record.name = record.name[9:]
+                record.name = record.name[7:]
             return super().format(record)
 
 
@@ -94,10 +94,6 @@ def setup_logging():
     logging.getLogger('transformers').setLevel(logging.WARNING)
     logging.getLogger('posebusters.posebusters').setLevel(logging.WARNING)
     
-    # Silence wandb and git (wandb auto-initializes when installed, even if not used)
-    logging.getLogger('wandb').setLevel(logging.WARNING)
-    logging.getLogger('wandb.docker').setLevel(logging.WARNING)
-    logging.getLogger('wandb.docker.auth').setLevel(logging.CRITICAL)
     logging.getLogger('git').setLevel(logging.WARNING)
     logging.getLogger('git.cmd').setLevel(logging.CRITICAL)
     

@@ -60,8 +60,7 @@ def get_ligand_without_randomization(mol_, protein_center=None, parse_rotbonds=T
     ligand = Ligand()
     ligand.pos = mol_maybe_noh.GetConformer(0).GetPositions().astype(np.float32) - protein_center
 
-    ligand.orig_mol = mol_maybe_noh  # original mol
-    # features are conformer-invariant
+    ligand.orig_mol = mol_maybe_noh
     try:
         ligand.x = lig_atom_featurizer(mol_maybe_noh)
     except Exception as e:
@@ -321,10 +320,6 @@ class PDBBind(Dataset):
                               150 and complex.ligand.pos.shape[0] > 6 and complex.protein.pos.shape[0] + complex.ligand.pos.shape[0] < 2000]
             logger.debug(f"Complexes count after filtering: {len(self.complexes)}")
 
-        # self.complexes = [compl for compl in self.complexes
-        #                   if compl.protein.pos.shape[0] + compl.ligand.pos.shape[0] > 1000 or compl.ligand.pos.shape[0] > 70]
-
-
         if self.dataset_type.endswith('_conf'):
             self._explode_ligand_conformers(n_preds_to_use)
         else:
@@ -355,18 +350,13 @@ class PDBBind(Dataset):
         name2protein = {}
         for complex in self.complexes:
             if complex.name.endswith('_conf0'):
-                # copy.deepcopy(complex.protein)
                 name2protein[complex.name.split('_conf')[0]] = complex.protein
 
         logger.debug(f"Name2protein length: {len(name2protein)}; complexes length: {len(self.complexes)}")
 
-        new_complexes = []
         for complex in self.complexes:
             if not complex.name.endswith('_conf0'):
-                # copy.deepcopy(name2protein[complex.name.split('_conf')[0]])
                 complex.protein = name2protein[complex.name.split('_conf')[0]]
-            new_complexes.append(complex)
-        self.complexes = new_complexes
 
     def reset_predicted_ligand_transforms(self, predicted_ligand_transforms_path, n_preds_to_use):
         self.use_pred_ligand_transforms = True
@@ -374,14 +364,18 @@ class PDBBind(Dataset):
             predicted_ligand_transforms_path, n_preds_to_use)
 
     def _set_predicted_ligand_transforms(self, predicted_ligand_transforms_path, n_preds_to_use):
+        if n_preds_to_use < 1:
+            raise ValueError(f"n_preds_to_use must be >= 1, got {n_preds_to_use}")
 
         self.predicted_ligand_transforms = np.load(
             predicted_ligand_transforms_path, allow_pickle=True)[0]
-        self.n_repeats = 1
+        self.complexes = [
+            c for c in self.complexes if c.name in self.predicted_ligand_transforms]
+        if not self.complexes:
+            raise ValueError(
+                f"No complexes found in predicted transforms from {predicted_ligand_transforms_path}")
         n_preds_to_use_real = min(n_preds_to_use, len(
             self.predicted_ligand_transforms[self.complexes[0].name]))
-        self.complexes = [
-            complex for complex in self.complexes if complex.name in self.predicted_ligand_transforms]
 
         # initialize extended complexes
         extended_complexes = []
@@ -411,9 +405,7 @@ class PDBBind(Dataset):
         return len(self.complexes)
 
     def __get_nonrand_item__(self, idx):
-        complex_idx = idx
-        complex = copy.deepcopy(self.complexes[complex_idx])
-        return complex
+        return copy.deepcopy(self.complexes[idx])
 
     def __getitem__(self, idx):
         complex = self.__get_nonrand_item__(idx)
@@ -461,27 +453,22 @@ class PDBBind(Dataset):
         tokenized_chain_sequences_dictlist = defaultdict(list)
 
         complex_names_set = set(complex_names)
-        for key_base, embedding in id_to_embeddings.items():
-            keys_all = [key_base]
-            for key in keys_all:
-                try:
-                    key_name = '_'.join(key.split('_')[:-2])  # cut _chain_i
-                except IndexError:
-                    raise ValueError(
-                        f"Invalid key format in embeddings: {key}")
+        for key, embedding in id_to_embeddings.items():
+            try:
+                key_name = '_'.join(key.split('_')[:-2])  # cut _chain_i
+            except IndexError:
+                raise ValueError(
+                    f"Invalid key format in embeddings: {key}")
 
-                if key_name in complex_names_set:
+            if key_name in complex_names_set:
+                tokenized_aa_sequence = np.array(
+                    [self.aa_mapping.get(aa, 0) for aa in id_to_sequence[key]])[:, None]
+                aa_sequence = np.array(list(id_to_sequence[key]))
 
-                    tokenized_aa_sequence = np.array(
-                        [self.aa_mapping.get(aa, 0) for aa in id_to_sequence[key]])[:, None]
-                    aa_sequence = np.array([aa for aa in id_to_sequence[key]])
-
-                    if '_superlig' in key_name:
-                        key_name = key_name.split('_superlig')[0]
-                    chain_embeddings_dictlist[key_name].append(embedding)
-                    chain_sequences_dictlist[key_name].append(aa_sequence)
-                    tokenized_chain_sequences_dictlist[key_name].append(
-                        tokenized_aa_sequence)
+                chain_embeddings_dictlist[key_name].append(embedding)
+                chain_sequences_dictlist[key_name].append(aa_sequence)
+                tokenized_chain_sequences_dictlist[key_name].append(
+                    tokenized_aa_sequence)
 
         lm_embeddings_chains_all = [chain_embeddings_dictlist.get(
             name, []) for name in complex_names]
@@ -528,7 +515,7 @@ class PDBBind(Dataset):
                 processed_complexes = self._process_complex(
                     [complex_name], sequences_to_embeddings)
                 if processed_complexes is not None and len(processed_complexes) > 0:
-                    if type(processed_complexes[0]) == list:
+                    if isinstance(processed_complexes[0], list):
                         processed_complexes = [
                             complex for complex_list in processed_complexes for complex in complex_list]
                     self.complexes += processed_complexes
@@ -575,8 +562,7 @@ class PDBBind(Dataset):
             elif self.dataset_type.endswith('_conf'):
                 if self.dataset_type == 'pdbbind_conf':
                     orig_ligs = read_pdbbind_mols(self.data_dir, name, remove_hs=False)
-                elif self.dataset_type == 'posebusters_conf' or self.dataset_type == 'astex_conf' or \
-                        self.dataset_type == 'any_conf':
+                elif self.dataset_type in ('posebusters_conf', 'astex_conf', 'any_conf'):
                     orig_ligs = [read_molecule(os.path.join(
                         self.data_dir, name, f'{name}_ligand.sdf'), remove_hs=False, sanitize=True)]
                 else:
@@ -595,16 +581,16 @@ class PDBBind(Dataset):
                 ligs = [read_sdf_with_multiple_confs(
                     fname_with_confs, remove_hs=False, sanitize=True)]
 
-            elif self.dataset_type == 'dockgen' or self.dataset_type == 'dockgen_full':
+            elif self.dataset_type in ('dockgen', 'dockgen_full'):
                 ligs = [read_molecule(os.path.join(
                     self.data_dir, name, f'{name}_ligand.pdb'), remove_hs=False, sanitize=True)]
-            elif self.dataset_type == 'astex' or self.dataset_type == 'posebusters' or self.dataset_type == 'any':
+            elif self.dataset_type in ('astex', 'posebusters', 'any'):
                 ligs = [read_molecule(os.path.join(
                     self.data_dir, name, f'{name}_ligand.sdf'), remove_hs=False, sanitize=True)]
             else:
                 raise ValueError(f'Unknown dataset type: {self.dataset_type}')
 
-            if len(ligs) > 0 and type(ligs[0]) == list:
+            if len(ligs) > 0 and isinstance(ligs[0], list):
                 ligs = [split_molecule(
                     lig_mol, min_lig_size=self.min_lig_size) for lig_mol in ligs[0]]
                 ligs = [
@@ -617,7 +603,7 @@ class PDBBind(Dataset):
                     lig_mol for lig_mol_list in ligs for lig_mol in lig_mol_list if lig_mol is not None]
 
             for lig_idx, lig_mol in enumerate(ligs):
-                if type(lig_mol) == list:  # multiple conformations
+                if isinstance(lig_mol, list):  # multiple conformations
                     lig_mol_list = lig_mol
                     lig_mol = lig_mol[0]
                 else:
@@ -728,10 +714,12 @@ class PDBBindWithSortedBatching(Dataset):
             if (len(cur_batch) + 1) * cur_len <= batch_limit:
                 cur_batch.append(real_ind)
             else:
-                batch_indices.append(cur_batch)
+                if cur_batch:
+                    batch_indices.append(cur_batch)
                 cur_batch = [real_ind]
 
-        batch_indices.append(cur_batch)
+        if cur_batch:
+            batch_indices.append(cur_batch)
         return batch_indices
 
     def _form_batches(self, batch_limit):
@@ -847,24 +835,6 @@ def complex_collate_fn(batch: List[Complex]) -> ComplexBatch:
     all_atom_residue_ids = [
         torch.from_numpy(complex.protein.all_atom_residue_ids).long() for complex in batch]
 
-    # max_n_residues = max(complex.protein.x.shape[0] for complex in batch)
-    # max_n_atoms_in_residue = max(max(sum(residue_ids == idx) for idx in torch.unique(residue_ids, sorted=True)) for residue_ids in all_atom_residue_ids)
-    # residue_all_atom_names = torch.zeros((len(batch), max_n_residues, max_n_atoms_in_residue), dtype=torch.long)
-    # residue_all_atom_names.fill_(protein_atom_names["padding"])
-    # residue_all_atom_pos = torch.zeros((len(batch), max_n_residues, max_n_atoms_in_residue, 3), dtype=torch.float32)
-    # # Group atoms by residue for each complex
-    # for i, (atom_names, atom_pos, residue_ids) in enumerate(zip(all_atom_names, all_atom_pos, all_atom_residue_ids)):
-    #     unique_residue_ids = torch.unique(residue_ids, sorted=True)
-    #     for j, residue_id in enumerate(unique_residue_ids):
-    #         mask = residue_ids == residue_id
-    #         residue_all_atom_names[i, j, :len(atom_names[mask])] = atom_names[mask]
-    #         residue_all_atom_pos[i, j, :len(atom_pos[mask]), :] = atom_pos[mask]
-
-    # except Exception as e:
-    #     all_atom_pos = None
-    #     all_atom_names = None
-    #     all_atom_residue_ids = None
-
     num_rotatable_bonds = torch.tensor(
         [len(complex.ligand.final_tor) for complex in batch], dtype=torch.long)
     t = torch.cat([complex.ligand.t for complex in batch])
@@ -955,11 +925,10 @@ def complex_collate_fn(batch: List[Complex]) -> ComplexBatch:
                 if value is not None:
                     # This patch looks ugly, but it is to fix the case where the number of bonds is 0, and start/end are empty
                     # Without this patch, np.pad returns float instead of int
-                    if len(value) == 0 and (key == 'start' or key == 'end' or key == 'neighbor_of_start' or
-                                            key == 'neighbor_of_end'):
+                    if len(value) == 0 and key in ('start', 'end', 'neighbor_of_start', 'neighbor_of_end'):
                         padded_value = np.zeros(max_num_bonds, dtype=np.int32)
                     else:
-                        if key == 'length' or key == 'bond_periods' or key == 'angles':
+                        if key in ('length', 'bond_periods', 'angles'):
                             value = value.astype(np.float32)
                         constant_value = 2 * np.pi if key == 'bond_periods' else 0
                         if key == 'angle_histograms':
