@@ -194,7 +194,8 @@ def check_intermolecular_distance(  # noqa: PLR0913
     Returns:
         PoseBusters results dictionary.
     """
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    from matcha.utils.device import resolve_device
+    device = resolve_device()
     # [n_preds, n_lig_atoms, 3]
     coords_ligand = torch.tensor(pos_pred, device=device).float()
     coords_protein = torch.tensor(
@@ -218,27 +219,20 @@ def check_intermolecular_distance(  # noqa: PLR0913
     radius_protein_all = vdw_radius.to(
         device)[atoms_protein_all]  # [n_protein_atoms]
 
-    # select atoms that are close to ligand to check for clash
     # [n_preds, n_lig_atoms, n_protein_atoms]
-    distances_all = (coords_ligand[:, :, None] -
-                     coords_protein[None, None, :]).norm(dim=-1)
-    distances = distances_all  # [n_preds, n_lig_atoms, n_protein_atoms]
-    radius_protein = radius_protein_all  # [n_protein_atoms]
+    distances = (coords_ligand[:, :, None] -
+                 coords_protein[None, None, :]).norm(dim=-1)
 
     is_buried_fraction = (distances < 5).any(
         dim=-1).sum(dim=-1) / distances.size(1)
 
     # [1, n_lig_atoms, n_protein_atoms]
-    radius_sum = radius_ligand[None, :, None] + radius_protein[None, None, :]
-    distance = distances  # [n_preds, n_lig_atoms, n_protein_atoms]
+    radius_sum = radius_ligand[None, :, None] + radius_protein_all[None, None, :]
     sum_radii_scaled = radius_sum * radius_scale
-    # [n_preds, n_lig_atoms, n_protein_atoms]
-    relative_distance = distance / sum_radii_scaled
-    # [n_preds, n_lig_atoms, n_protein_atoms]
+    relative_distance = distances / sum_radii_scaled
     clash = relative_distance < clash_cutoff
 
-    candidates = distance < (
-        (radius_ligand[None, :, None] + radius_protein_all[None, None, :]) * vdw_scale + 2 * 3 * 0.25)
+    candidates = distances < (radius_sum * vdw_scale + 2 * 3 * 0.25)
     ids_conds = candidates.any(dim=1).cpu().numpy()
     overlap = []
     for i in range(coords_ligand.size(0)):
@@ -253,7 +247,7 @@ def check_intermolecular_distance(  # noqa: PLR0913
         ) < clash_cutoff_volume)
 
     results = {
-        "not_too_far_away": (distance.reshape(distance.size(0), -1).min(dim=-1)[0] <= max_distance).tolist(),
+        "not_too_far_away": (distances.reshape(distances.size(0), -1).min(dim=-1)[0] <= max_distance).tolist(),
         "no_clashes": torch.logical_not(clash.any(dim=(1, 2))).tolist(),
         "no_volume_clash": overlap,
         "is_buried_fraction": is_buried_fraction.tolist(),
@@ -435,14 +429,11 @@ def check_geometry(  # noqa: PLR0913, PLR0915
 def calc_posebusters(pos_pred, pos_cond, atom_ids_pred, atom_names_cond, names, lig_mol_for_posebusters):
     atom_ids_list = allowable_features['possible_atomic_num_list']
     if 22 in atom_ids_pred:
-        with open("error.txt", "a") as f:
-            f.write(f"Error in {names}\n")
-            f.write(f"22 (misc) in atom_ids_pred\n")
+        logger.error(f"Error in {names}: 22 (misc) in atom_ids_pred")
         return None
     atom_names_pred = np.array([_periodic_table.GetElementSymbol(
         atom_ids_list[atom_id]) for atom_id in atom_ids_pred if atom_id >= 0], dtype=object)
 
-    posebusters_results = {}
     try:
         assert len(pos_pred[0]) == len(
             atom_names_pred), f"len(pos_pred[i]) = {len(pos_pred[0])} != len(atom_names_pred[i]) = {len(atom_names_pred)}"
@@ -451,9 +442,6 @@ def calc_posebusters(pos_pred, pos_cond, atom_ids_pred, atom_names_cond, names, 
     except Exception as e:
         logger.error(f"Error in {names}: {e}")
         return None
-    res1 = check_intermolecular_distance(
+    result = check_intermolecular_distance(
         lig_mol_for_posebusters, pos_pred, pos_cond, atom_names_pred, atom_names_cond)
-    res = {**res1['results']}
-    for key in res.keys():
-        posebusters_results[key] = res[key]
-    return posebusters_results
+    return result['results']

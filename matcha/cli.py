@@ -4,6 +4,7 @@ Example:
 """
 
 import copy
+import json
 import os
 import shutil
 import sys
@@ -122,7 +123,7 @@ def _prepare_batch_dataset(protein: Path, molecules: List[Tuple[str, Any]], data
     return uids
 
 
-def _create_batch_pocket_centers(pocket_center: Tuple[float, float, float], molecule_uids: List[str], n_samples: int, output_path: Path) -> None:
+def _create_pocket_centers_file(pocket_center: Tuple[float, float, float], molecule_uids: List[str], n_samples: int, output_path: Path) -> None:
     pocket_centers = {}
     ligand_center = np.array(pocket_center)
     protein_center = np.zeros(3)
@@ -183,12 +184,8 @@ def _autobox_from_ligand(ligand: Path) -> Tuple[float, float, float]:
     elif suffix == ".pdb":
         mol = Chem.MolFromPDBFile(str(ligand), removeHs=False, sanitize=False)
     else:
-        mol = None
-
-    if mol is None:
         suppl = Chem.SDMolSupplier(str(ligand), removeHs=False, sanitize=False)
-        mol = suppl[0] if suppl and len(suppl) > 0 else None
-
+        mol = suppl[0] if len(suppl) > 0 else None
     if mol is None or mol.GetNumConformers() == 0:
         raise typer.BadParameter(f"Failed to read ligand for autobox: {ligand}")
     mol = Chem.RemoveAllHs(mol, sanitize=False)
@@ -210,7 +207,7 @@ def _print_usage_and_exit() -> None:
   -o, --out PATH          Output directory
 
 [bold]Options:[/bold]
-  -g, --gpu INT           CUDA device
+  -g, --device TEXT        Device: auto, cpu, cuda, cuda:N, mps
   --n-samples INT         Poses per ligand (default: 20)
   --scorer TEXT            gnina / custom / none (default: gnina)
   --autobox-ligand PATH   Box center from reference ligand
@@ -237,7 +234,7 @@ def run_matcha(
     run_name: str = typer.Option("matcha_cli_run", "--run-name", help="Name for this docking run."),
     n_samples: int = typer.Option(20, "--n-samples", help="Number of samples (poses) to generate per ligand."),
     n_confs: Optional[int] = typer.Option(None, "--n-confs", help="Number of ligand conformers to generate with RDKit (default min(10, n-samples))."),
-    gpu: Optional[int] = typer.Option(None, "--gpu", "-g", "-gpu", help="CUDA device index."),
+    device: Optional[str] = typer.Option(None, "--device", "-g", "--gpu", help="Device: auto, cpu, cuda, cuda:N, or mps."),
     overwrite: bool = typer.Option(False, "--overwrite", help="Remove existing run folder if present."),
     keep_workdir: bool = typer.Option(False, "--keep-workdir/--no-keep-workdir", help="Keep working data (default: False)."),
     log: Optional[Path] = typer.Option(None, "--log", help="Path to log file (defaults to <out>/<run-name>.log)."),
@@ -258,9 +255,6 @@ def run_matcha(
         console.print("[bold red]Error:[/bold red] --n-samples must be >= 1")
         raise typer.Exit(code=1)
 
-    if gpu is not None:
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
-
     # Lazy imports — heavy libraries loaded only when actually running docking.
     # `global` so module-level helpers (_normalize_ligand, _autobox_from_ligand, etc.) can use them.
     global snapshot_download, np, OmegaConf, Chem
@@ -271,6 +265,35 @@ def run_matcha(
     from matcha.utils.esm_utils import compute_esm_embeddings, compute_sequences
     from matcha.utils.inference_utils import run_v2_inference_pipeline, compute_fast_filters_from_sdf
     from matcha.scoring import create_scorer
+    from matcha.utils.device import resolve_device
+    import torch
+
+    # Resolve device: auto, cpu, cuda, cuda:N, mps
+    cuda_device_idx = 0
+    if device is None or device == "auto":
+        resolved_device = resolve_device()
+    elif device.isdigit():
+        # Bare number → treat as CUDA index (backwards compat with --gpu N)
+        os.environ["CUDA_VISIBLE_DEVICES"] = device
+        resolved_device = "cuda"
+        cuda_device_idx = int(device)
+    elif device.startswith("cuda:"):
+        idx = device.split(":")[1]
+        os.environ["CUDA_VISIBLE_DEVICES"] = idx
+        resolved_device = "cuda"
+        cuda_device_idx = int(idx)
+    elif device in ("cuda", "mps", "cpu"):
+        resolved_device = device
+    else:
+        console.print(f"[bold red]Error:[/bold red] Unknown device '{device}'. Use auto, cpu, cuda, cuda:N, or mps.")
+        raise typer.Exit(code=1)
+
+    if resolved_device == "mps" and not (hasattr(torch.backends, "mps") and torch.backends.mps.is_available()):
+        console.print("[bold red]Error:[/bold red] MPS (Apple Metal) requested but not available.")
+        raise typer.Exit(code=1)
+    if resolved_device == "cuda" and not torch.cuda.is_available():
+        console.print("[bold red]Error:[/bold red] CUDA requested but not available.")
+        raise typer.Exit(code=1)
 
     checkpoints = _ensure_checkpoints(checkpoints or Path("checkpoints"))
 
@@ -309,7 +332,7 @@ def run_matcha(
     console.print("")
 
     # Box handling
-    manual_box_specified = any(v is not None for v in (center_x, center_y, center_z))
+    manual_box_specified = any((center_x, center_y, center_z))
     autobox_specified = autobox_ligand is not None
     box_center_val: Optional[Tuple[float, float, float]] = None
 
@@ -350,15 +373,13 @@ def run_matcha(
             raise typer.BadParameter(f"No molecules found in {ligand_dir}")
         console.print(f"[bold green][matcha][/bold green] Found {len(molecules)} molecules to process")
         molecule_uids = _prepare_batch_dataset(receptor, molecules, dataset_dir)
-        if box_center_val is not None:
-            pocket_centers_filename = work_dir / 'stage1_any_conf.npy'
-            _create_batch_pocket_centers(box_center_val, molecule_uids, n_samples, pocket_centers_filename)
     else:
-        if box_center_val is not None:
-            pocket_centers_filename = work_dir / 'stage1_any_conf.npy'
-            _create_batch_pocket_centers(box_center_val, [run_name], n_samples, pocket_centers_filename)
         _prepare_singleton_dataset(receptor_for_run, ligand, dataset_dir, run_name)
         molecule_uids = [run_name]
+
+    if box_center_val is not None:
+        pocket_centers_filename = work_dir / 'stage1_any_conf.npy'
+        _create_pocket_centers_file(box_center_val, molecule_uids, n_samples, pocket_centers_filename)
 
     base_conf = _load_base_conf(config)
     conf = _build_conf(base_conf, work_dir, checkpoints)
@@ -367,8 +388,7 @@ def run_matcha(
     console.print(f"[bold green][matcha][/bold green] workdir: {run_workdir}")
     console.print(f"[bold green][matcha][/bold green] checkpoints: {checkpoints}")
     console.print(f"[bold green][matcha][/bold green] samples per ligand: {n_samples}")
-    if gpu is not None:
-        console.print(f"[bold green][matcha][/bold green] using CUDA device #{gpu}")
+    console.print(f"[bold green][matcha][/bold green] device: {resolved_device}")
 
     compute_sequences(conf)
     compute_esm_embeddings(conf)
@@ -404,22 +424,21 @@ def run_matcha(
     dataset_name = 'any_conf'
 
     # Optional GNINA scoring
-    sdf_scored = None
+    scorer_used = False
+    sdf_scored = preds_root / dataset_name / "minimized_sdf_predictions"
+    best_scored_dir = preds_root / dataset_name / "best_minimized_predictions"
     if scorer_type != "none":
         try:
             scorer = create_scorer(scorer_type, scorer_path=str(scorer_path) if scorer_path else None,
                                    minimize=scorer_minimize)
             sdf_input = preds_root / dataset_name / "sdf_predictions"
-            sdf_scored = preds_root / dataset_name / "minimized_sdf_predictions"
-            scorer.score_poses(str(receptor), str(sdf_input), str(sdf_scored), device=gpu or 0)
+            scorer.score_poses(str(receptor), str(sdf_input), str(sdf_scored), device=cuda_device_idx)
 
-            # Compute PoseBusters filters from minimized (scored) poses, not raw predictions
             compute_fast_filters_from_sdf(conf, run_name, sdf_type='minimized', n_preds_to_use=n_samples)
-
             filters_path = preds_root / dataset_name / "filters_results_minimized.json"
-            best_scored_dir = preds_root / dataset_name / "best_minimized_predictions"
             scorer.select_top_poses(str(sdf_scored), str(best_scored_dir),
                                     filters_path=str(filters_path), n_samples=n_samples)
+            scorer_used = True
             console.print(f"[bold green][matcha][/bold green] scoring complete ({scorer.name})")
         except RuntimeError as e:
             console.print(f"[bold yellow][matcha][/bold yellow] scoring skipped: {e}")
@@ -427,7 +446,6 @@ def run_matcha(
     metrics = np.load(preds_root / f"{dataset_name}_final_preds_merged.npy", allow_pickle=True).item()
 
     # Load PB filters from JSON
-    import json
     filters_json_path = preds_root / dataset_name / "filters_results_minimized.json"
     pb_filters = {}
     if filters_json_path.exists():
@@ -454,139 +472,32 @@ def run_matcha(
                         _safe_get_filter(fdata, 'is_buried_fraction', i, 0.0),
                     ]
 
-    # Enrich sample_metrics with minimizedAffinity from scored SDF files
-    if sdf_scored is not None:
+    # Read GNINA scores back into metrics when available
+    if scorer_used and sdf_scored.exists():
         for uid_key, uid_data in metrics.items():
             uid_real = uid_key.split('_mol')[0] if '_mol' in uid_key else uid_key
-            scored_sdf_path = sdf_scored / f"{uid_real}.sdf"
-            affinity_scores = _read_scored_sdf_affinity(scored_sdf_path)
-            for i, sample in enumerate(uid_data.get('sample_metrics', [])):
-                if i < len(affinity_scores):
-                    sample['minimizedAffinity'] = affinity_scores[i]
-
-    def _format_pb_flags(pb_flags: list) -> Tuple[str, str, str, str, str]:
-        not_far = "\u2713" if len(pb_flags) > 0 and pb_flags[0] else "\u2717"
-        no_int_clash = "\u2713" if len(pb_flags) > 1 and pb_flags[1] else "\u2717"
-        no_clash = "\u2713" if len(pb_flags) > 2 and pb_flags[2] else "\u2717"
-        no_vol_clash = "\u2713" if len(pb_flags) > 3 and pb_flags[3] else "\u2717"
-        buried_frac = f"{pb_flags[4]:.2f}" if len(pb_flags) > 4 else "n/a"
-        return not_far, no_int_clash, no_clash, no_vol_clash, buried_frac
-
-    def _format_pose_line(rank: int, sample: dict) -> str:
-        err = float(sample.get("minimizedAffinity", float("inf")))
-        pb_count = int(sample.get("posebusters_filters_passed_count_fast", 0))
-        not_far, no_int_clash, no_clash, no_vol_clash, buried_frac = _format_pb_flags(
-            sample.get("posebusters_filters_fast", []))
-        return f"  {rank:<3}     {err:>7.3f}       {pb_count}/4      {not_far:^4}     {no_int_clash:^8}     {no_clash:^5}     {no_vol_clash:^8}      {buried_frac:>6}"
-
-    def _build_log_header(start_time, command_line, workdir_abs, runtime) -> List[str]:
-        return [
-            banner.rstrip("\n"),
-            "MATCHA DOCKING ENGINE  v2.0.0",
-            "============================================================",
-            "",
-            "",
-            "[ RUN INFO ]",
-            f"  Start time       : {start_time.isoformat()}Z",
-            f"  Command          : {command_line}",
-            f"  Workdir          : {workdir_abs}",
-            f"  Runtime          : {_format_runtime(runtime)}",
-            "",
-            "",
-        ]
-
-    def _build_box_section() -> List[str]:
-        if box_center_val is not None:
-            return [
-                "[ AUTODOCKING BOX ]",
-                f"  Mode             : {'manual center' if not autobox_specified else f'autobox from {autobox_ligand.name}'}",
-                f"  Center (\u00c5)       : ({box_center_val[0]:.3f}, {box_center_val[1]:.3f}, {box_center_val[2]:.3f})",
-                "",
-                "",
-            ]
-        return [
-            "[ DOCKING MODE ]",
-            "  Mode             : blind docking (entire protein)",
-            "",
-            "",
-        ]
-
-    def _build_summary_section(scores, pb_counts, best_idx, kept_physical, total_samples) -> List[str]:
-        lines = [
-            "[ SUMMARY ]",
-            f"  Samples per ligand     : {n_samples}",
-            f"  score (\u00c5)   : min={min(scores):.3f}, mean={float(np.mean(scores)):.3f}, max={max(scores):.3f}",
-            f"  posebusters_fast checks: min={min(pb_counts)}/4, max={max(pb_counts)}/4",
-            f"  Best sample            : rank={best_idx+1}, score={scores[best_idx]:.3f}, posebusters_pass_fast={pb_counts[best_idx]}/4",
-            f"  Filtered poses (pb_4/4): kept {kept_physical}/{total_samples}" + ("  [WARNING: none passed, keeping originals]" if physical_only and kept_physical==0 else ""),
-            "",
-            "",
-            "  Note: score is a lower-is-better GNINA Affinity metric (\u00c5).",
-            "        Negative values indicate high model confidence, positive values indicate uncertainty.",
-            "        Lower values = higher affinity of the predicted pose.",
-            "",
-            "",
-            "  PoseBusters checks (4 boolean tests):",
-            "    1. not_too_far_away   : ligand is close to protein (distance check)",
-            "    2. no_internal_clash  : no bad bonds/angles in ligand geometry",
-            "    3. no_clashes         : no inter-molecular clashes (ligand-protein)",
-            "    4. no_volume_clash    : no vdW volume overlaps",
-            "  Additional metric:",
-            "    - buried_fraction     : fraction of ligand buried in protein (shown separately)",
-            "",
-        ]
-        return lines
-
-    def _build_pose_ranking_section(ranked_samples) -> List[str]:
-        lines = [
-            "[ POSE RANKING ]",
-            "  mode  score(\u00c5)  pb_4/4  not_far  no_int_clash  no_clash  no_vol_clash  buried_frac",
-            "  --------------------------------------------------------------------------------------------",
-        ]
-        for rank, sample in ranked_samples:
-            lines.append(_format_pose_line(rank, sample))
-        lines.extend([
-            "",
-            "Legend: \u2713 = passed, \u2717 = failed",
-            "",
-            "",
-        ])
-        return lines
-
-    def _build_warnings_section(scores, pb_counts) -> List[str]:
-        lines = []
-        if any(score > 0 for score in scores):
-            lines.extend([
-                "WARNING: Some poses have positive score values.",
-                "         This indicates reduced model confidence in those predictions.",
-                "         Consider generating more samples or inspecting poses manually.",
-                "",
-                "",
-            ])
-        if max(pb_counts) < 4:
-            lines.extend([
-                "WARNING: No poses passed all PoseBusters checks (pb_4/4).",
-                "         Inspect poses or regenerate with more samples/box adjustments.",
-                "",
-                "",
-            ])
-        return lines
-
-    def _build_log_footer(end_time, runtime, workdir_abs) -> List[str]:
-        return [
-            "[ END ]",
-            f"  Run finished at    : {end_time.isoformat()}Z",
-            f"  Total runtime      : {_format_runtime(runtime)}",
-            f"  Workdir preserved  : {workdir_abs}",
-            "============================================================",
-        ]
+            scored_sdf = sdf_scored / f"{uid_real}.sdf"
+            if not scored_sdf.exists():
+                continue
+            suppl = Chem.SDMolSupplier(str(scored_sdf), removeHs=False, sanitize=False)
+            for i, mol in enumerate(suppl):
+                if mol is None or i >= len(uid_data.get('sample_metrics', [])):
+                    continue
+                for prop in ['minimizedAffinity', 'Affinity', 'minimizedCNNscore', 'CNNscore']:
+                    if mol.HasProp(prop):
+                        try:
+                            uid_data['sample_metrics'][i]['gnina_score'] = float(mol.GetProp(prop))
+                            break
+                        except (ValueError, TypeError):
+                            continue
 
     def _rank_samples(sample_metrics: List[dict]) -> List[Tuple[int, dict]]:
+        has_gnina = any('gnina_score' in s for s in sample_metrics)
         ranked_indices = sorted(
             range(len(sample_metrics)),
             key=lambda i: (
                 -int(sample_metrics[i].get("posebusters_filters_passed_count_fast", 0)),
-                float(sample_metrics[i].get("minimizedAffinity", float("inf"))),
+                float(sample_metrics[i].get("gnina_score", float("inf"))) if has_gnina else 0,
             ),
         )
         return [(rank, sample_metrics[i]) for rank, i in enumerate(ranked_indices, start=1)]
@@ -616,12 +527,115 @@ def run_matcha(
         writer.close()
         return ranked_to_use, len(ranked_filtered), len(ranked)
 
-    def _get_best_sample_idx(errs, pb_counts):
+    def _get_best_sample_idx(pb_counts, gnina_scores=None):
         best_pb_count = max(pb_counts)
         pb_count_indices = np.arange(len(pb_counts))[pb_counts == best_pb_count]
-        scores = errs[pb_count_indices]
-        best_score_idx = np.argmin(scores)
+        if gnina_scores is not None:
+            scores = gnina_scores[pb_count_indices]
+            best_score_idx = np.argmin(scores)
+        else:
+            best_score_idx = 0
         return pb_count_indices[best_score_idx]
+
+    def _get_sample_stats(sample_metrics):
+        pb_counts = np.array([int(s.get("posebusters_filters_passed_count_fast", 0)) for s in sample_metrics])
+        has_gnina = any('gnina_score' in s for s in sample_metrics)
+        gnina_scores = None
+        if has_gnina:
+            gnina_scores = np.array([float(s.get("gnina_score", float("inf"))) for s in sample_metrics])
+        best_idx = _get_best_sample_idx(pb_counts, gnina_scores)
+        return pb_counts, gnina_scores, has_gnina, best_idx
+
+    def _write_best_pose_sdf(mdata, best_idx, uid_label, dest_path, scored_path=None):
+        if scored_path is not None and scored_path.exists():
+            shutil.copyfile(scored_path, dest_path)
+        else:
+            best_sample = mdata["sample_metrics"][best_idx]
+            orig_mol = mdata["orig_mol"]
+            writer = Chem.SDWriter(str(dest_path))
+            mol = copy.deepcopy(orig_mol)
+            conf = Chem.Conformer(orig_mol.GetNumAtoms())
+            for idx, (x, y, z) in enumerate(best_sample["pred_pos"]):
+                conf.SetAtomPosition(idx, (float(x), float(y), float(z)))
+            mol.RemoveAllConformers()
+            mol.AddConformer(conf, assignId=True)
+            mol.SetProp("_Name", f"{uid_label}_best")
+            writer.write(mol)
+            writer.close()
+
+    def _format_pose_ranking_lines(ranked_samples, has_gnina):
+        lines = []
+        if has_gnina:
+            lines.append("  rank  affinity  pb  checks  buried_frac")
+            lines.append("  -----------------------------------------")
+        else:
+            lines.append("  rank  pb  checks  buried_frac")
+            lines.append("  ------------------------------")
+        for rank, sample in ranked_samples:
+            pb_count = int(sample.get("posebusters_filters_passed_count_fast", 0))
+            pb_flags = sample.get("posebusters_filters_fast", [])
+            checks = "".join(
+                "✓" if len(pb_flags) > j and pb_flags[j] else "✗"
+                for j in range(4)
+            )
+            buried_frac = f"{pb_flags[4]:.2f}" if len(pb_flags) > 4 else " n/a"
+            if has_gnina:
+                aff = f"{sample.get('gnina_score', float('inf')):>8.2f}"
+                lines.append(f"  {rank:<4}  {aff}  {pb_count}/4  {checks}   {buried_frac:>6}")
+            else:
+                lines.append(f"  {rank:<4}  {pb_count}/4  {checks}   {buried_frac:>6}")
+        lines.extend([
+            "",
+            "Legend: checks = not_far | no_int_clash | no_clash | no_vol_clash (✓=pass ✗=fail)",
+            "",
+            "",
+        ])
+        return lines
+
+    def _format_box_log_section(box_center_val, autobox_specified, autobox_ligand):
+        if box_center_val is not None:
+            mode = 'manual center' if not autobox_specified else f'autobox from {autobox_ligand.name}'
+            return [
+                "[ AUTODOCKING BOX ]",
+                f"  Mode             : {mode}",
+                f"  Center (Å)       : ({box_center_val[0]:.3f}, {box_center_val[1]:.3f}, {box_center_val[2]:.3f})",
+                "", "",
+            ]
+        return [
+            "[ DOCKING MODE ]",
+            "  Mode             : blind docking (entire protein)",
+            "", "",
+        ]
+
+    def _format_summary_section(n_samples, scorer_type, scorer_used, scorer_name,
+                                pb_counts, gnina_scores, has_gnina, best_idx,
+                                kept_physical, total_samples, physical_only):
+        lines = [
+            "[ SUMMARY ]",
+            f"  Samples per ligand     : {n_samples}",
+            f"  Scorer                 : {scorer_type}" + (f" ({scorer_name})" if scorer_used else ""),
+        ]
+        if has_gnina:
+            lines.append(f"  GNINA Affinity (kcal/mol): min={min(gnina_scores):.2f}, mean={float(np.mean(gnina_scores)):.2f}, max={max(gnina_scores):.2f}")
+        filter_warning = "  [WARNING: none passed, keeping originals]" if physical_only and kept_physical == 0 else ""
+        affinity_str = f", affinity={gnina_scores[best_idx]:.2f}" if has_gnina else ""
+        lines.extend([
+            f"  PoseBusters checks     : min={min(pb_counts)}/4, max={max(pb_counts)}/4",
+            f"  Best sample            : rank={best_idx+1}, pb={pb_counts[best_idx]}/4{affinity_str}",
+            f"  Filtered poses (pb_4/4): kept {kept_physical}/{total_samples}{filter_warning}",
+            "", "",
+            "  PoseBusters checks (4 boolean tests):",
+            "    1. not_too_far_away   : ligand is close to protein (distance check)",
+            "    2. no_internal_clash  : no bad bonds/angles in ligand geometry",
+            "    3. no_clashes         : no inter-molecular clashes (ligand-protein)",
+            "    4. no_volume_clash    : no vdW volume overlaps",
+            "  Additional metric:",
+            "    - buried_fraction     : fraction of ligand buried in protein (shown separately)",
+            "",
+        ])
+        return lines
+
+    scorer_name = scorer.name if scorer_used else ""
 
     # single mode output
     if not batch_mode:
@@ -629,12 +643,11 @@ def run_matcha(
         all_poses_dest = run_workdir / f"{run_name}_poses.sdf"
 
         uid, mdata = next(iter(metrics.items()))
-        scores = np.array([float(s.get("minimizedAffinity", float("inf"))) for s in mdata["sample_metrics"]])
-        pb_counts = np.array([int(s.get("posebusters_filters_passed_count_fast", 0)) for s in mdata["sample_metrics"]])
-        best_idx = _get_best_sample_idx(scores, pb_counts)
+        pb_counts, gnina_scores, has_gnina, best_idx = _get_sample_stats(mdata["sample_metrics"])
 
-        pred_sdf_src = preds_root / dataset_name / "sdf_predictions" / f"{run_name}.sdf"
-        shutil.copyfile(pred_sdf_src, resolved_out)
+        scored_path = best_scored_dir / f"{run_name}.sdf" if scorer_used else None
+        _write_best_pose_sdf(mdata, best_idx, uid, resolved_out, scored_path=scored_path)
+
         ranked_samples, kept_physical, total_samples = _save_all_poses_for_uid(metrics, uid, all_poses_dest, filter_non_physical=physical_only)
 
         end_time = datetime.now(timezone.utc)
@@ -646,9 +659,19 @@ def run_matcha(
         resolved_out_abs = resolved_out.resolve()
         all_poses_abs = all_poses_dest.resolve()
         command_line = "uv run matcha " + " ".join(sys.argv[1:]) if ".venv/bin/matcha" in sys.argv[0] else " ".join(sys.argv)
-
-        log_lines = _build_log_header(start_time, command_line, run_workdir.resolve(), runtime)
-        log_lines.extend(_build_box_section())
+        log_lines = [
+            banner.rstrip("\n"),
+            "MATCHA DOCKING ENGINE  v2.0.0",
+            "============================================================",
+            "", "",
+            "[ RUN INFO ]",
+            f"  Start time       : {start_time.isoformat()}Z",
+            f"  Command          : {command_line}",
+            f"  Workdir          : {run_workdir.resolve()}",
+            f"  Runtime          : {_format_runtime(runtime)}",
+            "", "",
+        ]
+        log_lines.extend(_format_box_log_section(box_center_val, autobox_specified, autobox_ligand))
         log_lines.extend([
             "[ INPUT / OUTPUT FILES ]",
             f"  Receptor         : {receptor_abs}",
@@ -656,8 +679,28 @@ def run_matcha(
             f"  Best pose SDF    : {resolved_out_abs}",
             f"  All poses SDF    : {all_poses_abs}",
             f"  Log file         : {log_path}",
-            "",
-            "",
+            "", "",
+        ])
+        log_lines.extend(_format_summary_section(
+            n_samples, scorer_type, scorer_used, scorer_name,
+            pb_counts, gnina_scores, has_gnina, best_idx,
+            kept_physical, total_samples, physical_only))
+        log_lines.append("[ POSE RANKING ]")
+        log_lines.extend(_format_pose_ranking_lines(ranked_samples, has_gnina))
+
+        if max(pb_counts) < 4:
+            log_lines.extend([
+                "WARNING: No poses passed all PoseBusters checks (pb_4/4).",
+                "         Inspect poses or regenerate with more samples/box adjustments.",
+                "", "",
+            ])
+
+        log_lines.extend([
+            "[ END ]",
+            f"  Run finished at    : {end_time.isoformat()}Z",
+            f"  Total runtime      : {_format_runtime(runtime)}",
+            f"  Workdir preserved  : {run_workdir}",
+            "============================================================",
         ])
         log_lines.extend(_build_summary_section(scores, pb_counts, best_idx, kept_physical, total_samples))
         log_lines.extend(_build_pose_ranking_section(ranked_samples))
@@ -665,6 +708,25 @@ def run_matcha(
         log_lines.extend(_build_log_footer(end_time, runtime, run_workdir))
         with open(log_path, "w") as log_file:
             log_file.write("\n".join(log_lines))
+
+        # Print summary to console
+        console.print("")
+        for line in _format_summary_section(
+                n_samples, scorer_type, scorer_used, scorer_name,
+                pb_counts, gnina_scores, has_gnina, best_idx,
+                kept_physical, total_samples, physical_only):
+            console.print(line)
+        console.print("[ POSE RANKING ]")
+        for line in _format_pose_ranking_lines(ranked_samples, has_gnina):
+            console.print(line)
+        if max(pb_counts) < 4:
+            console.print("[bold yellow]WARNING: No poses passed all PoseBusters checks (pb_4/4).[/bold yellow]")
+            console.print("")
+        console.print(f"  Best pose SDF    : {resolved_out_abs}")
+        console.print(f"  All poses SDF    : {all_poses_abs}")
+        console.print(f"  Log file         : {log_path}")
+        console.print(f"  Runtime          : {_format_runtime(runtime)}")
+        console.print("")
 
         if not keep_workdir:
             shutil.rmtree(work_dir, ignore_errors=True)
@@ -674,11 +736,12 @@ def run_matcha(
         return
 
     # batch mode output
-    sdf_preds_dir = preds_root / dataset_name / "sdf_predictions"
     molecule_uids = sorted([p.name for p in (work_dir / "datasets" / "any_conf").iterdir() if p.is_dir()])
     receptor_abs = receptor.resolve()
     ligand_dir_abs = ligand_dir.resolve()
     run_workdir_abs = run_workdir.resolve()
+    per_log_dir = run_workdir / "logs"
+    per_log_dir.mkdir(parents=True, exist_ok=True)
 
     for mol_uid in molecule_uids:
         metrics_key = mol_uid if mol_uid in metrics else f"{mol_uid}_mol0"
@@ -686,31 +749,37 @@ def run_matcha(
             console.print(f"[yellow]Warning: No results for {mol_uid}[/yellow]")
             continue
         mdata = metrics[metrics_key]
-        scores = np.array([float(s.get("minimizedAffinity", float("inf"))) for s in mdata["sample_metrics"]])
-        pb_counts = np.array([int(s.get("posebusters_filters_passed_count_fast", 0)) for s in mdata["sample_metrics"]])
-        best_idx = _get_best_sample_idx(scores, pb_counts)
+        pb_counts, gnina_scores, has_gnina, best_idx = _get_sample_stats(mdata["sample_metrics"])
 
-        pred_sdf_src = sdf_preds_dir / f"{mol_uid}.sdf"
         best_dest = best_dir / f"{mol_uid}.sdf"
         all_dest = all_dir / f"{mol_uid}_poses.sdf"
 
-        if pred_sdf_src.exists():
-            shutil.copyfile(pred_sdf_src, best_dest)
+        scored_path = best_scored_dir / f"{mol_uid}.sdf" if scorer_used else None
+        _write_best_pose_sdf(mdata, best_idx, mol_uid, best_dest, scored_path=scored_path)
+
         ranked_samples, kept_physical, total_samples = _save_all_poses_for_uid(
             metrics, metrics_key, all_dest, filter_non_physical=physical_only
         )
 
-        # Per-ligand detailed log (single-style) inside batch run
         ligand_input = (run_workdir / "work" / "datasets" / "any_conf" / mol_uid / f"{mol_uid}_ligand.sdf").resolve()
-        per_log_dir = run_workdir / "logs"
-        per_log_dir.mkdir(parents=True, exist_ok=True)
         per_log_path = per_log_dir / f"{mol_uid}.log"
 
         end_time_local = datetime.now(timezone.utc)
         runtime_local = (end_time_local - start_time).total_seconds()
 
-        log_lines = _build_log_header(start_time, f"batch run {run_name} (ligand {mol_uid})", run_workdir_abs, runtime_local)
-        log_lines.extend(_build_box_section())
+        log_lines = [
+            banner.rstrip("\n"),
+            "MATCHA DOCKING ENGINE  v2.0.0",
+            "============================================================",
+            "", "",
+            "[ RUN INFO ]",
+            f"  Start time       : {start_time.isoformat()}Z",
+            f"  Command          : batch run {run_name} (ligand {mol_uid})",
+            f"  Workdir          : {run_workdir_abs}",
+            f"  Runtime          : {_format_runtime(runtime_local)}",
+            "", "",
+        ]
+        log_lines.extend(_format_box_log_section(box_center_val, autobox_specified, autobox_ligand))
         log_lines.extend([
             "[ INPUT / OUTPUT FILES ]",
             f"  Receptor         : {receptor_abs}",
@@ -718,8 +787,28 @@ def run_matcha(
             f"  Best pose SDF    : {best_dest.resolve()}",
             f"  All poses SDF    : {all_dest.resolve()}",
             f"  Log file         : {per_log_path.resolve()}",
-            "",
-            "",
+            "", "",
+        ])
+        log_lines.extend(_format_summary_section(
+            n_samples, scorer_type, scorer_used, scorer_name,
+            pb_counts, gnina_scores, has_gnina, best_idx,
+            kept_physical, total_samples, physical_only))
+        log_lines.append("[ POSE RANKING ]")
+        log_lines.extend(_format_pose_ranking_lines(ranked_samples, has_gnina))
+
+        if max(pb_counts) < 4:
+            log_lines.extend([
+                "WARNING: No poses passed all PoseBusters checks (pb_4/4).",
+                "         Inspect poses or regenerate with more samples/box adjustments.",
+                "", "",
+            ])
+
+        log_lines.extend([
+            "[ END ]",
+            f"  Run finished at    : {end_time_local.isoformat()}Z",
+            f"  Total runtime      : {_format_runtime(runtime_local)}",
+            f"  Workdir preserved  : {run_workdir_abs}",
+            "============================================================",
         ])
         log_lines.extend(_build_summary_section(scores, pb_counts, best_idx, kept_physical, total_samples))
         log_lines.extend(_build_pose_ranking_section(ranked_samples))
@@ -734,33 +823,27 @@ def run_matcha(
 
     log_path = (log or run_workdir / f"{run_name}.log").resolve()
     command_line = "uv run matcha " + " ".join(sys.argv[1:]) if ".venv/bin/matcha" in sys.argv[0] else " ".join(sys.argv)
-    receptor_abs = receptor.resolve()
-    ligand_dir_abs = ligand_dir.resolve()
-    run_workdir_abs = run_workdir.resolve()
     log_lines = [
         banner.rstrip("\n"),
         "MATCHA DOCKING ENGINE  v2.0.0",
         "============================================================",
-        "",
-        "",
+        "", "",
         "[ RUN INFO ]",
         f"  Start time       : {start_time.isoformat()}Z",
         f"  Command          : {command_line}",
         f"  Workdir          : {run_workdir_abs}",
         f"  Runtime          : {_format_runtime(runtime)}",
-        "",
-        "",
+        "", "",
         "[ INPUT FILES ]",
         f"  Receptor         : {receptor_abs}",
         f"  Ligands          : {ligand_dir_abs} ({len(molecule_uids)} molecules)",
         f"  Output dir       : {run_workdir_abs}",
-        "",
-        "",
+        f"  Scorer           : {scorer_type}" + (f" ({scorer_name})" if scorer_used else ""),
+        "", "",
         "[ PROCESSING SUMMARY ]",
         f"  Samples per molecule : {n_samples}",
         f"  Total molecules      : {len(molecule_uids)}",
-        "",
-        "",
+        "", "",
         "[ RESULTS ]",
     ]
     for mol_uid in molecule_uids:
@@ -769,10 +852,11 @@ def run_matcha(
             log_lines.append(f"  {mol_uid}: No results")
             continue
         mdata = metrics[metrics_key]
-        scores = np.array([float(s.get("minimizedAffinity", float("inf"))) for s in mdata["sample_metrics"]])
-        pb_counts = np.array([int(s.get("posebusters_filters_passed_count_fast", 0)) for s in mdata["sample_metrics"]])
-        best_idx = _get_best_sample_idx(scores, pb_counts)
-        log_lines.append(f"  {mol_uid}: Best score={scores[best_idx]:.3f}, pb={pb_counts[best_idx]}/4")
+        pb_counts, gnina_scores, has_gnina, best_idx = _get_sample_stats(mdata["sample_metrics"])
+        line = f"  {mol_uid}: pb={pb_counts[best_idx]}/4"
+        if has_gnina:
+            line += f", affinity={gnina_scores[best_idx]:.2f}"
+        log_lines.append(line)
 
     log_lines.extend([
         "",
@@ -793,11 +877,11 @@ def run_matcha(
     console.print(f"  Runtime          : {_format_runtime(runtime)}")
     console.print("")
 
-    if keep_workdir:
-        console.print(f"[bold green][matcha][/bold green] keeping workdir at {work_dir}")
-    else:
+    if not keep_workdir:
         shutil.rmtree(work_dir, ignore_errors=True)
         console.print(f"[bold green][matcha][/bold green] cleaned workdir {work_dir}")
+    else:
+        console.print(f"[bold green][matcha][/bold green] keeping workdir at {work_dir}")
 
 
 def main() -> None:
