@@ -11,6 +11,7 @@ from collections import defaultdict
 
 from rdkit.Chem import RemoveAllHs
 from rdkit import Chem
+import prody
 from prody import confProDy
 import torch
 import datamol as dm
@@ -40,7 +41,10 @@ KEYS_VALID = ['not_too_far_away', 'no_internal_clash',
 def get_data_for_buster(preds, dataset_data_dir, dataset_name, use_all_samples=False):
     data_for_buster = defaultdict(list)
     for uid, pred_data in preds.items():
-        uid_real = uid.split('_conf')[0] if '_conf' in uid else uid
+        if '_conf' in uid:
+            uid_real = uid.split('_conf')[0]
+        else:
+            uid_real = uid
 
         try:
             true_mol_path = get_ligand_path(
@@ -126,17 +130,18 @@ def merge_stages(all_stage_updated_metrics):
 
 def save_all_to_sdf(conf, inference_run_name, one_file: bool = False, merge_stages: bool = False):
     """Save all predictions (not just the best) to SDF files.
-
+    
     Args:
         conf: Configuration object with inference_results_folder and test_dataset_types.
         inference_run_name: Name of the inference run folder.
         one_file: If True, save all predictions for each ligand into a single SDF file
                   with multiple conformers. If False, save each prediction as a separate file.
-        merge_stages: If True, load merged multi-stage predictions instead of final.
     """
     for dataset_name in conf.test_dataset_types:
-        suffix = '_final_preds_merged.npy' if merge_stages else '_final_preds.npy'
-        preds_name = f'{dataset_name}{suffix}'
+        if merge_stages:
+            preds_name = f'{dataset_name}_final_preds_merged.npy'
+        else:
+            preds_name = f'{dataset_name}_final_preds.npy'
         logger.info(f'Loading predictions from {preds_name}')
         a = np.load(os.path.join(conf.inference_results_folder, inference_run_name,
                                  preds_name), allow_pickle=True).item()
@@ -147,7 +152,7 @@ def save_all_to_sdf(conf, inference_run_name, one_file: bool = False, merge_stag
         logger.info(f'Saving all predictions to {save_path}')
         
         for uid, sample_data in tqdm(a.items(), desc='Saving all predictions'):
-            if not sample_data:
+            if len(sample_data) == 0:
                 continue
 
             orig_mol = sample_data['orig_mol']
@@ -186,13 +191,28 @@ def save_all_to_sdf(conf, inference_run_name, one_file: bool = False, merge_stag
 
 
 def calc_posebusters_for_data(data, lig_pos, orig_mol):
-    lig_types = data.ligand.x[:, 0] - 1
-    pro_pos = data.protein.all_atom_pos + data.protein.full_protein_center
-    pro_types = data.protein.all_atom_names
-    posebusters_results = calc_posebusters(lig_pos, pro_pos, lig_types, pro_types, data.name, orig_mol)
-    if posebusters_results is None:
+    lig_pos_for_posebusters = lig_pos
+    lig_types_for_posebusters = data.ligand.x[:, 0] - 1
+    pro_types_for_posebusters = data.protein.all_atom_names
+    pro_pos_for_posebusters = data.protein.all_atom_pos + data.protein.full_protein_center
+    lig_mol_for_posebusters = orig_mol
+    names = data.name
+
+    results = calc_posebusters(
+        lig_pos_for_posebusters,
+        pro_pos_for_posebusters,
+        lig_types_for_posebusters,
+        pro_types_for_posebusters,
+        names,
+        lig_mol_for_posebusters,
+    )
+    if results is None:
         return None
-    return np.array([posebusters_results[key] for key in KEYS_VALID if key in posebusters_results], dtype=object).transpose()
+
+    return np.array(
+        [results[key] for key in KEYS_VALID if key in results.keys()],
+        dtype=object,
+    ).transpose()
 
 
 def compute_fast_filters_from_sdf(conf, inference_run_name, sdf_type='base', n_preds_to_use=None):
@@ -252,24 +272,26 @@ def compute_fast_filters_from_sdf(conf, inference_run_name, sdf_type='base', n_p
         filters_results = {}
         number_failed = 0
         
-        sdf_files = [Path(sdf_path) / f for f in os.listdir(sdf_path) if f.endswith('.sdf')]
+        sdf_files = [f for f in os.listdir(sdf_path) if f.endswith('.sdf')]
         logger.info(f"Found {len(sdf_files)} SDF files to process")
-
-        for sdf_file_path in tqdm(sdf_files, desc=f"Computing filters for {dataset_name}"):
-            uid = sdf_file_path.stem
-
+        
+        for sdf_filename in tqdm(sdf_files, desc=f"Computing filters for {dataset_name}"):
+            uid = sdf_filename.replace('.sdf', '')
+            
             if uid not in uid_to_data:
                 logger.warning(f"Protein data not found in cache for {uid}, skipping")
                 number_failed += 1
                 continue
+            
+            sdf_file_path = os.path.join(sdf_path, sdf_filename)
             
             try:
                 # Read all molecules from SDF
                 mols = dm.read_sdf(str(sdf_file_path))
                 mols = [Chem.RemoveAllHs(mol) for mol in mols if mol is not None]
                 
-                if not mols:
-                    logger.warning(f"No valid molecules in {sdf_file_path.name}")
+                if len(mols) == 0:
+                    logger.warning(f"No valid molecules in {sdf_filename}")
                     number_failed += 1
                     continue
                 
@@ -283,12 +305,12 @@ def compute_fast_filters_from_sdf(conf, inference_run_name, sdf_type='base', n_p
                         pos = mol.GetConformer(0).GetPositions()
                         lig_pos_all.append(pos)
                     except Exception as e:
-                        logger.error(f"Error getting positions for molecule in {sdf_file_path.name}: {e}")
+                        logger.error(f"Error getting positions for molecule in {sdf_filename}: {e}")
                         number_failed += 1
                         continue
                 
                 if len(lig_pos_all) == 0:
-                    logger.warning(f"No valid conformers in {sdf_file_path.name}")
+                    logger.warning(f"No valid conformers in {sdf_filename}")
                     number_failed += 1
                     continue
                 
@@ -299,27 +321,28 @@ def compute_fast_filters_from_sdf(conf, inference_run_name, sdf_type='base', n_p
                 orig_mol = mols[0]
                 
                 # Compute filters for all molecules
-                posebusters_results = calc_posebusters_for_data(data, lig_pos_stacked, orig_mol)
+                results = calc_posebusters_for_data(data, lig_pos_stacked, orig_mol)
                 
-                if posebusters_results is None:
+                if results is None:
                     logger.error(f"Fast filters computation failed for {uid}")
                     number_failed += 1
                     continue
                 
                 # Store results as dict of arrays
-                # posebusters_results shape: [n_mols, n_filters]
+                # results shape: [n_mols, n_filters]
                 # KEYS_VALID = ['not_too_far_away', 'no_internal_clash', 'no_clashes', 'no_volume_clash', 'is_buried_fraction']
+                passed_count_fast = (results[:, :4] == True).sum(axis=1).tolist()
                 filters_results[uid] = {
-                    'not_too_far_away': posebusters_results[:, 0].tolist(),
-                    'no_internal_clash': posebusters_results[:, 1].tolist(),
-                    'no_clashes': posebusters_results[:, 2].tolist(),
-                    'no_volume_clash': posebusters_results[:, 3].tolist(),
-                    'is_buried_fraction': posebusters_results[:, 4].tolist(),
-                    'posebusters_filters_passed_count_fast': posebusters_results[:, :4].astype(bool).sum(axis=1).tolist(),
+                    'not_too_far_away': results[:, 0].tolist(),
+                    'no_internal_clash': results[:, 1].tolist(),
+                    'no_clashes': results[:, 2].tolist(),
+                    'no_volume_clash': results[:, 3].tolist(),
+                    'is_buried_fraction': results[:, 4].tolist(),
+                    'posebusters_filters_passed_count_fast': passed_count_fast,
                 }
                 
             except Exception as e:
-                logger.error(f"Error processing {sdf_file_path.name}: {e}")
+                logger.error(f"Error processing {sdf_filename}: {e}")
                 number_failed += 1
                 continue
         
@@ -334,6 +357,166 @@ def compute_fast_filters_from_sdf(conf, inference_run_name, sdf_type='base', n_p
         logger.info(f"Successfully processed {len(filters_results)} UIDs for {dataset_name}")
 
 
+def _save_predictions_dict_to_sdf(preds: dict, output_dir: str, one_file: bool = True) -> None:
+    """Save predictions (output of construct_output_dict) to SDF files.
+
+    Args:
+        preds: Dict {uid: {"orig_mol": RDKitMol, "sample_metrics": [{"pred_pos": np.ndarray}, ...]}}
+        output_dir: Destination directory for per-uid SDF files.
+        one_file: When True, one file per uid with many records.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    for uid, sample_data in tqdm(preds.items(), desc="Saving predictions"):
+        if not sample_data:
+            continue
+        orig_mol = sample_data["orig_mol"]
+        uid_real = uid.split("_mol")[0]
+        if one_file:
+            try:
+                writer = Chem.SDWriter(os.path.join(output_dir, f"{uid_real}.sdf"))
+                for idx, sample in enumerate(sample_data.get("sample_metrics", [])):
+                    pred_positions = sample["pred_pos"]
+                    mol = copy.deepcopy(orig_mol)
+                    mol.GetConformer().SetPositions(pred_positions.astype(np.float64))
+                    mol.SetProp("pred_idx", str(idx))
+                    writer.write(mol, confId=0)
+                writer.close()
+            except Exception:
+                continue
+        else:
+            uid_save_path = os.path.join(output_dir, uid_real)
+            os.makedirs(uid_save_path, exist_ok=True)
+            for idx, sample in enumerate(sample_data.get("sample_metrics", [])):
+                pred_positions = sample["pred_pos"]
+                mol = copy.deepcopy(orig_mol)
+                try:
+                    mol.GetConformer().SetPositions(pred_positions.astype(np.float64))
+                    idx_str = f"{idx:02d}" if idx < 100 else f"{idx}"
+                    writer = Chem.SDWriter(os.path.join(uid_save_path, f"{uid_real}_{idx_str}.sdf"))
+                    writer.write(mol, confId=0)
+                    writer.close()
+                except Exception:
+                    continue
+
+
+def save_all_to_sdf_from_predictions(conf, inference_run_name, preds_by_dataset: dict, one_file: bool = True) -> None:
+    """Save predictions to SDF without re-loading from disk."""
+    for dataset_name, preds in preds_by_dataset.items():
+        save_path = os.path.join(
+            conf.inference_results_folder, inference_run_name, dataset_name, "sdf_predictions"
+        )
+        logger.info(f"Saving predictions to {save_path}")
+        _save_predictions_dict_to_sdf(preds, save_path, one_file=one_file)
+
+
+def compute_fast_filters_from_predictions(conf, inference_run_name, preds_by_dataset: dict, n_preds_to_use=None) -> None:
+    """Compute PoseBusters fast filters directly from predicted positions (no SDF roundtrip)."""
+    all_datasets = get_datasets(
+        conf,
+        splits=["test"],
+        predicted_ligand_transforms_path=None,
+        use_predicted_tr_only=False,
+        is_train_dataset=False,
+        n_preds_to_use=n_preds_to_use,
+        complex_collate_fn=complex_collate_fn,
+    )
+    test_datasets = all_datasets["test"]
+
+    for dataset_name, preds in preds_by_dataset.items():
+        if dataset_name not in test_datasets:
+            logger.warning(f"Dataset {dataset_name} not found in cached datasets, skipping filters")
+            continue
+
+        dataset = test_datasets[dataset_name]
+        inner = dataset.dataset if hasattr(dataset, "dataset") else dataset
+
+        uid_to_data = {}
+        for data in inner.complexes:
+            name, conf_num = data.name.split("_conf")
+            if conf_num == "0":
+                uid_to_data[name.split("_mol")[0]] = data
+        logger.info(f"Loaded {len(uid_to_data)} protein structures from cache for {dataset_name}")
+
+        filters_results = {}
+        number_failed = 0
+        for uid, sample_data in tqdm(preds.items(), desc=f"Computing filters for {dataset_name}"):
+            uid_real = uid.split("_mol")[0]
+            if uid_real not in uid_to_data:
+                logger.warning(f"Protein data not found in cache for {uid_real}, skipping")
+                number_failed += 1
+                continue
+            try:
+                samples = sample_data.get("sample_metrics", [])
+                if not samples:
+                    number_failed += 1
+                    continue
+                lig_pos_all = [np.asarray(s["pred_pos"]) for s in samples]
+                lig_pos_stacked = np.stack(lig_pos_all)
+                data = uid_to_data[uid_real]
+                orig_mol = getattr(getattr(data, "ligand", None), "orig_mol", None) or sample_data.get("orig_mol")
+                if orig_mol is None:
+                    logger.error(f"Error computing filters for {uid_real}: missing orig_mol")
+                    number_failed += 1
+                    continue
+
+                # Make sure PoseBusters sees the same atom count/order as the model output.
+                # In some pipelines, `sample_data['orig_mol']` may include hydrogens while
+                # model predictions are heavy-atom only (or vice versa).
+                n_atoms_pred = int(lig_pos_stacked.shape[1])
+                if orig_mol.GetNumAtoms() != n_atoms_pred:
+                    try:
+                        mol_no_h = Chem.RemoveAllHs(orig_mol, sanitize=False)
+                    except Exception:
+                        mol_no_h = None
+                    if mol_no_h is not None and mol_no_h.GetNumAtoms() == n_atoms_pred:
+                        orig_mol = mol_no_h
+                    else:
+                        logger.error(
+                            f"Error computing filters for {uid_real}: atom count mismatch "
+                            f"(pred={n_atoms_pred}, mol={orig_mol.GetNumAtoms()})"
+                        )
+                        number_failed += 1
+                        continue
+
+                results = calc_posebusters_for_data(data, lig_pos_stacked, orig_mol)
+                if results is None:
+                    logger.error(f"Fast filters computation failed for {uid_real}")
+                    number_failed += 1
+                    continue
+                results = np.asarray(results, dtype=object)
+                if results.ndim == 1:
+                    results = results.reshape(1, -1)
+                if results.ndim != 2 or results.shape[1] < 5:
+                    logger.error(
+                        f"Error computing filters for {uid_real}: unexpected PoseBusters output shape {results.shape}"
+                    )
+                    number_failed += 1
+                    continue
+                passed_count_fast = (results[:, :4] == True).sum(axis=1).tolist()
+                filters_results[uid_real] = {
+                    "not_too_far_away": results[:, 0].tolist(),
+                    "no_internal_clash": results[:, 1].tolist(),
+                    "no_clashes": results[:, 2].tolist(),
+                    "no_volume_clash": results[:, 3].tolist(),
+                    "is_buried_fraction": results[:, 4].tolist(),
+                    "posebusters_filters_passed_count_fast": passed_count_fast,
+                }
+            except Exception as e:
+                logger.error(f"Error computing filters for {uid_real}: {e}")
+                number_failed += 1
+                continue
+
+        output_path = os.path.join(
+            conf.inference_results_folder, inference_run_name, dataset_name, "filters_results.json"
+        )
+        logger.info(f"Dataset {dataset_name} Number of failed: {number_failed}")
+        logger.info(f"Saving filters to {output_path}")
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, "w") as f:
+            json.dump(filters_results, f, indent=2)
+        logger.info(f"Successfully processed {len(filters_results)} UIDs for {dataset_name}")
+
+
 def run_v2_inference_pipeline(
     conf,
     run_name,
@@ -342,10 +525,14 @@ def run_v2_inference_pipeline(
     docking_batch_limit=15000,
     num_workers=0,
     progress_callback=None,
+    pin_memory: bool = False,
+    prefetch_factor: int = 2,
+    persistent_workers: bool = False,
+    compute_torsion_angles_pred: bool = True,
 ):
     """Run the full v2 3-stage inference pipeline.
 
-    Replaces the v1 ``run_inference_pipeline``, and
+    Replaces the v1 ``run_inference_pipeline``, ``compute_fast_filters`` and
     ``save_best_pred_to_sdf`` stubs with a single entry-point used by both
     CLI and TUI.
 
@@ -366,11 +553,14 @@ def run_v2_inference_pipeline(
 
     if torch.cuda.is_available():
         torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+        torch.set_float32_matmul_precision("highest")
     torch.multiprocessing.set_sharing_strategy('file_system')
     torch.manual_seed(conf.seed)
 
     from matcha.utils.device import resolve_device
-    device = resolve_device()
+    requested_device = conf.get("device", None) if hasattr(conf, "get") else getattr(conf, "device", None)
+    device = resolve_device(requested_device)
     num_steps = 10
 
     conf.batch_limit = docking_batch_limit
@@ -417,15 +607,27 @@ def run_v2_inference_pipeline(
     def get_dataloader_docking(dataset):
         return DataLoader(
             dataset, batch_size=1, shuffle=False,
-            prefetch_factor=2 if num_workers > 0 else None,
+            prefetch_factor=prefetch_factor if num_workers > 0 else None,
             collate_fn=dummy_ranking_collate_fn,
             num_workers=num_workers,
+            pin_memory=pin_memory,
+            persistent_workers=persistent_workers if num_workers > 0 else False,
         )
 
     dataset_names = conf.test_dataset_types
+    final_preds_by_dataset: dict[str, dict] = {}
+    timings = {
+        "stage1_sec": 0.0,
+        "stage2_sec": 0.0,
+        "stage3_sec": 0.0,
+        "sdf_save_sec": 0.0,
+        "posebusters_sec": 0.0,
+        "stage_by_dataset": {},
+    }
 
     for dataset_name in dataset_names:
         predicted_ligand_transforms_path = None
+        timings["stage_by_dataset"].setdefault(dataset_name, {})
 
         conf.use_sorted_batching = True
         conf.test_dataset_types = [dataset_name]
@@ -465,10 +667,21 @@ def run_v2_inference_pipeline(
 
             test_loader = get_dataloader_docking(test_dataset_docking)
             stage_start_time = time.time()
+            solver_kwargs = {
+                "record_history": False,
+                "record_trajectory": False,
+            }
             metrics = run_evaluation(
                 test_loader, num_steps=num_steps, solver=euler, model=model,
-                progress_callback=progress_callback, current_stage=f'stage{stage_idx + 1}')
+                progress_callback=progress_callback, current_stage=f'stage{stage_idx + 1}',
+                device=device,
+                compute_torsion_angles_pred=compute_torsion_angles_pred,
+                solver_kwargs=solver_kwargs,
+            )
             stage_elapsed = time.time() - stage_start_time
+            stage_key = f"stage{stage_idx + 1}_sec"
+            timings[stage_key] = float(timings.get(stage_key, 0.0)) + float(stage_elapsed)
+            timings["stage_by_dataset"][dataset_name][stage_key] = float(stage_elapsed)
 
             # Save stage results
             predicted_ligand_transforms_path = os.path.join(
@@ -485,12 +698,33 @@ def run_v2_inference_pipeline(
                 conf.inference_results_folder, run_name, f'{dataset_name}_final_preds_{stage_idx + 1}stage.npy')
             np.save(final_metrics_path, [updated_metrics])
 
-    # Save all predictions to SDF
+        # Save final predictions (last stage)
+        final_preds_path = os.path.join(
+            conf.inference_results_folder, run_name, f'{dataset_name}_final_preds.npy')
+        np.save(final_preds_path, [updated_metrics])
+        logger.info(f"Saved final predictions to {final_preds_path}")
+        final_preds_by_dataset[dataset_name] = updated_metrics
+
+    # Save all predictions to SDF (used by GNINA scoring and for inspection)
     if progress_callback is not None:
         progress_callback('stage_start', 'sdf_save', 'Saving predictions to SDF', None, None)
     sdf_start = time.time()
-    # Merge all prediction stages and save merged predictions to SDF
-    load_and_merge_all_stages(conf, run_name)
-    save_all_to_sdf(conf, run_name, one_file=True, merge_stages=True)
+    save_all_to_sdf_from_predictions(conf, run_name, final_preds_by_dataset, one_file=True)
+    timings["sdf_save_sec"] = float(time.time() - sdf_start)
     if progress_callback is not None:
-        progress_callback('stage_done', 'sdf_save', None, time.time() - sdf_start, None)
+        progress_callback('stage_done', 'sdf_save', None, timings["sdf_save_sec"], None)
+
+    # Compute PoseBusters fast filters directly from predicted positions (no SDF roundtrip)
+    if progress_callback is not None:
+        progress_callback('stage_start', 'posebusters', 'Physical validation', None, None)
+    pb_start = time.time()
+    compute_fast_filters_from_predictions(conf, run_name, final_preds_by_dataset, n_preds_to_use=n_preds_to_use)
+    timings["posebusters_sec"] = float(time.time() - pb_start)
+    if progress_callback is not None:
+        progress_callback('stage_done', 'posebusters', None, timings["posebusters_sec"], None)
+
+    timings_path = os.path.join(conf.inference_results_folder, run_name, "timings_pipeline.json")
+    with open(timings_path, "w", encoding="utf-8") as f:
+        json.dump(timings, f, indent=2)
+    logger.info(f"Saved pipeline timings to {timings_path}")
+    return timings
