@@ -74,6 +74,7 @@ All molecules are processed in a single pipeline pass (native batching).
 | `--ligand-dir` | Multi-ligand `.sdf` file or directory |
 | `-o`, `--out` | Output directory |
 | `-g`, `--device` | `auto`, `cpu`, `cuda`, `cuda:N`, or `mps` (Apple Metal) |
+| `--gpus` | Multi-GPU batch sharding, e.g. `--gpus 2,3` (batch dir mode only) |
 | `--n-samples` | Poses per ligand (default: 40) |
 | `--scorer` | `gnina` (default), `custom`, or `none` |
 | `--scorer-minimize` / `--no-scorer-minimize` | GNINA minimization (default: on) |
@@ -82,6 +83,23 @@ All molecules are processed in a single pipeline pass (native batching).
 | `--overwrite` | Overwrite existing run |
 
 Run `matcha --help` for the full list.
+
+### Multi-GPU batch mode (2/3 GPUs)
+
+For large ligand directories, Matcha can shard ligands across multiple GPUs by launching one process per GPU.
+
+```bash
+# 2 GPUs
+uv run matcha -r protein.pdb --ligand-dir ligands/ --gpus 2,3 --box-json target_box.json -o out_2gpu
+
+# 3 GPUs
+uv run matcha -r protein.pdb --ligand-dir ligands/ --gpus 1,2,3 --box-json target_box.json -o out_3gpu
+```
+
+Outputs are merged into:
+- `out_<...>/<run-name>/merged/`
+- `out_<...>/<run-name>/benchmark_summary.json`
+- `out_<...>/<run-name>/benchmark_summary.md`
 
 ### Search space
 
