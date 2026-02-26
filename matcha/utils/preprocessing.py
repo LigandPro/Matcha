@@ -2,6 +2,7 @@ import copy
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -28,6 +29,9 @@ _CONFORMER_BACKEND_LOGGED: set[str] = set()
 
 _PDB_PARSE_CACHE_LOCK = threading.Lock()
 _PDB_PARSE_CACHE: dict[tuple, object] = {}
+_WORKER_AUTO_SETUP_LOCK = threading.Lock()
+_WORKER_AUTO_SETUP_ATTEMPTED = False
+_WORKER_AUTO_SETUP_SUCCEEDED = False
 
 
 biopython_parser = PDBParser()
@@ -251,6 +255,101 @@ def _resolve_worker_command() -> list[str]:
         "MATCHA_CONFORMER_WORKER_CMD is not set and no local worker command was found at "
         f"{worker_entry}. Run: uv run python scripts/setup_nvmolkit_worker.py"
     )
+
+
+def _worker_command_configured() -> bool:
+    if os.environ.get("MATCHA_CONFORMER_WORKER_CMD", "").strip():
+        return True
+
+    repo_root = Path(__file__).resolve().parents[2]
+    worker_entry = repo_root / ".venv-nvmolkit-worker" / "bin" / "matcha-nvmolkit-worker"
+    worker_script = repo_root / "scripts" / "nvmolkit_worker.py"
+    venv_python = repo_root / ".venv-nvmolkit-worker" / "bin" / "python"
+    return worker_entry.exists() or (worker_script.exists() and venv_python.exists())
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    if normalized == "":
+        return default
+    logger.warning(f"Invalid boolean for {name}: {value}, using default {default}")
+    return default
+
+
+def _auto_setup_worker_once() -> bool:
+    global _WORKER_AUTO_SETUP_ATTEMPTED, _WORKER_AUTO_SETUP_SUCCEEDED
+
+    with _WORKER_AUTO_SETUP_LOCK:
+        if _WORKER_AUTO_SETUP_SUCCEEDED:
+            return True
+        if _WORKER_AUTO_SETUP_ATTEMPTED:
+            return False
+        _WORKER_AUTO_SETUP_ATTEMPTED = True
+
+        if not _env_flag("MATCHA_CONFORMER_AUTO_SETUP_WORKER", True):
+            logger.info("Conformer worker auto-setup is disabled by MATCHA_CONFORMER_AUTO_SETUP_WORKER")
+            return False
+
+        repo_root = Path(__file__).resolve().parents[2]
+        setup_script = repo_root / "scripts" / "setup_nvmolkit_worker.py"
+        if not setup_script.exists():
+            logger.warning(f"Worker setup script not found: {setup_script}")
+            return False
+
+        if shutil.which("uv") is None:
+            logger.warning("Cannot auto-setup conformer worker because `uv` is not in PATH")
+            return False
+
+        setup_timeout_sec = _get_env_int("MATCHA_CONFORMER_WORKER_SETUP_TIMEOUT_SEC", 3600)
+        cmd = ["uv", "run", "python", str(setup_script), "--skip-smoke"]
+        logger.info(
+            "Conformer worker is not installed; running automatic setup "
+            "(set MATCHA_CONFORMER_AUTO_SETUP_WORKER=0 to disable)"
+        )
+
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=str(repo_root),
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=setup_timeout_sec,
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                f"Automatic conformer worker setup timed out after {setup_timeout_sec}s; "
+                "falling back to RDKit"
+            )
+            return False
+
+        if proc.returncode != 0:
+            stderr_tail = "\n".join(proc.stderr.strip().splitlines()[-20:])
+            stdout_tail = "\n".join(proc.stdout.strip().splitlines()[-20:])
+            details = stderr_tail or stdout_tail or "setup exited with non-zero status"
+            logger.warning(
+                f"Automatic conformer worker setup failed (code={proc.returncode}); "
+                f"falling back to RDKit.\n{details}"
+            )
+            return False
+
+        if not _worker_command_configured():
+            logger.warning(
+                "Automatic conformer worker setup finished but worker command was not found; "
+                "falling back to RDKit"
+            )
+            return False
+
+        _WORKER_AUTO_SETUP_SUCCEEDED = True
+        logger.info("Automatic conformer worker setup completed successfully")
+        return True
 
 
 def _split_single_conformer_mols(mol, num_conformers: int):
@@ -505,15 +604,17 @@ def generate_conformer_mols_batch(
         init = Chem.AddHs(init)
         prepared.append(init)
 
-    worker_cmd_configured = bool(os.environ.get("MATCHA_CONFORMER_WORKER_CMD", "").strip())
-    if not worker_cmd_configured:
-        repo_root = Path(__file__).resolve().parents[2]
-        worker_entry = repo_root / ".venv-nvmolkit-worker" / "bin" / "matcha-nvmolkit-worker"
-        worker_script = repo_root / "scripts" / "nvmolkit_worker.py"
-        venv_python = repo_root / ".venv-nvmolkit-worker" / "bin" / "python"
-        worker_cmd_configured = worker_entry.exists() or (worker_script.exists() and venv_python.exists())
+    worker_cmd_configured = _worker_command_configured()
+    if backend in {"auto", "worker"} and not worker_cmd_configured:
+        if _auto_setup_worker_once():
+            worker_cmd_configured = _worker_command_configured()
 
     use_worker = backend == "worker" or (backend == "auto" and worker_cmd_configured)
+    if backend == "worker" and not worker_cmd_configured:
+        raise RuntimeError(
+            "Worker conformer backend was requested but worker command is unavailable. "
+            "Run: uv run python scripts/setup_nvmolkit_worker.py"
+        )
     worker_disabled = False
 
     def _rdkit_generate_chunk(chunk_mols):
