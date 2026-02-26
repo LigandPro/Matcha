@@ -285,6 +285,67 @@ def generate_multiple_conformers(orig_mol, num_conformers):
         return mol
 
 
+def _split_single_conformer_mols(mol, max_confs):
+    """Split a multi-conformer mol into a list of single-conformer mols."""
+    res = []
+    if mol is None or mol.GetNumConformers() == 0:
+        return res
+    for conf_id in range(min(int(max_confs), mol.GetNumConformers())):
+        conf_mol = copy.deepcopy(mol)
+        conf = mol.GetConformer(conf_id)
+        conf_mol.RemoveAllConformers()
+        conf_mol.AddConformer(conf, assignId=True)
+        if not conf_mol.HasProp("ID"):
+            conf_mol.SetProp("ID", f"conformer_{conf_id}")
+        res.append(conf_mol)
+    return res
+
+
+def generate_conformer_mols(orig_mol, num_conformers, backend=None):
+    """Generate a list of single-conformer RDKit molecules.
+
+    `backend` is accepted for forward compatibility with worker-based backends.
+    """
+    return generate_conformer_mols_batch(
+        [orig_mol],
+        confs_per_mol=int(num_conformers),
+        backend=backend,
+    )[0]
+
+
+def generate_conformer_mols_batch(
+    mols,
+    confs_per_mol,
+    backend=None,
+    seed=None,
+    optimize=True,
+    chunk_size=128,
+):
+    """RDKit batch conformer generation fallback.
+
+    Current implementation intentionally uses RDKit only. Additional arguments
+    are accepted for API compatibility with optional worker-based generators.
+    """
+    if confs_per_mol <= 0:
+        return [[copy.deepcopy(m)] for m in mols]
+
+    results = []
+    for mol in mols:
+        init = copy.deepcopy(mol)
+        init.RemoveAllConformers()
+        init = Chem.AddHs(init)
+        conf_mol = generate_multiple_conformers(init, int(confs_per_mol))
+        conf_mol = Chem.RemoveAllHs(conf_mol)
+        confs = _split_single_conformer_mols(conf_mol, int(confs_per_mol))
+        if len(confs) == 0:
+            fallback = copy.deepcopy(mol)
+            confs = _split_single_conformer_mols(fallback, 1)
+            if len(confs) == 0:
+                confs = [fallback]
+        results.append(confs)
+    return results
+
+
 def save_multiple_confs(mol, output_conf_path, num_conformers):
     init_mol = copy.deepcopy(mol)
     mol.RemoveAllConformers()
