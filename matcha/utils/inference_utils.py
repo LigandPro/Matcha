@@ -11,7 +11,6 @@ from collections import defaultdict
 
 from rdkit.Chem import RemoveAllHs
 from rdkit import Chem
-import prody
 from prody import confProDy
 import torch
 import datamol as dm
