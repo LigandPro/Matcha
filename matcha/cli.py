@@ -74,49 +74,7 @@ def _write_json(path: Path, payload: dict) -> None:
         json.dump(payload, f, indent=2)
 
 
-def _compute_center_from_mol(mol) -> Optional[np.ndarray]:
-    if mol is None or mol.GetNumConformers() == 0:
-        return None
-    conf = mol.GetConformer()
-    return np.array(conf.GetPositions()).mean(axis=0)
-
-
-def _compute_receptor_center_from_ca(receptor_mol) -> Optional[np.ndarray]:
-    if receptor_mol is None or receptor_mol.GetNumConformers() == 0:
-        return None
-
-    conf = receptor_mol.GetConformer()
-    ca_coords = []
-    for atom in receptor_mol.GetAtoms():
-        res_info = atom.GetPDBResidueInfo()
-        if res_info is None or res_info.GetName() != "CA":
-            continue
-        ca_coords.append(conf.GetAtomPosition(atom.GetIdx()))
-
-    if not ca_coords:
-        return _compute_center_from_mol(receptor_mol)
-    return np.array([[p.x, p.y, p.z] for p in ca_coords]).mean(axis=0)
-
-
-def _shift_ligand_to_receptor_center(ligand, receptor_center: Optional[np.ndarray]) -> None:
-    if receptor_center is None or ligand is None or ligand.GetNumConformers() == 0:
-        return
-
-    ligand_center = _compute_center_from_mol(ligand)
-    if ligand_center is None:
-        return
-    shift = receptor_center - ligand_center
-    if np.allclose(shift, 0):
-        return
-
-    conformers = list(ligand.GetConformers())
-    for conf in conformers:
-        for atom_idx in range(conf.GetNumAtoms()):
-            pos = conf.GetAtomPosition(atom_idx)
-            conf.SetAtomPosition(atom_idx, (pos.x + shift[0], pos.y + shift[1], pos.z + shift[2]))
-
-
-def _normalize_ligand(src: Path, dest: Path, receptor_center: Optional[np.ndarray] = None) -> None:
+def _normalize_ligand(src: Path, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     suffix = src.suffix.lower()
     mol = None
@@ -137,9 +95,6 @@ def _normalize_ligand(src: Path, dest: Path, receptor_center: Optional[np.ndarra
     if mol is None:
         raise typer.BadParameter(f"RDKit failed to read ligand: {src}")
 
-    if receptor_center is not None:
-        _shift_ligand_to_receptor_center(mol, receptor_center)
-
     writer = Chem.SDWriter(str(dest))
     writer.SetKekulize(False)
     for cid in range(mol.GetNumConformers()):
@@ -152,9 +107,6 @@ def _prepare_singleton_dataset(
     ligand: Path,
     dataset_dir: Path,
     uid: str,
-    *,
-    receptor_center: Optional[np.ndarray] = None,
-    original_receptor: Optional[Path] = None,
 ) -> None:
     sample_dir = dataset_dir / uid
     sample_dir.mkdir(parents=True, exist_ok=True)
@@ -165,11 +117,7 @@ def _prepare_singleton_dataset(
     if receptor.suffix.lower() != ".pdb":
         raise typer.BadParameter("Receptor must be a .pdb file.")
     shutil.copyfile(receptor, receptor_dest)
-    if receptor_center is None:
-        receptor_center = _compute_receptor_center_from_ca(
-            Chem.MolFromPDBFile(str(receptor), sanitize=False, removeHs=False)
-        )
-    _normalize_ligand(ligand, ligand_dest, receptor_center=receptor_center)
+    _normalize_ligand(ligand, ligand_dest)
 
 
 def _split_multi_sdf(sdf_path: Path) -> List[Tuple[str, Any]]:
@@ -205,14 +153,8 @@ def _prepare_batch_dataset(
     protein: Path,
     molecules: List[Tuple[str, Any]],
     dataset_dir: Path,
-    *,
-    receptor_center: Optional[np.ndarray] = None,
 ) -> List[str]:
     dataset_dir.mkdir(parents=True, exist_ok=True)
-    if receptor_center is None:
-        receptor_center = _compute_receptor_center_from_ca(
-            Chem.MolFromPDBFile(str(protein), sanitize=False, removeHs=False)
-        )
     uids = []
     uid_counts: dict[str, int] = {}
     protein_real = protein.resolve()
@@ -232,7 +174,6 @@ def _prepare_batch_dataset(
             os.symlink(str(protein_real), str(receptor_dest))
         except OSError:
             shutil.copyfile(protein_real, receptor_dest)
-        _shift_ligand_to_receptor_center(mol, receptor_center)
         writer = Chem.SDWriter(str(sample_dir / f"{uid}_ligand.sdf"))
         writer.SetKekulize(False)
         writer.write(mol)
@@ -639,12 +580,6 @@ def run_matcha(
     dataset_dir.mkdir(parents=True, exist_ok=True)
     molecule_uids: List[str] = []
 
-    # Receptor CA center is used to (1) normalize ligands into the same centered frame and
-    # (2) convert absolute box centers into the centered coordinates expected by stage1_any_conf.npy.
-    receptor_center_abs = _compute_receptor_center_from_ca(
-        Chem.MolFromPDBFile(str(receptor), sanitize=False, removeHs=False)
-    )
-
     if batch_mode:
         console.print(f"[bold cyan][matcha][/bold cyan] Batch mode: processing multiple molecules from {ligand_dir.name}")
         if ligand_dir.is_file():
@@ -668,15 +603,13 @@ def run_matcha(
         if not molecules:
             raise typer.BadParameter(f"No molecules found in {ligand_dir}")
         console.print(f"[bold green][matcha][/bold green] Found {len(molecules)} molecules to process")
-        molecule_uids = _prepare_batch_dataset(receptor, molecules, dataset_dir, receptor_center=receptor_center_abs)
+        molecule_uids = _prepare_batch_dataset(receptor, molecules, dataset_dir)
     else:
         _prepare_singleton_dataset(
             receptor_for_run,
             ligand,
             dataset_dir,
             run_name,
-            receptor_center=receptor_center_abs,
-            original_receptor=receptor,
         )
         molecule_uids = [run_name]
 
