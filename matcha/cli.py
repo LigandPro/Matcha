@@ -994,10 +994,6 @@ def run_matcha(
             f"  Workdir preserved  : {run_workdir}",
             "============================================================",
         ])
-        log_lines.extend(_build_summary_section(scores, pb_counts, best_idx, kept_physical, total_samples))
-        log_lines.extend(_build_pose_ranking_section(ranked_samples))
-        log_lines.extend(_build_warnings_section(scores, pb_counts))
-        log_lines.extend(_build_log_footer(end_time, runtime, run_workdir))
         with open(log_path, "w") as log_file:
             log_file.write("\n".join(log_lines))
 
@@ -1102,11 +1098,6 @@ def run_matcha(
             f"  Workdir preserved  : {run_workdir_abs}",
             "============================================================",
         ])
-        log_lines.extend(_build_summary_section(scores, pb_counts, best_idx, kept_physical, total_samples))
-        log_lines.extend(_build_pose_ranking_section(ranked_samples))
-        log_lines.extend(_build_warnings_section(scores, pb_counts))
-        log_lines.extend(_build_log_footer(end_time_local, runtime_local, run_workdir_abs))
-
         with open(per_log_path, "w") as log_file:
             log_file.write("\n".join(log_lines))
 
