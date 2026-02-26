@@ -453,6 +453,10 @@ def run_matcha(
             pb_filters = json.load(f)
 
     # Enrich metrics with PB filter data
+    def _safe_get_filter(fdata, key, idx, default):
+        values = fdata.get(key, [])
+        return values[idx] if idx < len(values) else default
+
     for uid_key, uid_data in metrics.items():
         uid_real = uid_key.split('_mol')[0] if '_mol' in uid_key else uid_key
         if uid_real in pb_filters:
@@ -461,11 +465,11 @@ def run_matcha(
                 if i < len(fdata.get('posebusters_filters_passed_count_fast', [])):
                     sample['posebusters_filters_passed_count_fast'] = fdata['posebusters_filters_passed_count_fast'][i]
                     sample['posebusters_filters_fast'] = [
-                        fdata.get('not_too_far_away', [False])[i] if i < len(fdata.get('not_too_far_away', [])) else False,
-                        fdata.get('no_internal_clash', [False])[i] if i < len(fdata.get('no_internal_clash', [])) else False,
-                        fdata.get('no_clashes', [False])[i] if i < len(fdata.get('no_clashes', [])) else False,
-                        fdata.get('no_volume_clash', [False])[i] if i < len(fdata.get('no_volume_clash', [])) else False,
-                        fdata.get('is_buried_fraction', [0.0])[i] if i < len(fdata.get('is_buried_fraction', [])) else 0.0,
+                        _safe_get_filter(fdata, 'not_too_far_away', i, False),
+                        _safe_get_filter(fdata, 'no_internal_clash', i, False),
+                        _safe_get_filter(fdata, 'no_clashes', i, False),
+                        _safe_get_filter(fdata, 'no_volume_clash', i, False),
+                        _safe_get_filter(fdata, 'is_buried_fraction', i, 0.0),
                     ]
 
     # Read GNINA scores back into metrics when available
@@ -698,6 +702,10 @@ def run_matcha(
             f"  Workdir preserved  : {run_workdir}",
             "============================================================",
         ])
+        log_lines.extend(_build_summary_section(scores, pb_counts, best_idx, kept_physical, total_samples))
+        log_lines.extend(_build_pose_ranking_section(ranked_samples))
+        log_lines.extend(_build_warnings_section(scores, pb_counts))
+        log_lines.extend(_build_log_footer(end_time, runtime, run_workdir))
         with open(log_path, "w") as log_file:
             log_file.write("\n".join(log_lines))
 
@@ -802,6 +810,10 @@ def run_matcha(
             f"  Workdir preserved  : {run_workdir_abs}",
             "============================================================",
         ])
+        log_lines.extend(_build_summary_section(scores, pb_counts, best_idx, kept_physical, total_samples))
+        log_lines.extend(_build_pose_ranking_section(ranked_samples))
+        log_lines.extend(_build_warnings_section(scores, pb_counts))
+        log_lines.extend(_build_log_footer(end_time_local, runtime_local, run_workdir_abs))
 
         with open(per_log_path, "w") as log_file:
             log_file.write("\n".join(log_lines))

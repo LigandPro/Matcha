@@ -186,16 +186,11 @@ def _extract_gnina_score(mol, score_type="CNNscore", use_minimized=True):
     Returns:
         Score value or None if not found.
     """
+    minimized_name = f"minimized{score_type}"
     if use_minimized:
-        possible_names = [
-            f"minimized{score_type}" if score_type != "Affinity" else "minimizedAffinity",
-            score_type,
-        ]
+        possible_names = [minimized_name, score_type]
     else:
-        possible_names = [
-            score_type,
-            f"minimized{score_type}" if score_type != "Affinity" else "minimizedAffinity",
-        ]
+        possible_names = [score_type, minimized_name]
 
     for prop_name in possible_names:
         if mol.HasProp(prop_name):
@@ -233,10 +228,7 @@ def _find_top_scored_molecule(sdf_path, score_type="CNNscore", use_minimized=Tru
     """
     supplier = Chem.SDMolSupplier(str(sdf_path), removeHs=False, sanitize=False)
 
-    if use_minimized:
-        prop_name = f"minimized{score_type}" if score_type != "Affinity" else "minimizedAffinity"
-    else:
-        prop_name = score_type
+    prop_name = f"minimized{score_type}" if use_minimized else score_type
 
     keep_mask = np.arange(3 * n_samples)
 
