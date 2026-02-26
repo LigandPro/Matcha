@@ -374,7 +374,7 @@ def run_matcha(
         console.print(f"[bold green][matcha][/bold green] Found {len(molecules)} molecules to process")
         molecule_uids = _prepare_batch_dataset(receptor, molecules, dataset_dir)
     else:
-        _prepare_singleton_dataset(receptor_for_run, ligand, dataset_dir, run_name, original_receptor=receptor)
+        _prepare_singleton_dataset(receptor_for_run, ligand, dataset_dir, run_name)
         molecule_uids = [run_name]
 
     if box_center_val is not None:
@@ -427,9 +427,6 @@ def run_matcha(
     scorer_used = False
     sdf_scored = preds_root / dataset_name / "minimized_sdf_predictions"
     best_scored_dir = preds_root / dataset_name / "best_minimized_predictions"
-    if scorer_type != "none" and scorer_type.startswith("gnina") and resolved_device != "cuda":
-        console.print(f"[bold yellow][matcha][/bold yellow] GNINA requires CUDA; skipping scoring on {resolved_device}")
-        scorer_type = "none"
     if scorer_type != "none":
         try:
             scorer = create_scorer(scorer_type, scorer_path=str(scorer_path) if scorer_path else None,
