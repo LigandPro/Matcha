@@ -40,10 +40,7 @@ KEYS_VALID = ['not_too_far_away', 'no_internal_clash',
 def get_data_for_buster(preds, dataset_data_dir, dataset_name, use_all_samples=False):
     data_for_buster = defaultdict(list)
     for uid, pred_data in preds.items():
-        if '_conf' in uid:
-            uid_real = uid.split('_conf')[0]
-        else:
-            uid_real = uid
+        uid_real = uid.split('_conf')[0] if '_conf' in uid else uid
 
         try:
             true_mol_path = get_ligand_path(
@@ -76,7 +73,6 @@ def get_data_for_buster(preds, dataset_data_dir, dataset_name, use_all_samples=F
             for sample in samples:
                 pred_new = {
                     'transformed_orig': sample['pred_pos'],
-                    'error_estimate_0': sample['error_estimate_0'],
                     'true_pos': true_pos,
                     'orig_mol': orig_mol,
                     'full_protein_center': np.zeros(3),
@@ -87,15 +83,12 @@ def get_data_for_buster(preds, dataset_data_dir, dataset_name, use_all_samples=F
             pb_passed_count = np.array(
                 [sample.get('posebusters_filters_passed_count_fast', 0) for sample in samples])
             best_pb_count = max(pb_passed_count)
-            samples = [sample for sample in samples
+            best_samples = [sample for sample in samples
                     if sample.get('posebusters_filters_passed_count_fast', 0) == best_pb_count]
-            scores = [sample['error_estimate_0'] for sample in samples]
-            best_score_idx = np.argmin(scores)
-            best_sample = samples[best_score_idx]
+            best_sample = best_samples[0]
 
             pred_new = {
                 'transformed_orig': best_sample['pred_pos'],
-                'error_estimate_0': best_sample['error_estimate_0'],
                 'true_pos': true_pos,
                 'orig_mol': orig_mol,
                 'full_protein_center': np.zeros(3),
@@ -133,18 +126,17 @@ def merge_stages(all_stage_updated_metrics):
 
 def save_all_to_sdf(conf, inference_run_name, one_file: bool = False, merge_stages: bool = False):
     """Save all predictions (not just the best) to SDF files.
-    
+
     Args:
         conf: Configuration object with inference_results_folder and test_dataset_types.
         inference_run_name: Name of the inference run folder.
         one_file: If True, save all predictions for each ligand into a single SDF file
                   with multiple conformers. If False, save each prediction as a separate file.
+        merge_stages: If True, load merged multi-stage predictions instead of final.
     """
     for dataset_name in conf.test_dataset_types:
-        if merge_stages:
-            preds_name = f'{dataset_name}_final_preds_merged.npy'
-        else:
-            preds_name = f'{dataset_name}_final_preds.npy'
+        suffix = '_final_preds_merged.npy' if merge_stages else '_final_preds.npy'
+        preds_name = f'{dataset_name}{suffix}'
         logger.info(f'Loading predictions from {preds_name}')
         a = np.load(os.path.join(conf.inference_results_folder, inference_run_name,
                                  preds_name), allow_pickle=True).item()
@@ -155,7 +147,7 @@ def save_all_to_sdf(conf, inference_run_name, one_file: bool = False, merge_stag
         logger.info(f'Saving all predictions to {save_path}')
         
         for uid, sample_data in tqdm(a.items(), desc='Saving all predictions'):
-            if len(sample_data) == 0:
+            if not sample_data:
                 continue
 
             orig_mol = sample_data['orig_mol']
@@ -195,12 +187,12 @@ def save_all_to_sdf(conf, inference_run_name, one_file: bool = False, merge_stag
 
 def calc_posebusters_for_data(data, lig_pos, orig_mol):
     lig_types = data.ligand.x[:, 0] - 1
-    pro_types = data.protein.all_atom_names
     pro_pos = data.protein.all_atom_pos + data.protein.full_protein_center
+    pro_types = data.protein.all_atom_names
     posebusters_results = calc_posebusters(lig_pos, pro_pos, lig_types, pro_types, data.name, orig_mol)
     if posebusters_results is None:
         return None
-    return np.array([posebusters_results[key] for key in KEYS_VALID if key in posebusters_results.keys()], dtype=object).transpose()
+    return np.array([posebusters_results[key] for key in KEYS_VALID if key in posebusters_results], dtype=object).transpose()
 
 
 def compute_fast_filters_from_sdf(conf, inference_run_name, sdf_type='base', n_preds_to_use=None):
@@ -260,26 +252,24 @@ def compute_fast_filters_from_sdf(conf, inference_run_name, sdf_type='base', n_p
         filters_results = {}
         number_failed = 0
         
-        sdf_files = [f for f in os.listdir(sdf_path) if f.endswith('.sdf')]
+        sdf_files = [Path(sdf_path) / f for f in os.listdir(sdf_path) if f.endswith('.sdf')]
         logger.info(f"Found {len(sdf_files)} SDF files to process")
-        
-        for sdf_filename in tqdm(sdf_files, desc=f"Computing filters for {dataset_name}"):
-            uid = sdf_filename.replace('.sdf', '')
-            
+
+        for sdf_file_path in tqdm(sdf_files, desc=f"Computing filters for {dataset_name}"):
+            uid = sdf_file_path.stem
+
             if uid not in uid_to_data:
                 logger.warning(f"Protein data not found in cache for {uid}, skipping")
                 number_failed += 1
                 continue
-            
-            sdf_file_path = os.path.join(sdf_path, sdf_filename)
             
             try:
                 # Read all molecules from SDF
                 mols = dm.read_sdf(str(sdf_file_path))
                 mols = [Chem.RemoveAllHs(mol) for mol in mols if mol is not None]
                 
-                if len(mols) == 0:
-                    logger.warning(f"No valid molecules in {sdf_filename}")
+                if not mols:
+                    logger.warning(f"No valid molecules in {sdf_file_path.name}")
                     number_failed += 1
                     continue
                 
@@ -293,12 +283,12 @@ def compute_fast_filters_from_sdf(conf, inference_run_name, sdf_type='base', n_p
                         pos = mol.GetConformer(0).GetPositions()
                         lig_pos_all.append(pos)
                     except Exception as e:
-                        logger.error(f"Error getting positions for molecule in {sdf_filename}: {e}")
+                        logger.error(f"Error getting positions for molecule in {sdf_file_path.name}: {e}")
                         number_failed += 1
                         continue
                 
                 if len(lig_pos_all) == 0:
-                    logger.warning(f"No valid conformers in {sdf_filename}")
+                    logger.warning(f"No valid conformers in {sdf_file_path.name}")
                     number_failed += 1
                     continue
                 
@@ -325,11 +315,11 @@ def compute_fast_filters_from_sdf(conf, inference_run_name, sdf_type='base', n_p
                     'no_clashes': posebusters_results[:, 2].tolist(),
                     'no_volume_clash': posebusters_results[:, 3].tolist(),
                     'is_buried_fraction': posebusters_results[:, 4].tolist(),
-                    'posebusters_filters_passed_count_fast': (posebusters_results[:, :4] == True).sum(axis=1).tolist(),
+                    'posebusters_filters_passed_count_fast': posebusters_results[:, :4].astype(bool).sum(axis=1).tolist(),
                 }
                 
             except Exception as e:
-                logger.error(f"Error processing {sdf_filename}: {e}")
+                logger.error(f"Error processing {sdf_file_path.name}: {e}")
                 number_failed += 1
                 continue
         
@@ -374,11 +364,13 @@ def run_v2_inference_pipeline(
     from matcha.utils.metrics import construct_output_dict
     from matcha.dataset.pdbbind import complex_collate_fn, dummy_ranking_collate_fn
 
-    torch.backends.cuda.matmul.allow_tf32 = False
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = False
     torch.multiprocessing.set_sharing_strategy('file_system')
     torch.manual_seed(conf.seed)
 
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    from matcha.utils.device import resolve_device
+    device = resolve_device()
     num_steps = 10
 
     conf.batch_limit = docking_batch_limit

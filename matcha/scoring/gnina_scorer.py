@@ -1,18 +1,178 @@
 import json
+import os
 import shutil
 import subprocess
+import sys
+import urllib.request
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 from rdkit import Chem
 from rdkit.Chem import SDWriter
+from rich.progress import (
+    BarColumn,
+    DownloadColumn,
+    Progress,
+    TimeRemainingColumn,
+    TransferSpeedColumn,
+)
 from tqdm import tqdm
 
 from matcha.scoring.base import PoseScorer
 from matcha.utils.log import get_logger
 
 logger = get_logger(__name__)
+
+_GNINA_API_URL = "https://api.github.com/repos/gnina/gnina/releases/latest"
+GNINA_CACHE_DIR = Path.home() / ".matcha" / "bin"
+
+
+def _resolve_gnina_download() -> tuple[str, str]:
+    """Resolve the latest GNINA release URL via GitHub API.
+
+    Returns:
+        (version, download_url) tuple.
+
+    Raises:
+        RuntimeError: If the GitHub API is unreachable or returns no suitable asset.
+    """
+    try:
+        req = urllib.request.Request(_GNINA_API_URL, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310
+            data = json.loads(resp.read())
+        version = data["tag_name"].lstrip("v")
+        # Pick the default build (not cuda12.8)
+        for asset in data["assets"]:
+            if "cuda" not in asset["name"]:
+                return version, asset["browser_download_url"]
+    except Exception as exc:
+        raise RuntimeError(
+            "Failed to query GitHub for the latest GNINA release.\n"
+            "Check your internet connection or install GNINA manually:\n"
+            "  https://github.com/gnina/gnina/releases"
+        ) from exc
+    raise RuntimeError("No suitable GNINA binary found in the latest GitHub release.")
+
+
+def _download_with_progress(url: str, dest: Path) -> None:
+    """Download a file with a rich progress bar."""
+    response = urllib.request.urlopen(url)  # noqa: S310
+    total = int(response.headers.get("Content-Length", 0))
+
+    with (
+        Progress(
+            "[progress.description]{task.description}",
+            BarColumn(),
+            DownloadColumn(),
+            TransferSpeedColumn(),
+            TimeRemainingColumn(),
+        ) as progress,
+        open(dest, "wb") as f,
+    ):
+        task = progress.add_task("Downloading GNINA", total=total)
+        while chunk := response.read(8192):
+            f.write(chunk)
+            progress.advance(task, len(chunk))
+
+
+def _gnina_env() -> dict:
+    """Return env dict with LD_LIBRARY_PATH pointing to CUDA/cuDNN libs."""
+    env = os.environ.copy()
+    extra_paths = []
+
+    # 1. Current env's torch
+    try:
+        import torch
+        torch_lib = Path(torch.__file__).parent / "lib"
+        if any(torch_lib.glob("libcudnn*")):
+            extra_paths.append(str(torch_lib))
+    except ImportError:
+        pass
+
+    # 2. Search conda environments for cudnn
+    if not extra_paths:
+        for base in [Path.home() / "miniforge", Path.home() / "miniconda3",
+                     Path.home() / "anaconda3", Path("/opt/conda")]:
+            candidates = sorted(base.glob("**/torch/lib/libcudnn.so*"))
+            if candidates:
+                extra_paths.append(str(candidates[0].parent))
+                break
+
+    if extra_paths:
+        parts = extra_paths + ([env["LD_LIBRARY_PATH"]] if env.get("LD_LIBRARY_PATH") else [])
+        env["LD_LIBRARY_PATH"] = ":".join(parts)
+
+    return env
+
+
+def _is_working_gnina(path: str) -> bool:
+    """Check if a gnina binary actually works (not a stub)."""
+    try:
+        result = subprocess.run(
+            [path, "--version"], capture_output=True, text=True, timeout=10,
+            env=_gnina_env(),
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, OSError, subprocess.SubprocessError):
+        return False
+
+
+def ensure_gnina() -> str:
+    """Find GNINA in PATH / cache, or auto-download it. Returns path to binary."""
+    # 1. Already in PATH (verify it actually works, not a stub)
+    system_gnina = shutil.which("gnina")
+    if system_gnina and _is_working_gnina(system_gnina):
+        return system_gnina
+
+    # 2. Previously downloaded
+    cached = GNINA_CACHE_DIR / "gnina"
+    if cached.exists() and cached.stat().st_size > 1_000_000 and _is_working_gnina(str(cached)):
+        return str(cached)
+
+    # 3. Platform check
+    if sys.platform != "linux":
+        raise RuntimeError(
+            "GNINA is only available for Linux.\n"
+            "Use --scorer none to skip scoring."
+        )
+
+    # 4. Ask user confirmation
+    from rich.console import Console
+
+    console = Console()
+    console.print(
+        "[bold yellow]GNINA not found.[/] "
+        "Required for pose scoring (~1.4 GB download)."
+    )
+    try:
+        answer = input("Download GNINA automatically? [Y/n] ").strip().lower()
+    except EOFError:
+        answer = "n"
+    if answer and answer != "y":
+        raise RuntimeError(
+            "GNINA download declined. Install manually:\n"
+            "  conda install -c conda-forge gnina\n"
+            "or download from https://github.com/gnina/gnina/releases\n"
+            "Alternatively, use --scorer none to skip scoring."
+        )
+
+    # 5. Resolve latest version and download
+    version, url = _resolve_gnina_download()
+    GNINA_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    tmp_path = cached.with_suffix(".downloading")
+    if tmp_path.exists():
+        tmp_path.unlink()
+    try:
+        _download_with_progress(url, tmp_path)
+        tmp_path.rename(cached)
+        cached.chmod(0o755)
+    except Exception:
+        if tmp_path.exists():
+            tmp_path.unlink()
+        raise
+
+    logger.info(f"GNINA {version} installed to {cached}")
+    return str(cached)
 
 
 def _extract_gnina_score(mol, score_type="CNNscore", use_minimized=True):
@@ -142,7 +302,7 @@ class GninaScorer(PoseScorer):
 
     def __init__(self, gnina_path=None, minimize=True, score_type="Affinity",
                  cnn_scoring="none"):
-        self._gnina_path = str(gnina_path) if gnina_path is not None else shutil.which("gnina")
+        self._gnina_path = str(gnina_path) if gnina_path is not None else ensure_gnina()
         self.minimize = minimize
         self.score_type = score_type
         self.cnn_scoring = cnn_scoring
@@ -153,13 +313,6 @@ class GninaScorer(PoseScorer):
 
     @property
     def gnina_path(self) -> str:
-        if self._gnina_path is None:
-            raise RuntimeError(
-                "gnina not found in PATH. Install via:\n"
-                "  conda install -c conda-forge gnina\n"
-                "or download from https://github.com/gnina/gnina/releases\n"
-                "Alternatively, use --scorer none to skip scoring."
-            )
         return self._gnina_path
 
     def score_poses(self, receptor_path, sdf_input_dir, sdf_output_dir, device=0):
@@ -191,7 +344,8 @@ class GninaScorer(PoseScorer):
             cmd.extend(["-o", str(output_sdf)])
 
             try:
-                subprocess.run(cmd, capture_output=True, text=True, check=True)
+                subprocess.run(cmd, capture_output=True, text=True, check=True,
+                               env=_gnina_env())
             except subprocess.CalledProcessError as e:
                 logger.error(f"gnina failed for {sdf_file.name}: {e.stderr}")
             except FileNotFoundError:
@@ -353,9 +507,8 @@ def create_scorer(scorer_type, scorer_path=None, minimize=True):
     """
     if scorer_type == "gnina":
         return GninaScorer(gnina_path=scorer_path, minimize=minimize)
-    elif scorer_type == "custom":
+    if scorer_type == "custom":
         if scorer_path is None:
             raise ValueError("--scorer-path is required for custom scorer")
         return CustomScriptScorer(script_path=scorer_path)
-    else:
-        raise ValueError(f"Unknown scorer type: {scorer_type}")
+    raise ValueError(f"Unknown scorer type: {scorer_type}")
