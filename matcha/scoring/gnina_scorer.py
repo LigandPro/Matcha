@@ -321,7 +321,7 @@ def _find_top_scored_molecule(sdf_path, score_type="CNNscore", use_minimized=Tru
         return None
 
     if use_minimized:
-        prop_name = f"minimized{score_type}" if score_type != "Affinity" else "minimizedAffinity"
+        prop_name = f"minimized{score_type}"
     else:
         prop_name = score_type
 
@@ -397,10 +397,7 @@ class GninaScorer(PoseScorer):
 
     def __init__(self, gnina_path=None, minimize=True, score_type="Affinity",
                  cnn_scoring="none"):
-        if gnina_path is not None:
-            self._gnina_path = str(gnina_path)
-        else:
-            self._gnina_path = ensure_gnina()
+        self._gnina_path = str(gnina_path) if gnina_path is not None else ensure_gnina()
         self.minimize = minimize
         self.score_type = score_type
         self.cnn_scoring = cnn_scoring
@@ -459,7 +456,7 @@ class GninaScorer(PoseScorer):
         sdf_output_dir,
         best_output_dir,
         filters_path=None,
-        n_samples=40,
+        n_samples=20,
         device=0,
     ):
         """Score all per-ligand SDFs with a single GNINA invocation.
@@ -652,7 +649,7 @@ class GninaScorer(PoseScorer):
             for uid, entries in uid_to_entries.items():
                 _write_uid_outputs(uid, entries)
 
-    def select_top_poses(self, sdf_dir, output_dir, filters_path=None, n_samples=40):
+    def select_top_poses(self, sdf_dir, output_dir, filters_path=None, n_samples=20):
         sdf_dir = Path(sdf_dir)
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)

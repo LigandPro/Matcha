@@ -85,10 +85,17 @@ def run_evaluation(
     progress_callback=None,
     current_stage=None,
     device: str | None = None,
-    compute_torsion_angles_pred: bool = True,
+    compute_torsion_angles_pred: bool = False,
     solver_kwargs: dict | None = None,
     profiler=None,
 ):
+    def revert_augm(batch):
+        batch.ligand.pos[:] = torch.einsum(
+            'bij,bjk->bik', batch.ligand.pos, batch.original_augm_rot)
+        for idx, num_atoms in enumerate(batch.ligand.num_atoms):
+            batch.ligand.pos[idx, num_atoms:] = 0.
+        return batch.ligand.pos
+
     if device is None:
         from matcha.utils.device import resolve_device
         device = resolve_device()
@@ -100,7 +107,6 @@ def run_evaluation(
 
     for loader_idx, batch in enumerate(tqdm(dataloader, desc="Docking inference")):
         batch = batch["batch"]
-        batch_size = len(batch)
         solver_kwargs_local = dict(solver_kwargs or {})
 
         if solver_supports_copy_batch and hasattr(batch, "clone_structure"):
@@ -115,54 +121,46 @@ def run_evaluation(
                 **solver_kwargs_local,
             )
             aligned_batch = batch.clone_structure().to(device, non_blocking=use_non_blocking)
+            init_batch = batch.clone_structure().to(device, non_blocking=use_non_blocking)
         else:
             optimized, tr_agg, R_agg, tor_agg, _, _ = solver(
                 model, batch, device=device, num_steps=num_steps, **solver_kwargs_local
             )
             aligned_batch = None
+            init_batch = None
 
         for elem_idx, num_atoms in enumerate(optimized.ligand.num_atoms):
             optimized.ligand.pos[elem_idx, num_atoms:] = 0.
 
-        # Handle cases where solver returns None for aggregated values
-        if tr_agg is None or R_agg is None or tor_agg is None:
-            # Skip alignment and use identity transformations
-            tr_agg = torch.zeros(batch_size, 3, device=device)
-            R_agg = torch.eye(3, device=device).repeat(batch_size, 1, 1)
-            tor_agg = torch.zeros_like(batch.ligand.init_tor, device=device)
-            if aligned_batch is None:
-                aligned_batch = copy.deepcopy(batch).to(device)
-        else:
-            # Normal alignment process
-            if aligned_batch is None:
-                aligned_batch = copy.deepcopy(batch).to(device)
-            tr_aligned = torch.zeros_like(tr_agg, device=device)
-            rot_aligned = torch.eye(3, device=device).repeat(
-                tr_agg.shape[0], 1, 1)
-            apply_tor_changes_to_batch_inplace(
-                aligned_batch, tor_agg, is_reverse_order=False)
-            for i in range(len(optimized.ligand.pos)):
-                pos_pred = aligned_batch.ligand.pos[i, :optimized.ligand.num_atoms[i]]
-                pos_true = optimized.ligand.pos[i, :optimized.ligand.num_atoms[i]]
+        # Alignment process
+        if aligned_batch is None:
+            aligned_batch = copy.deepcopy(batch).to(device)
+        tr_aligned = torch.zeros_like(tr_agg, device=device)
+        rot_aligned = torch.eye(3, device=device).repeat(
+            tr_agg.shape[0], 1, 1)
+        apply_tor_changes_to_batch_inplace(
+            aligned_batch, tor_agg, is_reverse_order=False)
+        for i in range(len(optimized.ligand.pos)):
+            pos_pred = aligned_batch.ligand.pos[i, :optimized.ligand.num_atoms[i]]
+            pos_true = optimized.ligand.pos[i, :optimized.ligand.num_atoms[i]]
 
-                rot, tr = find_rigid_alignment(pos_pred, pos_true)
-                tr_aligned[i] = tr
-                rot_aligned[i] = rot
+            rot, tr = find_rigid_alignment(pos_pred, pos_true)
+            tr_aligned[i] = tr
+            rot_aligned[i] = rot
 
-            apply_tr_rot_changes_to_batch_inplace(
-                aligned_batch, tr_aligned, rot_aligned)
-            tr_agg = tr_aligned
-            R_agg = rot_aligned
+        apply_tr_rot_changes_to_batch_inplace(
+            aligned_batch, tr_aligned, rot_aligned)
+        tr_agg = tr_aligned
+        R_agg = rot_aligned
 
         # Handle tr_agg_init_coord computation
         tr_agg_init_coord = torch.bmm(
             (tr_agg)[:, None, :], optimized.original_augm_rot)[:, 0]
 
-        transformed_orig = torch.einsum(
-            "bij,bjk->bik", optimized.ligand.pos, optimized.original_augm_rot
-        )
-        for idx, num_atoms in enumerate(optimized.ligand.num_atoms):
-            transformed_orig[idx, num_atoms:] = 0.
+        if init_batch is None:
+            init_batch = copy.deepcopy(batch).to(device)
+        init_batch.ligand.pos = optimized.ligand.pos.clone().to(device)
+        transformed_orig = revert_augm(init_batch)
 
         all_names = batch.names
 
@@ -179,18 +177,15 @@ def run_evaluation(
 
             # compute torsion angles
             if compute_torsion_angles_pred:
-                bond_properties_for_angles = {}
-                bond_properties_for_angles['start'] = optimized.ligand.rotatable_bonds_ext.start[sample_idx,
-                                                                                                 :optimized.ligand.num_rotatable_bonds[sample_idx]]
-                bond_properties_for_angles['end'] = optimized.ligand.rotatable_bonds_ext.end[sample_idx,
-                                                                                             :optimized.ligand.num_rotatable_bonds[sample_idx]]
-                bond_properties_for_angles['neighbor_of_start'] = optimized.ligand.rotatable_bonds_ext.neighbor_of_start[sample_idx,
-                                                                                                                         :optimized.ligand.num_rotatable_bonds[sample_idx]]
-                bond_properties_for_angles['neighbor_of_end'] = optimized.ligand.rotatable_bonds_ext.neighbor_of_end[sample_idx,
-                                                                                                                     :optimized.ligand.num_rotatable_bonds[sample_idx]]
-                bond_properties_for_angles['bond_periods'] = optimized.ligand.rotatable_bonds_ext.bond_periods[sample_idx,
-                                                                                                               :optimized.ligand.num_rotatable_bonds[sample_idx]]
-
+                rot_bonds = optimized.ligand.rotatable_bonds_ext
+                n_rot = optimized.ligand.num_rotatable_bonds[sample_idx]
+                bond_properties_for_angles = {
+                    'start': rot_bonds.start[sample_idx, :n_rot],
+                    'end': rot_bonds.end[sample_idx, :n_rot],
+                    'neighbor_of_start': rot_bonds.neighbor_of_start[sample_idx, :n_rot],
+                    'neighbor_of_end': rot_bonds.neighbor_of_end[sample_idx, :n_rot],
+                    'bond_periods': rot_bonds.bond_periods[sample_idx, :n_rot],
+                }
                 torsion_angles_pred = get_torsion_angles(
                     torch.from_numpy(np.copy(complex_metrics['transformed_orig'])).to(device),
                     bond_atoms_for_angles=bond_properties_for_angles,
