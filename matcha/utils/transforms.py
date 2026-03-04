@@ -294,47 +294,26 @@ def find_rigid_alignment(pos_a, pos_b):
 
     Outputs rot and tr (with fixed tor components)
     """
+    a_mean = pos_a.mean(0)
+    b_mean = pos_b.mean(0)
+    a_centered = pos_a - a_mean
+    b_centered = pos_b - b_mean
+    # Covariance matrix
+    cov_mat = a_centered.T @ b_centered
     if isinstance(pos_a, torch.Tensor):
-        a_mean = pos_a.mean(0)
-        b_mean = pos_b.mean(0)
-        a_centered = pos_a - a_mean
-        b_centered = pos_b - b_mean
-        cov_mat = a_centered.T @ b_centered
-
         U, _, Vt = torch.linalg.svd(cov_mat)
         V = Vt.T
         det = torch.linalg.det(V @ U.T)
+    else:
+        U, _, Vt = np.linalg.svd(cov_mat)
+        V = Vt.T
+        det = np.linalg.det(V @ U.T)
 
-        if det < 0:
-            V[:, -1] = -V[:, -1]
-        rot = V @ U.T
-        tr = b_mean
-        return rot, tr
-
-    pos_a = np.asarray(pos_a, dtype=np.float64)
-    pos_b = np.asarray(pos_b, dtype=np.float64)
-    if not (np.isfinite(pos_a).all() and np.isfinite(pos_b).all()):
-        # Degenerate input (NaNs/Infs). Avoid crashing DataLoader workers and
-        # fall back to identity rotation.
-        b_mean = np.mean(pos_b, axis=0)
-        return np.eye(3, dtype=np.float32), b_mean.astype(np.float32)
-
-    a_mean = np.mean(pos_a, axis=0)
-    b_mean = np.mean(pos_b, axis=0)
-    a_centered = pos_a - a_mean
-    b_centered = pos_b - b_mean
-    cov_mat = a_centered.T @ b_centered
-
-    try:
-        U, _, Vt = np.linalg.svd(cov_mat, full_matrices=False)
-    except np.linalg.LinAlgError:
-        jitter = 1e-8 * np.eye(cov_mat.shape[0], dtype=cov_mat.dtype)
-        U, _, Vt = np.linalg.svd(cov_mat + jitter, full_matrices=False)
-    V = Vt.T
-    det = np.linalg.det(V @ U.T)
-
+    # Ensure proper rotation by checking determinant
     if det < 0:
-        V[:, -1] = -V[:, -1]
+        V[:, -1] = -V[:, -1]  # Flip the last column of V
+    # Rotation matrix (now guaranteed to be proper rotation)
     rot = V @ U.T
+    # Translation vector
     tr = b_mean
-    return rot.astype(np.float32), tr.astype(np.float32)
+    return rot, tr

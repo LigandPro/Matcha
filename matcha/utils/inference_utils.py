@@ -38,69 +38,6 @@ KEYS_VALID = ['not_too_far_away', 'no_internal_clash',
               'no_clashes', 'no_volume_clash', 'is_buried_fraction']
 
 
-def get_data_for_buster(preds, dataset_data_dir, dataset_name, use_all_samples=False):
-    data_for_buster = defaultdict(list)
-    for uid, pred_data in preds.items():
-        if '_conf' in uid:
-            uid_real = uid.split('_conf')[0]
-        else:
-            uid_real = uid
-
-        try:
-            true_mol_path = get_ligand_path(
-                uid, dataset_name, dataset_data_dir)
-            orig_mol = read_molecule(true_mol_path, sanitize=False)
-            try:
-                orig_mol = RemoveAllHs(orig_mol, sanitize=True)
-            except Exception as e:
-                if dataset_name.startswith('pdbbind'):
-                    try:
-                        # try with mol2
-                        true_mol_path = true_mol_path.replace('.sdf', '.mol2')
-                        logger.info(f'Trying to read mol2 file {true_mol_path}')
-                        orig_mol = read_molecule(true_mol_path, sanitize=False)
-                        orig_mol = RemoveAllHs(orig_mol, sanitize=True)
-                    except Exception as e:
-                        orig_mol = RemoveAllHs(orig_mol, sanitize=False)
-            if orig_mol is not None:
-                true_pos = np.copy(orig_mol.GetConformer().GetPositions())
-            else:
-                logger.warning(f'Skip: {uid}')
-                continue
-        except:
-            logger.warning(f'Skip: {uid}')
-            continue
-
-        samples = pred_data['sample_metrics']
-        if use_all_samples:
-            all_preds = []
-            for sample in samples:
-                pred_new = {
-                    'transformed_orig': sample['pred_pos'],
-                    'true_pos': true_pos,
-                    'orig_mol': orig_mol,
-                    'full_protein_center': np.zeros(3),
-                }
-                all_preds.append(pred_new)
-            data_for_buster[uid_real] = all_preds
-        else:
-            pb_passed_count = np.array(
-                [sample.get('posebusters_filters_passed_count_fast', 0) for sample in samples])
-            best_pb_count = max(pb_passed_count)
-            best_samples = [sample for sample in samples
-                    if sample.get('posebusters_filters_passed_count_fast', 0) == best_pb_count]
-            best_sample = best_samples[0]
-
-            pred_new = {
-                'transformed_orig': best_sample['pred_pos'],
-                'true_pos': true_pos,
-                'orig_mol': orig_mol,
-                'full_protein_center': np.zeros(3),
-            }
-            data_for_buster[uid_real] = [pred_new]
-    return data_for_buster
-
-
 def load_and_merge_all_stages(conf, inference_run_name):
     for dataset_name in conf.test_dataset_types:
         all_stage_updated_metrics = []
