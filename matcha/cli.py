@@ -715,9 +715,7 @@ def run_matcha(
     metrics = np.load(preds_root / f"{dataset_name}_final_preds_merged.npy", allow_pickle=True).item()
 
     # Load PB filters from JSON
-    filters_json_path = preds_root / dataset_name / "filters_results.json"
-    if not filters_json_path.exists():
-        filters_json_path = preds_root / dataset_name / "filters_results_minimized.json"
+    filters_json_path = preds_root / dataset_name / "filters_results_minimized.json"
     pb_filters = {}
     if filters_json_path.exists():
         with open(filters_json_path) as f:
