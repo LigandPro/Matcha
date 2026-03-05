@@ -43,12 +43,23 @@ def read_best_score(sdf_path: Path) -> float:
 
 def collect_repro_snapshot(run_dir: Path, run_name: str) -> dict:
     any_conf_dir = run_dir / "work" / "runs" / run_name / "any_conf"
-    scored_path = any_conf_dir / "scored_sdf_predictions" / f"{run_name}.sdf"
-    best_scored_path = any_conf_dir / "best_scored_predictions" / f"{run_name}.sdf"
     filters_path = any_conf_dir / "filters_results_minimized.json"
 
-    assert scored_path.exists(), f"Missing scored SDF: {scored_path}"
-    assert best_scored_path.exists(), f"Missing best scored SDF: {best_scored_path}"
+    scored_path = None
+    best_scored_path = None
+    for scored_dir_name, best_dir_name in (
+        ("scored_sdf_predictions", "best_scored_predictions"),
+        ("minimized_sdf_predictions", "best_minimized_predictions"),
+    ):
+        candidate_scored = any_conf_dir / scored_dir_name / f"{run_name}.sdf"
+        candidate_best = any_conf_dir / best_dir_name / f"{run_name}.sdf"
+        if candidate_scored.exists() and candidate_best.exists():
+            scored_path = candidate_scored
+            best_scored_path = candidate_best
+            break
+
+    assert scored_path is not None, f"Missing scored SDF under {any_conf_dir}"
+    assert best_scored_path is not None, f"Missing best scored SDF under {any_conf_dir}"
     assert filters_path.exists(), f"Missing filters JSON: {filters_path}"
 
     with open(filters_path, encoding="utf-8") as f:
