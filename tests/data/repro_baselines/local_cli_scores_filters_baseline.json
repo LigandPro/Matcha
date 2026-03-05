@@ -1,0 +1,47 @@
+{
+  "scores": [
+    100.0,
+    99.0,
+    98.0,
+    97.0
+  ],
+  "best_score": 100.0,
+  "filters": {
+    "not_too_far_away": [
+      true,
+      true,
+      true,
+      true
+    ],
+    "no_internal_clash": [
+      true,
+      false,
+      true,
+      false
+    ],
+    "no_clashes": [
+      true,
+      true,
+      true,
+      true
+    ],
+    "no_volume_clash": [
+      true,
+      false,
+      true,
+      false
+    ],
+    "is_buried_fraction": [
+      0.42,
+      0.42,
+      0.42,
+      0.42
+    ],
+    "posebusters_filters_passed_count_fast": [
+      4,
+      3,
+      4,
+      3
+    ]
+  }
+}
