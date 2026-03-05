@@ -107,6 +107,7 @@ def run_evaluation(
 
     for loader_idx, batch in enumerate(tqdm(dataloader, desc="Docking inference")):
         batch = batch["batch"]
+        batch_size = len(batch)
         solver_kwargs_local = dict(solver_kwargs or {})
 
         if solver_supports_copy_batch and hasattr(batch, "clone_structure"):
@@ -133,25 +134,32 @@ def run_evaluation(
             optimized.ligand.pos[elem_idx, num_atoms:] = 0.
 
         # Alignment process
-        if aligned_batch is None:
-            aligned_batch = copy.deepcopy(batch).to(device)
-        tr_aligned = torch.zeros_like(tr_agg, device=device)
-        rot_aligned = torch.eye(3, device=device).repeat(
-            tr_agg.shape[0], 1, 1)
-        apply_tor_changes_to_batch_inplace(
-            aligned_batch, tor_agg, is_reverse_order=False)
-        for i in range(len(optimized.ligand.pos)):
-            pos_pred = aligned_batch.ligand.pos[i, :optimized.ligand.num_atoms[i]]
-            pos_true = optimized.ligand.pos[i, :optimized.ligand.num_atoms[i]]
+        if tr_agg is None or R_agg is None or tor_agg is None:
+            tr_agg = torch.zeros(batch_size, 3, device=device)
+            R_agg = torch.eye(3, device=device).repeat(batch_size, 1, 1)
+            tor_agg = torch.zeros_like(batch.ligand.init_tor, device=device)
+            if aligned_batch is None:
+                aligned_batch = copy.deepcopy(batch).to(device)
+        else:
+            if aligned_batch is None:
+                aligned_batch = copy.deepcopy(batch).to(device)
+            tr_aligned = torch.zeros_like(tr_agg, device=device)
+            rot_aligned = torch.eye(3, device=device).repeat(
+                tr_agg.shape[0], 1, 1)
+            apply_tor_changes_to_batch_inplace(
+                aligned_batch, tor_agg, is_reverse_order=False)
+            for i in range(len(optimized.ligand.pos)):
+                pos_pred = aligned_batch.ligand.pos[i, :optimized.ligand.num_atoms[i]]
+                pos_true = optimized.ligand.pos[i, :optimized.ligand.num_atoms[i]]
 
-            rot, tr = find_rigid_alignment(pos_pred, pos_true)
-            tr_aligned[i] = tr
-            rot_aligned[i] = rot
+                rot, tr = find_rigid_alignment(pos_pred, pos_true)
+                tr_aligned[i] = tr
+                rot_aligned[i] = rot
 
-        apply_tr_rot_changes_to_batch_inplace(
-            aligned_batch, tr_aligned, rot_aligned)
-        tr_agg = tr_aligned
-        R_agg = rot_aligned
+            apply_tr_rot_changes_to_batch_inplace(
+                aligned_batch, tr_aligned, rot_aligned)
+            tr_agg = tr_aligned
+            R_agg = rot_aligned
 
         # Handle tr_agg_init_coord computation
         tr_agg_init_coord = torch.bmm(
