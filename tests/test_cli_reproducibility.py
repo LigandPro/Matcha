@@ -13,6 +13,8 @@ from matcha.cli import run_matcha
 FIXTURE_ROOT = Path(__file__).resolve().parent / "data" / "complexes" / "1HVY_D16"
 FIXTURE_RECEPTOR = FIXTURE_ROOT / "1HVY_D16_protein.pdb"
 FIXTURE_LIGAND = FIXTURE_ROOT / "1HVY_D16_ligand_start_conf.sdf"
+BASELINE_ROOT = Path(__file__).resolve().parent / "data" / "repro_baselines"
+LOCAL_BASELINE = BASELINE_ROOT / "local_cli_scores_filters_baseline.json"
 
 
 def _extract_pose_scores(sdf_path: Path) -> list[float]:
@@ -62,6 +64,17 @@ def _collect_repro_snapshot(run_dir: Path, run_name: str) -> dict:
         "best_score": _read_first_score(best_scored_path),
         "filters": filters_all[uid],
     }
+
+
+def _load_baseline(path: Path) -> dict:
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _assert_snapshot_matches_baseline(snapshot: dict, baseline: dict) -> None:
+    assert snapshot["scores"] == baseline["scores"]
+    assert snapshot["best_score"] == baseline["best_score"]
+    assert snapshot["filters"] == baseline["filters"]
 
 
 def _prepare_fake_checkpoints(root: Path) -> Path:
@@ -261,23 +274,27 @@ def _run_local_cli_repro_case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r
     return _collect_repro_snapshot(output_root / run_name, run_name)
 
 
-def test_cli_reproducible_scores_and_filters_with_fixed_seed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    first = _run_local_cli_repro_case(tmp_path / "run1", monkeypatch, "repro_case")
-    second = _run_local_cli_repro_case(tmp_path / "run2", monkeypatch, "repro_case")
+def test_cli_matches_committed_baseline_for_scores_and_filters(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    snapshot = _run_local_cli_repro_case(tmp_path / "run1", monkeypatch, "repro_case")
+    baseline = _load_baseline(LOCAL_BASELINE)
 
-    assert first == second
+    _assert_snapshot_matches_baseline(snapshot, baseline)
 
 
 @pytest.mark.skipif(os.getenv("MATCHA_RUN_EXTERNAL_REPRO_TEST") != "1", reason="external repro test is opt-in")
-def test_cli_external_reproducibility_with_real_assets(tmp_path: Path):
+def test_cli_external_matches_baseline_with_real_assets(tmp_path: Path):
     receptor = Path(os.environ.get("MATCHA_REPRO_RECEPTOR", ""))
     ligand = Path(os.environ.get("MATCHA_REPRO_LIGAND", ""))
     scorer_path = Path(os.environ.get("MATCHA_REPRO_SCORER_PATH", ""))
+    baseline_path = Path(os.environ.get("MATCHA_REPRO_BASELINE_JSON", ""))
 
     required = {
         "MATCHA_REPRO_RECEPTOR": receptor,
         "MATCHA_REPRO_LIGAND": ligand,
         "MATCHA_REPRO_SCORER_PATH": scorer_path,
+        "MATCHA_REPRO_BASELINE_JSON": baseline_path,
     }
     missing = [name for name, path in required.items() if not str(path) or not path.exists()]
     if missing:
@@ -300,24 +317,23 @@ def test_cli_external_reproducibility_with_real_assets(tmp_path: Path):
     if "MATCHA_REPRO_CUDA_VISIBLE_DEVICES" in os.environ:
         env["CUDA_VISIBLE_DEVICES"] = os.environ["MATCHA_REPRO_CUDA_VISIBLE_DEVICES"]
 
-    for run_name in ("repro_ext_a", "repro_ext_b"):
-        cmd = common + ["--run-name", run_name]
-        completed = subprocess.run(
-            cmd,
-            cwd=repo_root,
-            env=env,
-            text=True,
-            capture_output=True,
+    run_name = "repro_ext_current"
+    cmd = common + ["--run-name", run_name]
+    completed = subprocess.run(
+        cmd,
+        cwd=repo_root,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+    if completed.returncode != 0:
+        raise AssertionError(
+            "External command failed.\n"
+            f"CMD: {' '.join(cmd)}\n"
+            f"STDOUT:\n{completed.stdout}\n"
+            f"STDERR:\n{completed.stderr}"
         )
-        if completed.returncode != 0:
-            raise AssertionError(
-                "External command failed.\n"
-                f"CMD: {' '.join(cmd)}\n"
-                f"STDOUT:\n{completed.stdout}\n"
-                f"STDERR:\n{completed.stderr}"
-            )
 
-    snap_a = _collect_repro_snapshot(output_root / "repro_ext_a", "repro_ext_a")
-    snap_b = _collect_repro_snapshot(output_root / "repro_ext_b", "repro_ext_b")
-
-    assert snap_a == snap_b
+    snapshot = _collect_repro_snapshot(output_root / run_name, run_name)
+    baseline = _load_baseline(baseline_path)
+    _assert_snapshot_matches_baseline(snapshot, baseline)
