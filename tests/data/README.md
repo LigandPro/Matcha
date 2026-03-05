@@ -16,6 +16,18 @@ uv run pytest -n0 tests/test_cli_reproducibility.py::test_cli_matches_committed_
 The external CLI reproducibility test is opt-in and compares the current run
 against a baseline JSON generated from an accepted branch or commit.
 
+Generate baseline JSON from a reference branch:
+
+```bash
+uv run python scripts/generate_repro_baseline.py \
+  --git-ref origin/main \
+  --cuda-visible-devices 7 \
+  --receptor /mnt/ligandpro/db/datasets/posebusters/astex_diverse_set/1N1M_A3M/1N1M_A3M_protein.pdb \
+  --ligand /mnt/ligandpro/db/datasets/posebusters/astex_diverse_set/1N1M_A3M/1N1M_A3M_ligand_start_conf.sdf \
+  --scorer-path /mnt/ligandpro/soft/docking/gnina/run_gnina.sh \
+  --output-json tests/data/repro_baselines/1N1M_A3M_origin_main.json
+```
+
 ```bash
 MATCHA_RUN_EXTERNAL_REPRO_TEST=1 \
 MATCHA_REPRO_CUDA_VISIBLE_DEVICES=7 \
