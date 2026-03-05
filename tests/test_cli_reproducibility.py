@@ -180,6 +180,7 @@ def _run_local_cli_repro_case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r
     monkeypatch.setattr("matcha.utils.esm_utils.compute_sequences", lambda conf: None)
     monkeypatch.setattr("matcha.utils.esm_utils.compute_esm_embeddings", lambda conf: None)
     monkeypatch.setattr("matcha.utils.inference_utils.run_v2_inference_pipeline", _fake_run_v2_inference_pipeline)
+    monkeypatch.setattr("matcha.utils.inference_utils.compute_fast_filters_from_sdf", lambda *args, **kwargs: None)
     monkeypatch.setattr("matcha.scoring.create_scorer", lambda *args, **kwargs: _FakeScorer())
 
     run_matcha(
