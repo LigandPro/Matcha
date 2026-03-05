@@ -8,6 +8,7 @@ import pytest
 from rdkit import Chem
 
 from matcha.cli import run_matcha
+from matcha.utils.repro_baseline import collect_repro_snapshot, load_baseline_json
 
 
 FIXTURE_ROOT = Path(__file__).resolve().parent / "data" / "complexes" / "1HVY_D16"
@@ -15,61 +16,6 @@ FIXTURE_RECEPTOR = FIXTURE_ROOT / "1HVY_D16_protein.pdb"
 FIXTURE_LIGAND = FIXTURE_ROOT / "1HVY_D16_ligand_start_conf.sdf"
 BASELINE_ROOT = Path(__file__).resolve().parent / "data" / "repro_baselines"
 LOCAL_BASELINE = BASELINE_ROOT / "local_cli_scores_filters_baseline.json"
-
-
-def _extract_pose_scores(sdf_path: Path) -> list[float]:
-    supplier = Chem.SDMolSupplier(str(sdf_path), removeHs=False, sanitize=False)
-    scores: list[float] = []
-    for mol in supplier:
-        if mol is None:
-            scores.append(float("nan"))
-            continue
-        value = None
-        for prop in ("minimizedAffinity", "Affinity", "minimizedCNNscore", "CNNscore"):
-            if mol.HasProp(prop):
-                try:
-                    value = float(mol.GetProp(prop))
-                    break
-                except (TypeError, ValueError):
-                    continue
-        if value is None:
-            raise AssertionError(f"No score property found in {sdf_path}")
-        scores.append(value)
-    return scores
-
-
-def _read_first_score(sdf_path: Path) -> float:
-    values = _extract_pose_scores(sdf_path)
-    if not values:
-        raise AssertionError(f"No poses in {sdf_path}")
-    return values[0]
-
-
-def _collect_repro_snapshot(run_dir: Path, run_name: str) -> dict:
-    any_conf_dir = run_dir / "work" / "runs" / run_name / "any_conf"
-    scored_path = any_conf_dir / "scored_sdf_predictions" / f"{run_name}.sdf"
-    best_scored_path = any_conf_dir / "best_scored_predictions" / f"{run_name}.sdf"
-    filters_path = any_conf_dir / "filters_results_minimized.json"
-
-    assert scored_path.exists(), f"Missing scored SDF: {scored_path}"
-    assert best_scored_path.exists(), f"Missing best scored SDF: {best_scored_path}"
-    assert filters_path.exists(), f"Missing filters JSON: {filters_path}"
-
-    with open(filters_path, encoding="utf-8") as f:
-        filters_all = json.load(f)
-
-    uid = next(iter(filters_all.keys()))
-    return {
-        "scores": _extract_pose_scores(scored_path),
-        "best_score": _read_first_score(best_scored_path),
-        "filters": filters_all[uid],
-    }
-
-
-def _load_baseline(path: Path) -> dict:
-    with open(path, encoding="utf-8") as f:
-        return json.load(f)
-
 
 def _assert_snapshot_matches_baseline(snapshot: dict, baseline: dict) -> None:
     assert snapshot["scores"] == baseline["scores"]
@@ -271,14 +217,14 @@ def _run_local_cli_repro_case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r
         num_dataloader_workers=0,
     )
 
-    return _collect_repro_snapshot(output_root / run_name, run_name)
+    return collect_repro_snapshot(output_root / run_name, run_name)
 
 
 def test_cli_matches_committed_baseline_for_scores_and_filters(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
     snapshot = _run_local_cli_repro_case(tmp_path / "run1", monkeypatch, "repro_case")
-    baseline = _load_baseline(LOCAL_BASELINE)
+    baseline = load_baseline_json(LOCAL_BASELINE)
 
     _assert_snapshot_matches_baseline(snapshot, baseline)
 
@@ -334,6 +280,6 @@ def test_cli_external_matches_baseline_with_real_assets(tmp_path: Path):
             f"STDERR:\n{completed.stderr}"
         )
 
-    snapshot = _collect_repro_snapshot(output_root / run_name, run_name)
-    baseline = _load_baseline(baseline_path)
+    snapshot = collect_repro_snapshot(output_root / run_name, run_name)
+    baseline = load_baseline_json(baseline_path)
     _assert_snapshot_matches_baseline(snapshot, baseline)
