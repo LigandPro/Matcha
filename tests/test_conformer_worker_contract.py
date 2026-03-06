@@ -1,5 +1,8 @@
 import json
+import multiprocessing
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -7,12 +10,23 @@ import pytest
 from rdkit import Chem
 from rdkit.Chem import AllChem
 
-from matcha.utils.preprocessing import generate_conformer_mols_batch
+from matcha.utils.preprocessing import (
+    _auto_setup_worker_once,
+    _worker_setup_file_lock,
+    generate_conformer_mols_batch,
+)
 
 
 def _arg_value(cmd: list[str], flag: str) -> str:
     idx = cmd.index(flag)
     return cmd[idx + 1]
+
+
+def _hold_worker_lock(lock_path: str, shared_state, hold_seconds: float):
+    with _worker_setup_file_lock(Path(lock_path)):
+        shared_state.append(("enter", time.time()))
+        time.sleep(hold_seconds)
+        shared_state.append(("exit", time.time()))
 
 
 def _write_mock_worker_outputs(cmd: list[str], confs_per_mol: int = 2):
@@ -136,3 +150,84 @@ def test_auto_backend_falls_back_when_worker_returns_invalid_sdf(monkeypatch):
     assert out_mol.GetNumConformers() == 1
     coords = out_mol.GetConformer(0).GetPositions()
     assert np.isfinite(coords).all()
+
+
+def test_auto_setup_worker_once_reuses_successful_setup(monkeypatch, tmp_path):
+    state = {"ready": False, "calls": 0}
+
+    def fake_worker_command_configured():
+        return state["ready"]
+
+    def fake_run(cmd, cwd, check, capture_output, text, timeout):
+        state["calls"] += 1
+        time.sleep(0.1)
+        state["ready"] = True
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr("matcha.utils.preprocessing._WORKER_AUTO_SETUP_ATTEMPTED", False)
+    monkeypatch.setattr("matcha.utils.preprocessing._WORKER_AUTO_SETUP_SUCCEEDED", False)
+    monkeypatch.setattr("matcha.utils.preprocessing._worker_command_configured", fake_worker_command_configured)
+    monkeypatch.setattr("matcha.utils.preprocessing.subprocess.run", fake_run)
+    monkeypatch.setattr("matcha.utils.preprocessing._env_flag", lambda *args, **kwargs: True)
+    monkeypatch.setattr("matcha.utils.preprocessing.shutil.which", lambda name: "/usr/bin/uv")
+    monkeypatch.setenv("MATCHA_CONFORMER_AUTO_SETUP_WORKER", "1")
+
+    repo_root = tmp_path / "repo"
+    setup_script = repo_root / "scripts" / "setup_nvmolkit_worker.py"
+    setup_script.parent.mkdir(parents=True, exist_ok=True)
+    setup_script.write_text("print('ok')\n", encoding="utf-8")
+
+    original_resolve = Path.resolve
+
+    def fake_resolve(path_self, *args, **kwargs):
+        if path_self.name == "preprocessing.py":
+            return repo_root / "matcha" / "utils" / "preprocessing.py"
+        return original_resolve(path_self, *args, **kwargs)
+
+    monkeypatch.setattr("pathlib.Path.resolve", fake_resolve)
+
+    results = []
+
+    def run_setup():
+        results.append(_auto_setup_worker_once())
+
+    threads = [threading.Thread(target=run_setup) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert results == [True, True]
+    assert state["calls"] == 1
+
+
+def test_worker_setup_file_lock_excludes_other_processes(tmp_path):
+    lock_path = tmp_path / "worker.setup.lock"
+    manager = multiprocessing.Manager()
+    events = manager.list()
+
+    processes = [
+        multiprocessing.Process(target=_hold_worker_lock, args=(str(lock_path), events, 0.2)),
+        multiprocessing.Process(target=_hold_worker_lock, args=(str(lock_path), events, 0.2)),
+    ]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=5)
+        assert process.exitcode == 0
+
+    event_list = list(events)
+    assert len(event_list) == 4
+
+    intervals = []
+    current_start = None
+    for event_type, timestamp in event_list:
+        if event_type == "enter":
+            current_start = timestamp
+        else:
+            intervals.append((current_start, timestamp))
+            current_start = None
+
+    assert len(intervals) == 2
+    intervals.sort()
+    assert intervals[1][0] >= intervals[0][1]

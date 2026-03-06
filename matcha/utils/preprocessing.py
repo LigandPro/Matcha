@@ -7,6 +7,8 @@ import subprocess
 import tempfile
 import threading
 import time
+from contextlib import contextmanager
+import fcntl
 from queue import Queue
 from pathlib import Path
 
@@ -283,21 +285,30 @@ def _env_flag(name: str, default: bool) -> bool:
     return default
 
 
+@contextmanager
+def _worker_setup_file_lock(lock_path: Path):
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "a+", encoding="utf-8") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+
 def _auto_setup_worker_once() -> bool:
     global _WORKER_AUTO_SETUP_ATTEMPTED, _WORKER_AUTO_SETUP_SUCCEEDED
 
     with _WORKER_AUTO_SETUP_LOCK:
         if _WORKER_AUTO_SETUP_SUCCEEDED:
             return True
-        if _WORKER_AUTO_SETUP_ATTEMPTED:
-            return False
-        _WORKER_AUTO_SETUP_ATTEMPTED = True
 
         if not _env_flag("MATCHA_CONFORMER_AUTO_SETUP_WORKER", True):
             logger.info("Conformer worker auto-setup is disabled by MATCHA_CONFORMER_AUTO_SETUP_WORKER")
             return False
 
         repo_root = Path(__file__).resolve().parents[2]
+        worker_lock_path = repo_root / ".venv-nvmolkit-worker.setup.lock"
         setup_script = repo_root / "scripts" / "setup_nvmolkit_worker.py"
         if not setup_script.exists():
             logger.warning(f"Worker setup script not found: {setup_script}")
@@ -307,49 +318,57 @@ def _auto_setup_worker_once() -> bool:
             logger.warning("Cannot auto-setup conformer worker because `uv` is not in PATH")
             return False
 
-        setup_timeout_sec = _get_env_int("MATCHA_CONFORMER_WORKER_SETUP_TIMEOUT_SEC", 3600)
-        cmd = ["uv", "run", "python", str(setup_script), "--skip-smoke"]
-        logger.info(
-            "Conformer worker is not installed; running automatic setup "
-            "(set MATCHA_CONFORMER_AUTO_SETUP_WORKER=0 to disable)"
-        )
+        with _worker_setup_file_lock(worker_lock_path):
+            if _WORKER_AUTO_SETUP_SUCCEEDED or _worker_command_configured():
+                _WORKER_AUTO_SETUP_SUCCEEDED = True
+                return True
+            if _WORKER_AUTO_SETUP_ATTEMPTED:
+                return False
+            _WORKER_AUTO_SETUP_ATTEMPTED = True
 
-        try:
-            proc = subprocess.run(
-                cmd,
-                cwd=str(repo_root),
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=setup_timeout_sec,
+            setup_timeout_sec = _get_env_int("MATCHA_CONFORMER_WORKER_SETUP_TIMEOUT_SEC", 3600)
+            cmd = ["uv", "run", "python", str(setup_script), "--skip-smoke"]
+            logger.info(
+                "Conformer worker is not installed; running automatic setup "
+                "(set MATCHA_CONFORMER_AUTO_SETUP_WORKER=0 to disable)"
             )
-        except subprocess.TimeoutExpired:
-            logger.warning(
-                f"Automatic conformer worker setup timed out after {setup_timeout_sec}s; "
-                "falling back to RDKit"
-            )
-            return False
 
-        if proc.returncode != 0:
-            stderr_tail = "\n".join(proc.stderr.strip().splitlines()[-20:])
-            stdout_tail = "\n".join(proc.stdout.strip().splitlines()[-20:])
-            details = stderr_tail or stdout_tail or "setup exited with non-zero status"
-            logger.warning(
-                f"Automatic conformer worker setup failed (code={proc.returncode}); "
-                f"falling back to RDKit.\n{details}"
-            )
-            return False
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    cwd=str(repo_root),
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=setup_timeout_sec,
+                )
+            except subprocess.TimeoutExpired:
+                logger.warning(
+                    f"Automatic conformer worker setup timed out after {setup_timeout_sec}s; "
+                    "falling back to RDKit"
+                )
+                return False
 
-        if not _worker_command_configured():
-            logger.warning(
-                "Automatic conformer worker setup finished but worker command was not found; "
-                "falling back to RDKit"
-            )
-            return False
+            if proc.returncode != 0:
+                stderr_tail = "\n".join(proc.stderr.strip().splitlines()[-20:])
+                stdout_tail = "\n".join(proc.stdout.strip().splitlines()[-20:])
+                details = stderr_tail or stdout_tail or "setup exited with non-zero status"
+                logger.warning(
+                    f"Automatic conformer worker setup failed (code={proc.returncode}); "
+                    f"falling back to RDKit.\n{details}"
+                )
+                return False
 
-        _WORKER_AUTO_SETUP_SUCCEEDED = True
-        logger.info("Automatic conformer worker setup completed successfully")
-        return True
+            if not _worker_command_configured():
+                logger.warning(
+                    "Automatic conformer worker setup finished but worker command was not found; "
+                    "falling back to RDKit"
+                )
+                return False
+
+            _WORKER_AUTO_SETUP_SUCCEEDED = True
+            logger.info("Automatic conformer worker setup completed successfully")
+            return True
 
 
 def _split_single_conformer_mols(mol, num_conformers: int):
