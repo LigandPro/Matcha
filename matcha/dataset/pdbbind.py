@@ -1,6 +1,7 @@
 import torch
 import os
 import copy
+import hashlib
 import re
 import pickle
 import numpy as np
@@ -495,10 +496,7 @@ class PDBBind(Dataset):
 
                     tokenized_aa_sequence = np.array(
                         [self.aa_mapping.get(aa, 0) for aa in id_to_sequence[key]])[:, None]
-                    aa_sequence = np.array([aa for aa in id_to_sequence[key]])
-
-                    if '_superlig' in key_name:
-                        key_name = key_name.split('_superlig')[0]
+                    aa_sequence = np.array(list(id_to_sequence[key]))
                     chain_embeddings_dictlist[key_name].append(embedding)
                     chain_sequences_dictlist[key_name].append(aa_sequence)
                     tokenized_chain_sequences_dictlist[key_name].append(
@@ -519,6 +517,49 @@ class PDBBind(Dataset):
         except Exception as e:
             logger.error(f"Error processing complex: {e}")
             return None
+
+    def _get_receptor_path(self, complex_name):
+        if self.dataset_type in {'pdbbind', 'pdbbind_conf', 'dockgen', 'dockgen_full', 'dockgen_full_conf'}:
+            return os.path.join(self.data_dir, complex_name, f'{complex_name}_protein_processed.pdb')
+        if self.dataset_type.startswith('posebusters') or self.dataset_type.startswith('astex') or \
+                self.dataset_type.startswith('any'):
+            return os.path.join(self.data_dir, complex_name, f'{complex_name}_protein.pdb')
+        raise ValueError(f'Unknown dataset type: {self.dataset_type}')
+
+    @staticmethod
+    def _sha256_file(path):
+        digest = hashlib.sha256()
+        with open(path, 'rb') as handle:
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _complexes_share_single_receptor(self, complex_names):
+        if len(complex_names) <= 1:
+            return True
+
+        try:
+            first_path = self._get_receptor_path(complex_names[0])
+        except ValueError:
+            return False
+
+        if not os.path.exists(first_path):
+            return False
+
+        first_size = os.path.getsize(first_path)
+        first_hash = self._sha256_file(first_path)
+        for complex_name in complex_names[1:]:
+            receptor_path = self._get_receptor_path(complex_name)
+            if not os.path.exists(receptor_path):
+                return False
+            if os.path.getsize(receptor_path) != first_size:
+                return False
+            if self._sha256_file(receptor_path) != first_hash:
+                return False
+        return True
 
     def _preprocess_and_save_to_cache(self):
         if self.split_path is not None and os.path.exists(self.split_path):
@@ -590,6 +631,7 @@ class PDBBind(Dataset):
             and self.use_all_chains
             and (self.split_path is None)
             and (self.dataset_type.startswith('any'))
+            and self._complexes_share_single_receptor(complex_names_all)
         )
 
         if fast_single_receptor_mode:
