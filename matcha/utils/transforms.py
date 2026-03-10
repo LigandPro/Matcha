@@ -3,7 +3,7 @@ import torch
 
 
 class RigidAlignmentError(RuntimeError):
-    """Fatal rigid-alignment failure that should abort the current run."""
+    """Rigid-alignment failure for a single ligand sample."""
 
 
 def compute_batch_ligand_centers(batch):
@@ -304,12 +304,12 @@ def find_rigid_alignment(pos_a, pos_b):
     if isinstance(pos_a, torch.Tensor):
         if not torch.isfinite(pos_a).all() or not torch.isfinite(pos_b).all():
             raise RigidAlignmentError(
-                "Rigid alignment received non-finite tensor coordinates; aborting current target."
+                "Rigid alignment received non-finite tensor coordinates"
             )
     else:
         if not np.isfinite(pos_a).all() or not np.isfinite(pos_b).all():
             raise RigidAlignmentError(
-                "Rigid alignment received non-finite numpy coordinates; aborting current target."
+                "Rigid alignment received non-finite numpy coordinates"
             )
 
     a_centered = pos_a - a_mean
