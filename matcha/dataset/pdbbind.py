@@ -166,7 +166,9 @@ def set_ligand_data_from_preds(ligand: Ligand, name: str):
 
     Returns:
     -------
-    None
+    bool
+        True when stage-3 predicted transforms are applied successfully.
+        False when the ligand falls back to predicted-translation-only init.
     """
     true_pos = np.copy(ligand.orig_pos)
     pred_pos = np.copy(ligand.predicted_pos)
@@ -195,9 +197,14 @@ def set_ligand_data_from_preds(ligand: Ligand, name: str):
     try:
         rot_align, _ = find_rigid_alignment(pos_new, true_pos)
     except RigidAlignmentError as exc:
-        raise RigidAlignmentError(
-            f"Rigid alignment failed for predicted transforms target {name}: {exc}"
-        ) from exc
+        logger.warning(
+            "Skipping stage-3 rigid alignment for ligand %s: %s. "
+            "Falling back to predicted-translation-only initialization.",
+            name,
+            exc,
+        )
+        randomize_ligand_with_preds(ligand, with_preds=True)
+        return False
 
     ligand.init_tr = ligand.pred_tr.reshape(1, 3)
     ligand.final_rot = rot_align[None, :, :]
@@ -209,6 +216,7 @@ def set_ligand_data_from_preds(ligand: Ligand, name: str):
     if ligand.rmsd is None:
         ligand.rmsd = torch.zeros(1)
     ligand.stage_num = torch.tensor([3])
+    return True
 
 
 def randomize_complex(complex: Complex, std_protein_pos: float,
