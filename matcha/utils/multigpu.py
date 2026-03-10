@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 import os
 import shlex
@@ -82,11 +83,33 @@ def _link_or_copy_overwrite(src: Path, dst: Path) -> None:
         shutil.copy2(src, dst)
 
 
+def _remove_tree_if_exists(path: Path, *, retries: int = 3, delay_sec: float = 0.2) -> None:
+    if not path.exists():
+        return
+
+    last_error: OSError | None = None
+    for attempt in range(retries):
+        try:
+            shutil.rmtree(path)
+            return
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            last_error = exc
+            if exc.errno != errno.ENOTEMPTY or attempt == retries - 1:
+                raise
+            time.sleep(delay_sec)
+
+    if last_error is not None:
+        raise last_error
+
+
 def materialize_shards(sharded_files: list[list[Path]], target_dir: Path) -> list[Path]:
     target_dir.mkdir(parents=True, exist_ok=True)
     shard_dirs: list[Path] = []
     for shard_idx, shard_files in enumerate(sharded_files):
         shard_dir = target_dir / f"shard_{shard_idx:02d}"
+        _remove_tree_if_exists(shard_dir)
         shard_dir.mkdir(parents=True, exist_ok=True)
         for file_idx, src in enumerate(shard_files):
             dst = shard_dir / f"{file_idx:05d}__{src.name}"
