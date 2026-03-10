@@ -19,7 +19,12 @@ from matcha.utils.preprocessing import (parse_receptor, read_pdbbind_mols,
                                           read_molecule, generate_conformer_mols, generate_conformer_mols_batch, read_sdf_with_multiple_confs)
 from matcha.utils.bond_processing import get_rotatable_and_nonrotatable_bonds, split_molecule
 from matcha.utils.transforms import (
-    apply_tor_changes_to_pos, get_torsion_angles, find_rigid_alignment, get_bond_properties_for_angles)
+    RigidAlignmentError,
+    apply_tor_changes_to_pos,
+    get_torsion_angles,
+    find_rigid_alignment,
+    get_bond_properties_for_angles,
+)
 from matcha.utils.log import get_logger
 
 logger = get_logger(__name__)
@@ -187,7 +192,12 @@ def set_ligand_data_from_preds(ligand: Ligand, name: str):
         pos_new = np.copy(pred_pos)
 
     # compute tr and rot alignment
-    rot_align, _ = find_rigid_alignment(pos_new, true_pos)
+    try:
+        rot_align, _ = find_rigid_alignment(pos_new, true_pos)
+    except RigidAlignmentError as exc:
+        raise RigidAlignmentError(
+            f"Rigid alignment failed for predicted transforms target {name}: {exc}"
+        ) from exc
 
     ligand.init_tr = ligand.pred_tr.reshape(1, 3)
     ligand.final_rot = rot_align[None, :, :]

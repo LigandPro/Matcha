@@ -10,7 +10,7 @@ from tqdm import tqdm
 from matcha.utils.log import get_logger
 from matcha.utils.rotation import expm_SO3
 from matcha.utils.transforms import (apply_tr_rot_changes_to_batch_inplace, apply_tor_changes_to_batch_inplace,
-                                       get_torsion_angles, find_rigid_alignment)
+                                       get_torsion_angles, find_rigid_alignment, RigidAlignmentError)
 
 logger = get_logger(__name__)
 
@@ -152,7 +152,12 @@ def run_evaluation(
                 pos_pred = aligned_batch.ligand.pos[i, :optimized.ligand.num_atoms[i]]
                 pos_true = optimized.ligand.pos[i, :optimized.ligand.num_atoms[i]]
 
-                rot, tr = find_rigid_alignment(pos_pred, pos_true)
+                try:
+                    rot, tr = find_rigid_alignment(pos_pred, pos_true)
+                except RigidAlignmentError as exc:
+                    raise RigidAlignmentError(
+                        f"Rigid alignment failed for inference target {batch.names[i]}: {exc}"
+                    ) from exc
                 tr_aligned[i] = tr
                 rot_aligned[i] = rot
 
