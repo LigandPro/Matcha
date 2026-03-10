@@ -2,11 +2,13 @@ import json
 import os
 import subprocess
 from pathlib import Path
+import errno
 
 import numpy as np
 import pytest
 from rdkit import Chem
 
+from matcha import cli
 from matcha.cli import run_matcha
 from matcha.utils.repro_baseline import collect_repro_snapshot, load_baseline_json
 
@@ -228,6 +230,96 @@ def test_cli_matches_committed_baseline_for_scores_and_filters(
     baseline = load_baseline_json(LOCAL_BASELINE)
 
     _assert_snapshot_matches_baseline(snapshot, baseline)
+
+
+def test_prepare_batch_dataset_cleans_existing_sample_dir(tmp_path: Path):
+    dataset_dir = tmp_path / "datasets" / "any_conf"
+    sample_dir = dataset_dir / "ligand_a"
+    sample_dir.mkdir(parents=True, exist_ok=True)
+    stale_file = sample_dir / "stale.txt"
+    stale_file.write_text("old", encoding="utf-8")
+
+    supplier = Chem.SDMolSupplier(str(FIXTURE_LIGAND), removeHs=False, sanitize=False)
+    mol = next((item for item in supplier if item is not None), None)
+    assert mol is not None
+
+    uids = cli._prepare_batch_dataset(FIXTURE_RECEPTOR, [("ligand_a", mol)], dataset_dir)
+
+    assert uids == ["ligand_a"]
+    assert not stale_file.exists()
+    assert (sample_dir / "ligand_a_ligand.sdf").exists()
+    assert (sample_dir / "ligand_a_protein.pdb").exists()
+
+
+def test_run_matcha_overwrite_retries_directory_not_empty(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    checkpoints = _prepare_fake_checkpoints(tmp_path)
+    output_root = tmp_path / "out"
+    run_name = "retry_overwrite"
+    stale_run_dir = output_root / run_name
+    stale_run_dir.mkdir(parents=True, exist_ok=True)
+    (stale_run_dir / "old.txt").write_text("stale", encoding="utf-8")
+
+    fake_scorer_script = tmp_path / "fake_scorer.sh"
+    fake_scorer_script.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    fake_scorer_script.chmod(0o755)
+
+    monkeypatch.setattr("matcha.utils.esm_utils.compute_sequences", lambda conf: None)
+    monkeypatch.setattr("matcha.utils.esm_utils.compute_esm_embeddings", lambda conf: None)
+    monkeypatch.setattr("matcha.utils.inference_utils.run_v2_inference_pipeline", _fake_run_v2_inference_pipeline)
+    monkeypatch.setattr("matcha.utils.inference_utils.compute_fast_filters_from_sdf", lambda *args, **kwargs: None)
+    monkeypatch.setattr("matcha.scoring.create_scorer", lambda *args, **kwargs: _FakeScorer())
+
+    real_rmtree = cli.shutil.rmtree
+    calls = {"n": 0}
+
+    def flaky_rmtree(path, *args, **kwargs):
+        calls["n"] += 1
+        if Path(path) == stale_run_dir and calls["n"] == 1:
+            raise OSError(errno.ENOTEMPTY, "Directory not empty", "any_conf")
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(cli.shutil, "rmtree", flaky_rmtree)
+    monkeypatch.setattr(cli.time, "sleep", lambda _seconds: None)
+
+    run_matcha(
+        receptor=FIXTURE_RECEPTOR,
+        ligand=FIXTURE_LIGAND,
+        ligand_dir=None,
+        out=output_root,
+        checkpoints=checkpoints,
+        config=None,
+        workdir=None,
+        center_x=None,
+        center_y=None,
+        center_z=None,
+        autobox_ligand=None,
+        box_json=None,
+        run_name=run_name,
+        n_samples=4,
+        n_confs=None,
+        device="cpu",
+        gpus=None,
+        overwrite=True,
+        keep_workdir=True,
+        log=None,
+        docking_batch_limit=15000,
+        recursive=True,
+        num_workers=0,
+        pin_memory=False,
+        prefetch_factor=2,
+        persistent_workers=False,
+        scorer_type="custom",
+        scorer_path=fake_scorer_script,
+        scorer_minimize=True,
+        gnina_batch_mode="combined",
+        physical_only=False,
+        num_dataloader_workers=0,
+    )
+
+    assert calls["n"] >= 2
+    assert (output_root / run_name / f"{run_name}_best.sdf").exists()
 
 
 @pytest.mark.skipif(os.getenv("MATCHA_RUN_EXTERNAL_REPRO_TEST") != "1", reason="external repro test is opt-in")

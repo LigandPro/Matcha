@@ -6,6 +6,7 @@ Example:
 from __future__ import annotations
 
 import copy
+import errno
 import json
 import os
 import shutil
@@ -74,6 +75,27 @@ def _write_json(path: Path, payload: dict) -> None:
         json.dump(payload, f, indent=2)
 
 
+def _remove_tree_if_exists(path: Path, *, retries: int = 3, delay_sec: float = 0.2) -> None:
+    if not path.exists():
+        return
+
+    last_error: OSError | None = None
+    for attempt in range(retries):
+        try:
+            shutil.rmtree(path)
+            return
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            last_error = exc
+            if exc.errno != errno.ENOTEMPTY or attempt == retries - 1:
+                raise
+            time.sleep(delay_sec)
+
+    if last_error is not None:
+        raise last_error
+
+
 def _normalize_ligand(src: Path, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     suffix = src.suffix.lower()
@@ -109,6 +131,7 @@ def _prepare_singleton_dataset(
     uid: str,
 ) -> None:
     sample_dir = dataset_dir / uid
+    _remove_tree_if_exists(sample_dir)
     sample_dir.mkdir(parents=True, exist_ok=True)
 
     receptor_dest = sample_dir / f"{uid}_protein.pdb"
@@ -164,6 +187,7 @@ def _prepare_batch_dataset(
         uid_counts[base_uid] = seen + 1
         uid = base_uid if seen == 0 else f"{base_uid}_{seen}"
         sample_dir = dataset_dir / uid
+        _remove_tree_if_exists(sample_dir)
         sample_dir.mkdir(parents=True, exist_ok=True)
         # Avoid copying the same receptor hundreds of times in batch mode.
         # A symlink keeps a single underlying file and enables downstream caching.
@@ -447,7 +471,7 @@ def run_matcha(
     run_workdir = base_workdir / run_name
     if run_workdir.exists():
         if overwrite:
-            shutil.rmtree(run_workdir)
+            _remove_tree_if_exists(run_workdir)
         else:
             raise typer.BadParameter(
                 f"Working directory {run_workdir} already exists. Use --overwrite or change --run-name."
@@ -996,7 +1020,7 @@ def run_matcha(
         console.print("")
 
         if not keep_workdir:
-            shutil.rmtree(work_dir, ignore_errors=True)
+            _remove_tree_if_exists(work_dir)
             console.print(f"[bold green][matcha][/bold green] cleaned workdir {work_dir}")
         else:
             console.print(f"[bold green][matcha][/bold green] keeping workdir at {work_dir}")
@@ -1154,7 +1178,7 @@ def run_matcha(
     console.print("")
 
     if not keep_workdir:
-        shutil.rmtree(work_dir, ignore_errors=True)
+        _remove_tree_if_exists(work_dir)
         console.print(f"[bold green][matcha][/bold green] cleaned workdir {work_dir}")
     else:
         console.print(f"[bold green][matcha][/bold green] keeping workdir at {work_dir}")
