@@ -19,7 +19,12 @@ from matcha.utils.preprocessing import (parse_receptor, read_pdbbind_mols,
                                           read_molecule, generate_conformer_mols, generate_conformer_mols_batch, read_sdf_with_multiple_confs)
 from matcha.utils.bond_processing import get_rotatable_and_nonrotatable_bonds, split_molecule
 from matcha.utils.transforms import (
-    apply_tor_changes_to_pos, get_torsion_angles, find_rigid_alignment, get_bond_properties_for_angles)
+    RigidAlignmentError,
+    apply_tor_changes_to_pos,
+    get_torsion_angles,
+    find_rigid_alignment,
+    get_bond_properties_for_angles,
+)
 from matcha.utils.log import get_logger
 
 logger = get_logger(__name__)
@@ -161,7 +166,9 @@ def set_ligand_data_from_preds(ligand: Ligand, name: str):
 
     Returns:
     -------
-    None
+    bool
+        True when stage-3 predicted transforms are applied successfully.
+        False when the ligand falls back to predicted-translation-only init.
     """
     true_pos = np.copy(ligand.orig_pos)
     pred_pos = np.copy(ligand.predicted_pos)
@@ -187,7 +194,17 @@ def set_ligand_data_from_preds(ligand: Ligand, name: str):
         pos_new = np.copy(pred_pos)
 
     # compute tr and rot alignment
-    rot_align, _ = find_rigid_alignment(pos_new, true_pos)
+    try:
+        rot_align, _ = find_rigid_alignment(pos_new, true_pos)
+    except RigidAlignmentError as exc:
+        logger.warning(
+            "Skipping stage-3 rigid alignment for ligand %s: %s. "
+            "Falling back to predicted-translation-only initialization.",
+            name,
+            exc,
+        )
+        randomize_ligand_with_preds(ligand, with_preds=True)
+        return False
 
     ligand.init_tr = ligand.pred_tr.reshape(1, 3)
     ligand.final_rot = rot_align[None, :, :]
@@ -199,6 +216,7 @@ def set_ligand_data_from_preds(ligand: Ligand, name: str):
     if ligand.rmsd is None:
         ligand.rmsd = torch.zeros(1)
     ligand.stage_num = torch.tensor([3])
+    return True
 
 
 def randomize_complex(complex: Complex, std_protein_pos: float,

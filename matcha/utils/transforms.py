@@ -2,6 +2,10 @@ import numpy as np
 import torch
 
 
+class RigidAlignmentError(RuntimeError):
+    """Rigid-alignment failure for a single ligand sample."""
+
+
 def compute_batch_ligand_centers(batch):
     """
     Compute the mean positions of ligands in a batch.
@@ -299,39 +303,35 @@ def find_rigid_alignment(pos_a, pos_b):
 
     if isinstance(pos_a, torch.Tensor):
         if not torch.isfinite(pos_a).all() or not torch.isfinite(pos_b).all():
-            return torch.eye(3, device=pos_a.device, dtype=pos_a.dtype), torch.nan_to_num(b_mean)
+            raise RigidAlignmentError(
+                "Rigid alignment received non-finite tensor coordinates"
+            )
     else:
         if not np.isfinite(pos_a).all() or not np.isfinite(pos_b).all():
-            return np.eye(3, dtype=np.float32), np.nan_to_num(b_mean).astype(np.float32)
+            raise RigidAlignmentError(
+                "Rigid alignment received non-finite numpy coordinates"
+            )
 
     a_centered = pos_a - a_mean
     b_centered = pos_b - b_mean
     # Covariance matrix
     cov_mat = a_centered.T @ b_centered
     if isinstance(pos_a, torch.Tensor):
-        svd_error = None
-        for _ in range(2):
-            try:
-                U, _, Vt = torch.linalg.svd(cov_mat)
-                svd_error = None
-                break
-            except RuntimeError as exc:
-                svd_error = exc
-        if svd_error is not None:
-            return torch.eye(3, device=pos_a.device, dtype=pos_a.dtype), b_mean
+        try:
+            U, _, Vt = torch.linalg.svd(cov_mat)
+        except RuntimeError as exc:
+            raise RigidAlignmentError(
+                f"Rigid alignment SVD failed for tensor input: {exc}"
+            ) from exc
         V = Vt.T
         det = torch.linalg.det(V @ U.T)
     else:
-        svd_error = None
-        for _ in range(2):
-            try:
-                U, _, Vt = np.linalg.svd(cov_mat)
-                svd_error = None
-                break
-            except np.linalg.LinAlgError as exc:
-                svd_error = exc
-        if svd_error is not None:
-            return np.eye(3, dtype=np.float32), b_mean.astype(np.float32)
+        try:
+            U, _, Vt = np.linalg.svd(cov_mat)
+        except np.linalg.LinAlgError as exc:
+            raise RigidAlignmentError(
+                f"Rigid alignment SVD failed for numpy input: {exc}"
+            ) from exc
         V = Vt.T
         det = np.linalg.det(V @ U.T)
 

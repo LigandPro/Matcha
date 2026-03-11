@@ -10,7 +10,7 @@ from tqdm import tqdm
 from matcha.utils.log import get_logger
 from matcha.utils.rotation import expm_SO3
 from matcha.utils.transforms import (apply_tr_rot_changes_to_batch_inplace, apply_tor_changes_to_batch_inplace,
-                                       get_torsion_angles, find_rigid_alignment)
+                                       get_torsion_angles, find_rigid_alignment, RigidAlignmentError)
 
 logger = get_logger(__name__)
 
@@ -134,6 +134,7 @@ def run_evaluation(
             optimized.ligand.pos[elem_idx, num_atoms:] = 0.
 
         # Alignment process
+        failed_alignment_indices = set()
         if tr_agg is None or R_agg is None or tor_agg is None:
             tr_agg = torch.zeros(batch_size, 3, device=device)
             R_agg = torch.eye(3, device=device).repeat(batch_size, 1, 1)
@@ -152,7 +153,16 @@ def run_evaluation(
                 pos_pred = aligned_batch.ligand.pos[i, :optimized.ligand.num_atoms[i]]
                 pos_true = optimized.ligand.pos[i, :optimized.ligand.num_atoms[i]]
 
-                rot, tr = find_rigid_alignment(pos_pred, pos_true)
+                try:
+                    rot, tr = find_rigid_alignment(pos_pred, pos_true)
+                except RigidAlignmentError as exc:
+                    logger.warning(
+                        "Skipping ligand %s after rigid alignment failure: %s",
+                        batch.names[i],
+                        exc,
+                    )
+                    failed_alignment_indices.add(i)
+                    continue
                 tr_aligned[i] = tr
                 rot_aligned[i] = rot
 
@@ -174,6 +184,9 @@ def run_evaluation(
 
         for full_idx, name in enumerate(all_names):
             sample_idx = full_idx % len(batch.names)
+            metrics_dict.setdefault(name, [])
+            if sample_idx in failed_alignment_indices:
+                continue
             complex_metrics = {}
             complex_metrics['orig_pos_before_augm'] = optimized.ligand.orig_pos_before_augm[sample_idx, :optimized.ligand.num_atoms[sample_idx]].cpu().numpy()
             complex_metrics['transformed_orig'] = transformed_orig[full_idx, :optimized.ligand.num_atoms[sample_idx]].cpu().numpy()
@@ -200,7 +213,7 @@ def run_evaluation(
                 )
                 complex_metrics['torsion_angles_pred'] = torsion_angles_pred.cpu().numpy()
 
-            metrics_dict.setdefault(name, []).append(complex_metrics)
+            metrics_dict[name].append(complex_metrics)
 
         # Update progress for TUI
         if progress_callback is not None and current_stage is not None:
