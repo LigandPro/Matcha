@@ -1,12 +1,12 @@
 # How to contribute
 
 We welcome contributions from external contributors, and this document
-describes how to merge code changes into Matcha.
+describes how to merge code changes into the LigandPro Matcha repository.
 
 ## Getting Started
 
 * Make sure you have a [GitHub account](https://github.com/signup/free).
-* [Fork](https://help.github.com/articles/fork-a-repo/) this repository on GitHub.
+* [Fork](https://help.github.com/articles/fork-a-repo/) the LigandPro/Matcha repository on GitHub.
 * On your local machine,
   [clone](https://help.github.com/articles/cloning-a-repository/) your fork of
   the repository.
@@ -19,7 +19,7 @@ describes how to merge code changes into Matcha.
   [branch](https://help.github.com/articles/creating-and-deleting-branches-within-your-repository/)
   with the branch name relating to the feature you are going to add.
 * When you are ready for others to examine and comment on your new feature,
-  navigate to your fork of Matcha on GitHub and open a [pull
+  navigate to your fork of LigandPro/Matcha on GitHub and open a [pull
   request](https://help.github.com/articles/using-pull-requests/) (PR). Note that
   after you launch a PR from one of your fork's branches, all
   subsequent commits to that branch will be added to the open pull request
@@ -29,7 +29,7 @@ describes how to merge code changes into Matcha.
 * If you're providing a new feature, you must add test cases and documentation.
 * When the code is ready to go, make sure you run the test suite using pytest.
 * When you're ready to be considered for merging, check the "Ready to go"
-  box on the PR page to let the Matcha maintainers know that the changes are complete.
+  box on the PR page to let the LigandPro maintainers know that the changes are complete.
   The code will not be merged until this box is checked, the continuous
   integration returns checkmarks,
   and multiple core developers give "Approved" reviews.
