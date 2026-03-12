@@ -406,13 +406,20 @@ class PDBBind(Dataset):
 
         self.predicted_ligand_transforms = np.load(
             predicted_ligand_transforms_path, allow_pickle=True)[0]
+        missing_predictions = sum(
+            1
+            for c in self.complexes
+            if c.name in self.predicted_ligand_transforms
+            and len(self.predicted_ligand_transforms[c.name]) == 0
+        )
         self.complexes = [
-            c for c in self.complexes if c.name in self.predicted_ligand_transforms]
+            c for c in self.complexes
+            if c.name in self.predicted_ligand_transforms
+            and len(self.predicted_ligand_transforms[c.name]) > 0
+        ]
         if not self.complexes:
             raise ValueError(
                 f"No complexes found in predicted transforms from {predicted_ligand_transforms_path}")
-        n_preds_to_use_real = min(n_preds_to_use, len(
-            self.predicted_ligand_transforms[self.complexes[0].name]))
 
         # initialize extended complexes
         extended_complexes = []
@@ -421,6 +428,8 @@ class PDBBind(Dataset):
             if complex.name in processed_names:
                 continue
             processed_names.add(complex.name)
+            pred_transforms = self.predicted_ligand_transforms[complex.name]
+            n_preds_to_use_real = min(n_preds_to_use, len(pred_transforms))
             for i in range(n_preds_to_use_real):
                 # Avoid copying the (large) protein object for every sample.
                 # This significantly reduces CPU memory use for batched inference
@@ -431,7 +440,7 @@ class PDBBind(Dataset):
                     protein=complex.protein,
                     original_augm_rot=complex.original_augm_rot,
                 )
-                pred_data = self.predicted_ligand_transforms[complex.name][i]
+                pred_data = pred_transforms[i]
                 extended_complex.ligand.pred_tr = pred_data['tr_pred_init'] + \
                     pred_data['full_protein_center'] - \
                     extended_complex.protein.full_protein_center
@@ -444,6 +453,12 @@ class PDBBind(Dataset):
                     extended_complex.ligand.predicted_pos = pred_pos.astype(np.float32)
 
                 extended_complexes.append(extended_complex)
+        if missing_predictions > 0:
+            logger.warning(
+                "Skipping %d complexes without predicted ligand transforms from %s",
+                missing_predictions,
+                predicted_ligand_transforms_path,
+            )
         self.complexes = extended_complexes
 
     def __len__(self):
