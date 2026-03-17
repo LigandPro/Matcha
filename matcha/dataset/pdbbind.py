@@ -1,12 +1,13 @@
 import torch
 import os
 import copy
+import hashlib
 import re
 import pickle
 import numpy as np
 from deli import load
 from collections import defaultdict
-from typing import List, Optional
+from typing import List
 from torch.utils.data import Dataset
 from rdkit.Chem import RemoveAllHs
 from tqdm import tqdm
@@ -15,8 +16,10 @@ from torch.nn.utils.rnn import pad_sequence
 from matcha.dataset.complex_dataclasses import Ligand, Protein, Complex, LigandBatch, ProteinBatch, ComplexBatch, BondsBatch
 from matcha.utils.preprocessing import (parse_receptor, read_pdbbind_mols,
                                           extract_receptor_structure_prody, lig_atom_featurizer,
-                                          read_molecule, save_multiple_confs, read_sdf_with_multiple_confs)
+                                          read_molecule, generate_conformer_mols, generate_conformer_mols_batch)
 from matcha.utils.bond_processing import get_rotatable_and_nonrotatable_bonds, split_molecule
+from matcha.utils.paths import get_protein_path, get_ligand_path
+
 from matcha.utils.transforms import (
     apply_tor_changes_to_pos, get_torsion_angles, find_rigid_alignment, get_bond_properties_for_angles)
 from matcha.utils.log import get_logger
@@ -58,9 +61,12 @@ def get_ligand_without_randomization(mol_, protein_center=None, parse_rotbonds=T
                 f"No rotatable bonds found for ligand, but still using the molecule.")
 
     ligand = Ligand()
+    if protein_center is not None:
+        protein_center = protein_center.astype(np.float32, copy=False)
     ligand.pos = mol_maybe_noh.GetConformer(0).GetPositions().astype(np.float32) - protein_center
 
-    ligand.orig_mol = mol_maybe_noh
+    ligand.orig_mol = mol_maybe_noh  # original mol
+    # features are conformer-invariant
     try:
         ligand.x = lig_atom_featurizer(mol_maybe_noh)
     except Exception as e:
@@ -208,14 +214,20 @@ def randomize_complex(complex: Complex, std_protein_pos: float,
     apply_random_rotation_inplace(complex)
 
     # Add noise to ESM embeddings
-    complex.protein.x += np.random.normal(0,
-                                          esm_emb_noise_std, complex.protein.x.shape)
+    if esm_emb_noise_std != 0.0:
+        complex.protein.x += np.random.normal(
+            0, esm_emb_noise_std, complex.protein.x.shape
+        ).astype(np.float32)
 
     # Add noise to protein and ligand atom positions
-    complex.protein.pos += np.random.normal(0,
-                                            std_protein_pos, complex.protein.pos.shape)
-    complex.ligand.pos += np.random.normal(0,
-                                           std_lig_pos, complex.ligand.pos.shape)
+    if std_protein_pos != 0.0:
+        complex.protein.pos += np.random.normal(
+            0, std_protein_pos, complex.protein.pos.shape
+        ).astype(np.float32)
+    if std_lig_pos != 0.0:
+        complex.ligand.pos += np.random.normal(
+            0, std_lig_pos, complex.ligand.pos.shape
+        ).astype(np.float32)
 
     # 5. Compute ligand gt values
     complex.set_ground_truth_values()
@@ -251,7 +263,7 @@ class PDBBind(Dataset):
                  predicted_ligand_transforms_path=None, dataset_type='pdbbind',
                  add_all_atom_pos=False,
                  use_predicted_tr_only=True, randomize_bond_neighbors=True,
-                 data_dir_conf=None, is_train_dataset=True,
+                 data_dir_conf=None,
                  n_preds_to_use=1, use_all_chains=False,
                  min_lig_size=7, stage_num=None,
                  n_confs_override=None):
@@ -278,7 +290,6 @@ class PDBBind(Dataset):
         self.add_all_atom_pos = add_all_atom_pos
         self.use_predicted_tr_only = use_predicted_tr_only
         self.randomize_bond_neighbors = randomize_bond_neighbors
-        self.is_train_dataset = is_train_dataset
         self.use_all_chains = use_all_chains
         self.min_lig_size = min_lig_size
         self.stage_num = stage_num
@@ -314,12 +325,6 @@ class PDBBind(Dataset):
             complexes.append(complex)
         self.complexes = complexes
 
-        if self.is_train_dataset:
-            logger.debug(f"Complexes count before filtering: {len(self.complexes)}")
-            self.complexes = [complex for complex in self.complexes if complex.ligand.pos.shape[0] <
-                              150 and complex.ligand.pos.shape[0] > 6 and complex.protein.pos.shape[0] + complex.ligand.pos.shape[0] < 2000]
-            logger.debug(f"Complexes count after filtering: {len(self.complexes)}")
-
         if self.dataset_type.endswith('_conf'):
             self._explode_ligand_conformers(n_preds_to_use)
         else:
@@ -354,9 +359,12 @@ class PDBBind(Dataset):
 
         logger.debug(f"Name2protein length: {len(name2protein)}; complexes length: {len(self.complexes)}")
 
+        new_complexes = []
         for complex in self.complexes:
             if not complex.name.endswith('_conf0'):
                 complex.protein = name2protein[complex.name.split('_conf')[0]]
+            new_complexes.append(complex)
+        self.complexes = new_complexes
 
     def reset_predicted_ligand_transforms(self, predicted_ligand_transforms_path, n_preds_to_use):
         self.use_pred_ligand_transforms = True
@@ -385,7 +393,15 @@ class PDBBind(Dataset):
                 continue
             processed_names.add(complex.name)
             for i in range(n_preds_to_use_real):
-                extended_complex = copy.deepcopy(complex)
+                # Avoid copying the (large) protein object for every sample.
+                # This significantly reduces CPU memory use for batched inference
+                # (e.g., ~600 ligands * ~10 samples).
+                extended_complex = Complex(
+                    name=complex.name,
+                    ligand=copy.deepcopy(complex.ligand),
+                    protein=complex.protein,
+                    original_augm_rot=complex.original_augm_rot,
+                )
                 pred_data = self.predicted_ligand_transforms[complex.name][i]
                 extended_complex.ligand.pred_tr = pred_data['tr_pred_init'] + \
                     pred_data['full_protein_center'] - \
@@ -396,7 +412,7 @@ class PDBBind(Dataset):
                 if not self.use_predicted_tr_only:
                     pred_pos = pred_data['transformed_orig'] + pred_data['full_protein_center'] - \
                         extended_complex.protein.full_protein_center
-                    extended_complex.ligand.predicted_pos = pred_pos
+                    extended_complex.ligand.predicted_pos = pred_pos.astype(np.float32)
 
                 extended_complexes.append(extended_complex)
         self.complexes = extended_complexes
@@ -464,7 +480,6 @@ class PDBBind(Dataset):
                 tokenized_aa_sequence = np.array(
                     [self.aa_mapping.get(aa, 0) for aa in id_to_sequence[key]])[:, None]
                 aa_sequence = np.array(list(id_to_sequence[key]))
-
                 chain_embeddings_dictlist[key_name].append(embedding)
                 chain_sequences_dictlist[key_name].append(aa_sequence)
                 tokenized_chain_sequences_dictlist[key_name].append(
@@ -486,6 +501,41 @@ class PDBBind(Dataset):
             logger.error(f"Error processing complex: {e}")
             return None
 
+    @staticmethod
+    def _sha256_file(path):
+        digest = hashlib.sha256()
+        with open(path, 'rb') as handle:
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _complexes_share_single_receptor(self, complex_names):
+        if len(complex_names) <= 1:
+            return True
+
+        try:
+            first_path = get_protein_path(complex_names[0], self.dataset_name, self.data_dir)
+        except ValueError:
+            return False
+
+        if not os.path.exists(first_path):
+            return False
+
+        first_size = os.path.getsize(first_path)
+        first_hash = self._sha256_file(first_path)
+        for complex_name in complex_names[1:]:
+            receptor_path = get_protein_path(complex_name, self.dataset_name, self.data_dir)
+            if not os.path.exists(receptor_path):
+                return False
+            if os.path.getsize(receptor_path) != first_size:
+                return False
+            if self._sha256_file(receptor_path) != first_hash:
+                return False
+        return True
+
     def _preprocess_and_save_to_cache(self):
         if self.split_path is not None and os.path.exists(self.split_path):
             logger.info(
@@ -505,22 +555,100 @@ class PDBBind(Dataset):
                                                                                                              self.sequences_path,
                                                                                                              complex_names_all)
         self.complexes = []
-        with tqdm(total=len(complex_names_all), desc='Loading complexes') as pbar:
-            for complex_name, lm_embeddings, sequence_chains, tokenized_sequence_chains in zip(complex_names_all,
-                                                                                                lm_embeddings_chains_all,
-                                                                                                sequence_chains_all,
-                                                                                                tokenized_sequence_chains_all):
-                sequences_to_embeddings = {''.join(seq): (emb, tokenized_seq) for seq, emb, tokenized_seq in zip(sequence_chains, lm_embeddings,
-                                                                                                                    tokenized_sequence_chains)}
-                processed_complexes = self._process_complex(
-                    [complex_name], sequences_to_embeddings)
+
+        # Batch conformer generation can dominate preprocessing for large ligand
+        # directories. When running any*_conf datasets in evaluation/CLI mode,
+        # precompute ligand conformers once (optionally with nvMolKit on GPU).
+        self._precomputed_conformer_mols_by_name = None
+        self._precomputed_orig_lig_by_name = None
+        if (
+            self.split_path is None
+            and self.dataset_type.endswith("_conf")
+            and self.n_confs_to_use > 0
+        ):
+            try:
+                names_for_confs = []
+                mols_for_confs = []
+                orig_by_name = {}
+                for name in tqdm(complex_names_all, desc="Reading ligands for conformers"):
+                    lig_path = get_ligand_path(name, self.dataset_name, self.data_dir)
+                    mol = read_molecule(lig_path, remove_hs=False, sanitize=True)
+                    if mol is None:
+                        continue
+                    parts = split_molecule(mol, min_lig_size=self.min_lig_size)
+                    parts = [p for p in parts if p is not None]
+                    if not parts:
+                        continue
+                    orig_by_name[name] = parts[0]
+                    names_for_confs.append(name)
+                    mols_for_confs.append(copy.deepcopy(parts[0]))
+
+                if mols_for_confs:
+                    conf_lists = generate_conformer_mols_batch(
+                        mols_for_confs,
+                        confs_per_mol=self.n_confs_to_use,
+                    )
+                    self._precomputed_conformer_mols_by_name = dict(zip(names_for_confs, conf_lists))
+                    self._precomputed_orig_lig_by_name = orig_by_name
+                    logger.info(f"Precomputed conformers for {len(conf_lists)} ligands")
+            except Exception as e:
+                logger.warning(f"Failed to precompute ligand conformers in batch mode: {e}")
+
+        # Batch docking in CLI mode commonly uses a single receptor replicated across many ligand UIDs
+        # under an "any_conf" folder. In that case we can:
+        #   - build a global sequences->embeddings map once,
+        #   - parse the receptor once,
+        #   - build the protein representation once (when use_all_chains=True),
+        #   - and iterate ligands without repeating expensive protein processing.
+        fast_single_receptor_mode = (
+            self.use_all_chains
+            and (self.split_path is None)
+            and (self.dataset_type.startswith('any'))
+            and self._complexes_share_single_receptor(complex_names_all)
+        )
+
+        if fast_single_receptor_mode:
+            sequences_to_embeddings = {}
+            for sequence_chains, lm_embeddings, tokenized_sequence_chains in zip(
+                sequence_chains_all, lm_embeddings_chains_all, tokenized_sequence_chains_all
+            ):
+                for seq, emb, tokenized_seq in zip(sequence_chains, lm_embeddings, tokenized_sequence_chains):
+                    sequences_to_embeddings[''.join(seq)] = (emb, tokenized_seq)
+
+            with tqdm(total=len(complex_names_all), desc='Loading complexes') as pbar:
+                processed_complexes = self._process_complex(complex_names_all, sequences_to_embeddings)
                 if processed_complexes is not None and len(processed_complexes) > 0:
                     if isinstance(processed_complexes[0], list):
                         processed_complexes = [
-                            complex for complex_list in processed_complexes for complex in complex_list]
+                            complex for complex_list in processed_complexes for complex in complex_list
+                        ]
                     self.complexes += processed_complexes
-                    
-                pbar.update()
+                pbar.update(len(complex_names_all))
+        else:
+            with tqdm(total=len(complex_names_all), desc='Loading complexes') as pbar:
+                for complex_name, lm_embeddings, sequence_chains, tokenized_sequence_chains in zip(
+                    complex_names_all,
+                    lm_embeddings_chains_all,
+                    sequence_chains_all,
+                    tokenized_sequence_chains_all,
+                ):
+                    sequences_to_embeddings = {
+                        ''.join(seq): (emb, tokenized_seq)
+                        for seq, emb, tokenized_seq in zip(sequence_chains, lm_embeddings, tokenized_sequence_chains)
+                    }
+                    processed_complexes = self._process_complex([complex_name], sequences_to_embeddings)
+                    if processed_complexes is not None and len(processed_complexes) > 0:
+                        if isinstance(processed_complexes[0], list):
+                            processed_complexes = [
+                                complex for complex_list in processed_complexes for complex in complex_list
+                            ]
+                        self.complexes += processed_complexes
+
+                    pbar.update()
+
+        # Drop precomputed ligand caches to free memory.
+        self._precomputed_conformer_mols_by_name = None
+        self._precomputed_orig_lig_by_name = None
         # Filter out empty complexes:
         self.complexes = [complex for complex in self.complexes if (
             complex.ligand is not None) and (complex.protein is not None)]
@@ -552,43 +680,93 @@ class PDBBind(Dataset):
             logger.warning(f"Skipping {complex_names[0]} because of error: {e}")
             return [], []
 
+        protein_template = None
+        protein_center = None
+        if (
+            self.use_all_chains
+            and self.dataset_type.startswith('any')
+        ):
+            try:
+                c_alpha_coords_list, lm_embeddings_list, sequences_list, chain_lengths, full_coords, full_atom_names, full_atom_residue_ids = extract_receptor_structure_prody(
+                    rec_model, None, sequences_to_embeddings
+                )
+                if c_alpha_coords_list is not None:
+                    if not self.add_all_atom_pos:
+                        full_coords = None
+                        full_atom_names = None
+                        full_atom_residue_ids = None
+
+                    protein_template = Protein(
+                        x=lm_embeddings_list,
+                        pos=c_alpha_coords_list,
+                        seq=sequences_list,
+                        all_atom_pos=full_coords,
+                        all_atom_names=full_atom_names,
+                        all_atom_residue_ids=full_atom_residue_ids,
+                    )
+                    protein_template.pos = protein_template.pos.astype(np.float32, copy=False)
+                    protein_center = protein_template.pos.mean(axis=0).astype(np.float32).reshape(1, 3)
+                    protein_template.pos -= protein_center
+                    if protein_template.all_atom_pos is not None:
+                        protein_template.all_atom_pos = protein_template.all_atom_pos.astype(np.float32, copy=False)
+                        protein_template.all_atom_pos -= protein_center
+                    protein_template.full_protein_center = protein_center
+                    protein_template.chain_lengths = chain_lengths
+            except Exception as e:
+                logger.warning(f"Failed to build shared protein template: {e}")
+
         complexes = []
         for name in complex_names:
             logger.debug(f"Processing complex: {name}")
+            try:
+                orig_ligs = None
+                if self.dataset_type == 'pdbbind':
+                    ligs = read_pdbbind_mols(self.data_dir, name, remove_hs=False)
+                elif self.dataset_type.endswith('_conf'):
+                    use_precomputed = (
+                        getattr(self, "_precomputed_conformer_mols_by_name", None) is not None
+                        and getattr(self, "_precomputed_orig_lig_by_name", None) is not None
+                        and name in self._precomputed_conformer_mols_by_name
+                        and name in self._precomputed_orig_lig_by_name
+                    )
+                    if use_precomputed:
+                        orig_ligs = [self._precomputed_orig_lig_by_name[name]]
+                        ligs = [self._precomputed_conformer_mols_by_name[name]]
+                    else:
+                        if self.dataset_type == 'pdbbind_conf':
+                            orig_ligs = read_pdbbind_mols(self.data_dir, name, remove_hs=False)
+                        elif self.dataset_type in {'posebusters_conf', 'astex_conf', 'any_conf'}:
+                            orig_ligs = [read_molecule(os.path.join(
+                                self.data_dir, name, f'{name}_ligand.sdf'), remove_hs=False, sanitize=True)]
+                        else:
+                            orig_ligs = [read_molecule(os.path.join(
+                                self.data_dir, name, f'{name}_ligand.pdb'), remove_hs=False, sanitize=True)]
 
-            orig_ligs = None
-            if self.dataset_type == 'pdbbind':
-                ligs = read_pdbbind_mols(self.data_dir, name, remove_hs=False)
-            elif self.dataset_type.endswith('_conf'):
-                if self.dataset_type == 'pdbbind_conf':
-                    orig_ligs = read_pdbbind_mols(self.data_dir, name, remove_hs=False)
-                elif self.dataset_type in ('posebusters_conf', 'astex_conf', 'any_conf'):
-                    orig_ligs = [read_molecule(os.path.join(
+                        orig_ligs = [split_molecule(
+                            lig_mol, min_lig_size=self.min_lig_size) for lig_mol in orig_ligs]
+                        orig_ligs = [
+                            lig_mol for lig_mol_list in orig_ligs for lig_mol in lig_mol_list if lig_mol is not None]
+                        if not orig_ligs:
+                            raise ValueError("No valid ligand molecules after splitting")
+
+                        # Generate conformers in-memory to avoid write->read SDF roundtrip.
+                        # This is a major bottleneck for batch docking (hundreds of ligands).
+                        ligs = [generate_conformer_mols(
+                            copy.deepcopy(orig_ligs[0]),
+                            num_conformers=self.n_confs_to_use,
+                        )]
+
+                elif self.dataset_type in {'dockgen', 'dockgen_full'}:
+                    ligs = [read_molecule(os.path.join(
+                        self.data_dir, name, f'{name}_ligand.pdb'), remove_hs=False, sanitize=True)]
+                elif self.dataset_type in {'astex', 'posebusters', 'any'}:
+                    ligs = [read_molecule(os.path.join(
                         self.data_dir, name, f'{name}_ligand.sdf'), remove_hs=False, sanitize=True)]
                 else:
-                    orig_ligs = [read_molecule(os.path.join(
-                        self.data_dir, name, f'{name}_ligand.pdb'), remove_hs=False, sanitize=True)]
-
-                orig_ligs = [split_molecule(
-                    lig_mol, min_lig_size=self.min_lig_size) for lig_mol in orig_ligs]
-                orig_ligs = [
-                    lig_mol for lig_mol_list in orig_ligs for lig_mol in lig_mol_list if lig_mol is not None]
-
-                fname_with_confs = os.path.join(
-                    self.data_dir_conf, f'{name}_conf.sdf')
-                save_multiple_confs(
-                    copy.deepcopy(orig_ligs[0]), fname_with_confs, num_conformers=self.n_confs_to_use)
-                ligs = [read_sdf_with_multiple_confs(
-                    fname_with_confs, remove_hs=False, sanitize=True)]
-
-            elif self.dataset_type in ('dockgen', 'dockgen_full'):
-                ligs = [read_molecule(os.path.join(
-                    self.data_dir, name, f'{name}_ligand.pdb'), remove_hs=False, sanitize=True)]
-            elif self.dataset_type in ('astex', 'posebusters', 'any'):
-                ligs = [read_molecule(os.path.join(
-                    self.data_dir, name, f'{name}_ligand.sdf'), remove_hs=False, sanitize=True)]
-            else:
-                raise ValueError(f'Unknown dataset type: {self.dataset_type}')
+                    raise ValueError(f'Unknown dataset type: {self.dataset_type}')
+            except Exception as e:
+                logger.error(f"Skipping {name} because of error: {e}")
+                continue
 
             if len(ligs) > 0 and isinstance(ligs[0], list):
                 ligs = [split_molecule(
@@ -611,32 +789,46 @@ class PDBBind(Dataset):
 
                 try:
                     # Process protein:
-                    if self.dataset_type.endswith('_conf'):
-                        c_alpha_coords_list, lm_embeddings_list, sequences_list, chain_lengths, full_coords, full_atom_names, full_atom_residue_ids = extract_receptor_structure_prody(
-                            rec_model, orig_ligs[lig_idx] if not self.use_all_chains else None, sequences_to_embeddings)
+                    if protein_template is not None:
+                        protein = protein_template
+                        current_protein_center = protein_center
                     else:
-                        c_alpha_coords_list, lm_embeddings_list, sequences_list, chain_lengths, full_coords, full_atom_names, full_atom_residue_ids = extract_receptor_structure_prody(
-                            rec_model, lig_mol, sequences_to_embeddings)
+                        if self.dataset_type.endswith('_conf'):
+                            c_alpha_coords_list, lm_embeddings_list, sequences_list, chain_lengths, full_coords, full_atom_names, full_atom_residue_ids = extract_receptor_structure_prody(
+                                rec_model, orig_ligs[lig_idx] if not self.use_all_chains else None, sequences_to_embeddings)
+                        else:
+                            c_alpha_coords_list, lm_embeddings_list, sequences_list, chain_lengths, full_coords, full_atom_names, full_atom_residue_ids = extract_receptor_structure_prody(
+                                rec_model, lig_mol, sequences_to_embeddings)
 
-                    # positions are positions of C-alpha, other positions are not used
-                    if not self.add_all_atom_pos:
-                        full_coords = None
-                        full_atom_names = None
-                        full_atom_residue_ids = None
-                    protein = Protein(x=lm_embeddings_list, pos=c_alpha_coords_list, seq=sequences_list,
-                                      all_atom_pos=full_coords, all_atom_names=full_atom_names, all_atom_residue_ids=full_atom_residue_ids)
-                    protein_center = protein.pos.mean(axis=0).reshape(1, 3)
-                    protein.pos -= protein_center
-                    if protein.all_atom_pos is not None:
-                        protein.all_atom_pos -= protein_center
-                    protein.full_protein_center = protein_center
-                    protein.chain_lengths = chain_lengths
+                        # positions are positions of C-alpha, other positions are not used
+                        if not self.add_all_atom_pos:
+                            full_coords = None
+                            full_atom_names = None
+                            full_atom_residue_ids = None
+                        protein = Protein(
+                            x=lm_embeddings_list,
+                            pos=c_alpha_coords_list,
+                            seq=sequences_list,
+                            all_atom_pos=full_coords,
+                            all_atom_names=full_atom_names,
+                            all_atom_residue_ids=full_atom_residue_ids,
+                        )
+                        protein.pos = protein.pos.astype(np.float32, copy=False)
+                        current_protein_center = protein.pos.mean(axis=0).astype(np.float32).reshape(1, 3)
+                        protein.pos -= current_protein_center
+                        if protein.all_atom_pos is not None:
+                            protein.all_atom_pos = protein.all_atom_pos.astype(np.float32, copy=False)
+                            protein.all_atom_pos -= current_protein_center
+                        protein.full_protein_center = current_protein_center
+                        protein.chain_lengths = chain_lengths
 
                     # Process ligand:
                     parse_rotbonds = True
                     current_complexes = []
                     for conf_id, lig_mol in enumerate(lig_mol_list):
-                        ligand = get_ligand_without_randomization(lig_mol, protein_center, parse_rotbonds=parse_rotbonds)
+                        ligand = get_ligand_without_randomization(
+                            lig_mol, current_protein_center, parse_rotbonds=parse_rotbonds
+                        )
                         if parse_rotbonds:
                             ligand_with_bonds = copy.deepcopy(ligand)
                             cur_ligand = ligand
@@ -651,7 +843,10 @@ class PDBBind(Dataset):
                         complex = Complex()
                         complex.ligand = cur_ligand
                         if conf_id == 0:
-                            complex.protein = copy.deepcopy(protein)
+                            if protein_template is not None:
+                                complex.protein = protein
+                            else:
+                                complex.protein = copy.deepcopy(protein)
                         else:
                             complex.protein = []  # avoid copying protein in cache
 
@@ -803,18 +998,18 @@ def complex_collate_fn(batch: List[Complex]) -> ComplexBatch:
     protein_sequences = [torch.from_numpy(
         complex.protein.seq) for complex in batch]
 
-    init_tr = torch.cat([torch.from_numpy(complex.ligand.init_tr)
+    init_tr = torch.cat([torch.from_numpy(complex.ligand.init_tr).float()
                         for complex in batch])
     init_rot = torch.cat(
-        [torch.from_numpy(complex.ligand.init_rot) for complex in batch])
+        [torch.from_numpy(complex.ligand.init_rot).float() for complex in batch])
     init_tor = torch.cat(
-        [torch.from_numpy(complex.ligand.init_tor) for complex in batch])
+        [torch.from_numpy(complex.ligand.init_tor).float() for complex in batch])
     final_tr = torch.cat(
-        [torch.from_numpy(complex.ligand.final_tr) for complex in batch])
+        [torch.from_numpy(complex.ligand.final_tr).float() for complex in batch])
     final_rot = torch.cat(
-        [torch.from_numpy(complex.ligand.final_rot) for complex in batch])
+        [torch.from_numpy(complex.ligand.final_rot).float() for complex in batch])
     final_tor = torch.cat(
-        [torch.from_numpy(complex.ligand.final_tor) for complex in batch])
+        [torch.from_numpy(complex.ligand.final_tor).float() for complex in batch])
 
     try:
         num_resamples = torch.cat(
@@ -835,6 +1030,24 @@ def complex_collate_fn(batch: List[Complex]) -> ComplexBatch:
     all_atom_residue_ids = [
         torch.from_numpy(complex.protein.all_atom_residue_ids).long() for complex in batch]
 
+    # max_n_residues = max(complex.protein.x.shape[0] for complex in batch)
+    # max_n_atoms_in_residue = max(max(sum(residue_ids == idx) for idx in torch.unique(residue_ids, sorted=True)) for residue_ids in all_atom_residue_ids)
+    # residue_all_atom_names = torch.zeros((len(batch), max_n_residues, max_n_atoms_in_residue), dtype=torch.long)
+    # residue_all_atom_names.fill_(protein_atom_names["padding"])
+    # residue_all_atom_pos = torch.zeros((len(batch), max_n_residues, max_n_atoms_in_residue, 3), dtype=torch.float32)
+    # # Group atoms by residue for each complex
+    # for i, (atom_names, atom_pos, residue_ids) in enumerate(zip(all_atom_names, all_atom_pos, all_atom_residue_ids)):
+    #     unique_residue_ids = torch.unique(residue_ids, sorted=True)
+    #     for j, residue_id in enumerate(unique_residue_ids):
+    #         mask = residue_ids == residue_id
+    #         residue_all_atom_names[i, j, :len(atom_names[mask])] = atom_names[mask]
+    #         residue_all_atom_pos[i, j, :len(atom_pos[mask]), :] = atom_pos[mask]
+
+    # except Exception as e:
+    #     all_atom_pos = None
+    #     all_atom_names = None
+    #     all_atom_residue_ids = None
+
     num_rotatable_bonds = torch.tensor(
         [len(complex.ligand.final_tor) for complex in batch], dtype=torch.long)
     t = torch.cat([complex.ligand.t for complex in batch])
@@ -849,36 +1062,50 @@ def complex_collate_fn(batch: List[Complex]) -> ComplexBatch:
         [complex.ligand.stage_num if complex.ligand.stage_num is not None else torch.tensor([0]) for complex in batch])
     names = [complex.name for complex in batch]
     orig_augm_rot = torch.cat(
-        [torch.from_numpy(complex.original_augm_rot[None, :]) for complex in batch])
+        [torch.from_numpy(complex.original_augm_rot[None, :]).float() for complex in batch])
     full_protein_center = torch.cat(
-        [torch.from_numpy(complex.protein.full_protein_center) for complex in batch])
+        [torch.from_numpy(complex.protein.full_protein_center).float() for complex in batch])
 
     try:
         pred_tr = torch.cat(
-            [torch.from_numpy(complex.ligand.pred_tr) for complex in batch])
+            [torch.from_numpy(complex.ligand.pred_tr).float() for complex in batch])
     except Exception as e:
         pred_tr = None
 
     # Pad ligand sequences
     lig_x_padded = pad_sequence(lig_xs, batch_first=True, padding_value=0.0)
+    if lig_x_padded.dtype == torch.float64:
+        lig_x_padded = lig_x_padded.float()
     lig_pos_padded = pad_sequence(
         lig_positions, batch_first=True, padding_value=0.0)
+    if lig_pos_padded.dtype == torch.float64:
+        lig_pos_padded = lig_pos_padded.float()
     lig_orig_pos_padded = pad_sequence(
         lig_orig_positions, batch_first=True, padding_value=0.0)
+    if lig_orig_pos_padded.dtype == torch.float64:
+        lig_orig_pos_padded = lig_orig_pos_padded.float()
     lig_orig_pos_before_augm_padded = pad_sequence(lig_orig_positions_before_augm,
                                                     batch_first=True, padding_value=0.0)
+    if lig_orig_pos_before_augm_padded.dtype == torch.float64:
+        lig_orig_pos_before_augm_padded = lig_orig_pos_before_augm_padded.float()
 
     try:
         lig_true_pos_padded = pad_sequence(
             lig_true_positions, batch_first=True, padding_value=0.0)
     except Exception as e:
         lig_true_pos_padded = None
+    if lig_true_pos_padded is not None and lig_true_pos_padded.dtype == torch.float64:
+        lig_true_pos_padded = lig_true_pos_padded.float()
 
     # Pad protein sequences
     protein_x_padded = pad_sequence(
         protein_xs, batch_first=True, padding_value=0.0)
+    if protein_x_padded.dtype == torch.float64:
+        protein_x_padded = protein_x_padded.float()
     protein_pos_padded = pad_sequence(
         protein_positions, batch_first=True, padding_value=0.0)
+    if protein_pos_padded.dtype == torch.float64:
+        protein_pos_padded = protein_pos_padded.float()
     protein_seq_padded = pad_sequence(
         protein_sequences, batch_first=True, padding_value=0.0)
     protein_all_atom_pos_padded = pad_sequence(
@@ -925,10 +1152,10 @@ def complex_collate_fn(batch: List[Complex]) -> ComplexBatch:
                 if value is not None:
                     # This patch looks ugly, but it is to fix the case where the number of bonds is 0, and start/end are empty
                     # Without this patch, np.pad returns float instead of int
-                    if len(value) == 0 and key in ('start', 'end', 'neighbor_of_start', 'neighbor_of_end'):
+                    if len(value) == 0 and key in {'start', 'end', 'neighbor_of_start', 'neighbor_of_end'}:
                         padded_value = np.zeros(max_num_bonds, dtype=np.int32)
                     else:
-                        if key in ('length', 'bond_periods', 'angles'):
+                        if key in {'length', 'bond_periods', 'angles'}:
                             value = value.astype(np.float32)
                         constant_value = 2 * np.pi if key == 'bond_periods' else 0
                         if key == 'angle_histograms':
@@ -1071,6 +1298,7 @@ def complex_collate_fn(batch: List[Complex]) -> ComplexBatch:
     batch.ligand.num_resamples = num_resamples
 
     return {"batch": batch, "labels": batch.ligand.rmsd}
+
 
 def dummy_ranking_collate_fn(batch: List[ComplexBatch]) -> ComplexBatch:
     return batch[0]

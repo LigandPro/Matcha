@@ -12,7 +12,6 @@ logger = get_logger(__name__)
 def get_datasets(conf, splits,
                  complex_collate_fn=None,
                  predicted_ligand_transforms_path=None, use_predicted_tr_only=True,
-                 is_train_dataset=True,
                  n_preds_to_use=1, use_all_chains=None, stage_num=None):
 
     all_datasets = {}
@@ -99,7 +98,6 @@ def get_datasets(conf, splits,
                 use_predicted_tr_only=use_predicted_tr_only,
                 randomize_bond_neighbors=randomize_bond_neighbors,
                 data_dir_conf=data_dir_conf,
-                is_train_dataset=is_train_dataset,
                 n_preds_to_use=n_preds_to_use,
                 use_all_chains=use_all_chains,
                 stage_num=stage_num,

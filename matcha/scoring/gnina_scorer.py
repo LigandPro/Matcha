@@ -1,9 +1,11 @@
+import base64
 import json
 import os
 import shutil
 import subprocess
 import sys
 import urllib.request
+from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -76,31 +78,72 @@ def _download_with_progress(url: str, dest: Path) -> None:
 
 
 def _gnina_env() -> dict:
-    """Return env dict with LD_LIBRARY_PATH pointing to CUDA/cuDNN libs."""
+    """Return env dict with LD_LIBRARY_PATH pointing to CUDA/cuDNN libs.
+
+    GNINA binaries are typically dynamically linked against CUDA + cuDNN.
+    On some systems these libraries are available only via Python wheels
+    (e.g. PyTorch + nvidia-*-cu12 packages). This helper makes GNINA runnable
+    without requiring a system-wide CUDA installation.
+    """
     env = os.environ.copy()
-    extra_paths = []
+    extra_paths: list[str] = []
 
     # 1. Current env's torch
     try:
         import torch
         torch_lib = Path(torch.__file__).parent / "lib"
-        if any(torch_lib.glob("libcudnn*")):
+        if torch_lib.exists():
             extra_paths.append(str(torch_lib))
     except ImportError:
         pass
 
-    # 2. Search conda environments for cudnn
-    if not extra_paths:
-        for base in [Path.home() / "miniforge", Path.home() / "miniconda3",
-                     Path.home() / "anaconda3", Path("/opt/conda")]:
-            candidates = sorted(base.glob("**/torch/lib/libcudnn.so*"))
-            if candidates:
-                extra_paths.append(str(candidates[0].parent))
-                break
+    # 2. CUDA/cuDNN libs shipped as Python wheels (nvidia-*-cu12).
+    try:
+        import nvidia  # type: ignore
+
+        roots: list[Path] = []
+        # `nvidia` is typically a namespace package, so __file__ may be None.
+        if getattr(nvidia, "__path__", None):
+            roots.extend([Path(p) for p in nvidia.__path__])
+        if getattr(nvidia, "__file__", None):
+            roots.append(Path(nvidia.__file__).resolve().parent)
+
+        for nvidia_root in roots:
+            for sub in (
+                "cudnn",
+                "cublas",
+                "cuda_runtime",
+                "cusparse",
+                "cusolver",
+                "cufft",
+                "nvjitlink",
+                "nvtx",
+                "cuda_nvrtc",
+                "cuda_cupti",
+            ):
+                lib_dir = nvidia_root / sub / "lib"
+                if lib_dir.exists():
+                    extra_paths.append(str(lib_dir))
+    except Exception:
+        pass
+
+    # 3. Conda environments (fallback)
+    for base in (
+        Path.home() / "miniforge",
+        Path.home() / "miniconda3",
+        Path.home() / "anaconda3",
+        Path("/opt/conda"),
+    ):
+        candidates = sorted(base.glob("**/libcudnn.so*"))
+        if candidates:
+            extra_paths.append(str(candidates[0].parent))
+            break
 
     if extra_paths:
-        parts = extra_paths + ([env["LD_LIBRARY_PATH"]] if env.get("LD_LIBRARY_PATH") else [])
-        env["LD_LIBRARY_PATH"] = ":".join(parts)
+        deduped = list(dict.fromkeys(extra_paths))
+        existing = env.get("LD_LIBRARY_PATH", "")
+        new_path = ":".join(deduped)
+        env["LD_LIBRARY_PATH"] = f"{new_path}:{existing}" if existing else new_path
 
     return env
 
@@ -186,11 +229,16 @@ def _extract_gnina_score(mol, score_type="CNNscore", use_minimized=True):
     Returns:
         Score value or None if not found.
     """
-    minimized_name = f"minimized{score_type}"
     if use_minimized:
-        possible_names = [minimized_name, score_type]
+        possible_names = [
+            f"minimized{score_type}" if score_type != "Affinity" else "minimizedAffinity",
+            score_type,
+        ]
     else:
-        possible_names = [score_type, minimized_name]
+        possible_names = [
+            score_type,
+            f"minimized{score_type}" if score_type != "Affinity" else "minimizedAffinity",
+        ]
 
     for prop_name in possible_names:
         if mol.HasProp(prop_name):
@@ -211,6 +259,47 @@ def _extract_gnina_score(mol, score_type="CNNscore", use_minimized=True):
     return None
 
 
+def _normalize_uid(uid: str) -> str:
+    # Keep in sync with select_top_poses() uid normalization.
+    for suffix in ("_minimized", "_poses", "_predictions"):
+        if uid.endswith(suffix):
+            return uid[: -len(suffix)]
+    return uid
+
+
+_MATCHA_NAME_PREFIX = "MATCHA"
+
+
+def _encode_matcha_name(uid: str, pose_idx: int, orig_name: str) -> str:
+    uid_b64 = base64.urlsafe_b64encode(uid.encode("utf-8")).decode("ascii")
+    orig_b64 = base64.urlsafe_b64encode(orig_name.encode("utf-8")).decode("ascii")
+    return f"{_MATCHA_NAME_PREFIX}|{uid_b64}|{pose_idx}|{orig_b64}"
+
+
+def _decode_matcha_name(name: str) -> tuple[str, int, str]:
+    """Decode marker from molecule _Name.
+
+    Supports:
+      - New: MATCHA|<uid_b64>|<pose_idx>|<orig_name_b64>
+      - Legacy: <uid>::<pose_idx>
+    """
+    if name.startswith(f"{_MATCHA_NAME_PREFIX}|"):
+        parts = name.split("|", 3)
+        if len(parts) != 4:
+            raise ValueError(f"Invalid MATCHA _Name format: {name!r}")
+        _, uid_b64, idx_s, orig_b64 = parts
+        uid = base64.urlsafe_b64decode(uid_b64.encode("ascii")).decode("utf-8")
+        pose_idx = int(idx_s)
+        orig_name = base64.urlsafe_b64decode(orig_b64.encode("ascii")).decode("utf-8")
+        return uid, pose_idx, orig_name
+
+    if "::" in name:
+        uid, idx_s = name.rsplit("::", 1)
+        return uid, int(idx_s), ""
+
+    raise ValueError(f"Missing expected _Name markers in: {name!r}")
+
+
 def _find_top_scored_molecule(sdf_path, score_type="CNNscore", use_minimized=True,
                               filters_data=None, uid=None, n_samples=40):
     """Read SDF file and find the molecule with the best gnina score.
@@ -226,19 +315,25 @@ def _find_top_scored_molecule(sdf_path, score_type="CNNscore", use_minimized=Tru
     Returns:
         Tuple of (best_mol, best_score, best_idx) or None.
     """
-    supplier = Chem.SDMolSupplier(str(sdf_path), removeHs=False, sanitize=False)
+    try:
+        supplier = Chem.SDMolSupplier(str(sdf_path), removeHs=False, sanitize=False)
+    except OSError:
+        return None
 
-    prop_name = f"minimized{score_type}" if use_minimized else score_type
+    if use_minimized:
+        prop_name = f"minimized{score_type}"
+    else:
+        prop_name = score_type
 
-    keep_mask = np.arange(3 * n_samples)
+    keep_limit = 3 * int(n_samples)
 
     mols = []
     scores = []
     for i, mol in enumerate(supplier):
         if mol is None:
             continue
-        if i not in keep_mask:
-            continue
+        if i >= keep_limit:
+            break
 
         # Try direct property access first
         if mol.HasProp(prop_name):
@@ -256,7 +351,7 @@ def _find_top_scored_molecule(sdf_path, score_type="CNNscore", use_minimized=Tru
             mols.append(mol)
             scores.append(score)
 
-    if not mols:
+    if len(mols) == 0:
         return None
 
     scores = np.array(scores)
@@ -268,8 +363,8 @@ def _find_top_scored_molecule(sdf_path, score_type="CNNscore", use_minimized=Tru
             filters_data[uid]['posebusters_filters_passed_count_fast']
         )
         # Trim to keep_mask length if needed
-        if len(filter_counts) > len(keep_mask):
-            filter_counts = filter_counts[keep_mask]
+        if len(filter_counts) > keep_limit:
+            filter_counts = filter_counts[:keep_limit]
 
         if len(filter_counts) != len(mols):
             logger.warning(
@@ -353,7 +448,7 @@ class GninaScorer(PoseScorer):
                     f"gnina binary not found at {self.gnina_path}. "
                     "Please install gnina or use --scorer none."
                 )
-
+            
     def select_top_poses(self, sdf_dir, output_dir, filters_path=None, n_samples=20):
         sdf_dir = Path(sdf_dir)
         output_dir = Path(output_dir)
@@ -380,12 +475,7 @@ class GninaScorer(PoseScorer):
         failed = 0
 
         for sdf_file in tqdm(sdf_files, desc="Selecting top poses"):
-            uid = sdf_file.stem
-            # Remove common suffixes
-            for suffix in ("_minimized", "_poses", "_predictions"):
-                if uid.endswith(suffix):
-                    uid = uid[:-len(suffix)]
-                    break
+            uid = _normalize_uid(sdf_file.stem)
 
             result = _find_top_scored_molecule(
                 sdf_file,
@@ -403,6 +493,7 @@ class GninaScorer(PoseScorer):
 
             best_mol, best_score, best_idx = result
             writer = SDWriter(str(output_dir / f"{uid}.sdf"))
+            writer.SetKekulize(False)
             writer.write(best_mol)
             writer.close()
             successful += 1
@@ -470,7 +561,7 @@ class CustomScriptScorer(PoseScorer):
         failed = 0
 
         for sdf_file in tqdm(sdf_files, desc="Selecting top poses"):
-            uid = sdf_file.stem
+            uid = _normalize_uid(sdf_file.stem)
 
             result = _find_top_scored_molecule(
                 sdf_file,
@@ -487,6 +578,7 @@ class CustomScriptScorer(PoseScorer):
 
             best_mol, _, _ = result
             writer = SDWriter(str(output_dir / f"{uid}.sdf"))
+            writer.SetKekulize(False)
             writer.write(best_mol)
             writer.close()
             successful += 1

@@ -278,13 +278,13 @@ def fix_torsion_angles(angles, bond_periods):
 
 
 def get_bond_properties_for_angles(rotatable_bonds_ext):
-    bond_properties_for_angles = {}
-    bond_properties_for_angles['start'] = rotatable_bonds_ext.start
-    bond_properties_for_angles['end'] = rotatable_bonds_ext.end
-    bond_properties_for_angles['neighbor_of_start'] = rotatable_bonds_ext.neighbor_of_start
-    bond_properties_for_angles['neighbor_of_end'] = rotatable_bonds_ext.neighbor_of_end
-    bond_properties_for_angles['bond_periods'] = rotatable_bonds_ext.bond_periods
-    return bond_properties_for_angles
+    return {
+        'start': rotatable_bonds_ext.start,
+        'end': rotatable_bonds_ext.end,
+        'neighbor_of_start': rotatable_bonds_ext.neighbor_of_start,
+        'neighbor_of_end': rotatable_bonds_ext.neighbor_of_end,
+        'bond_periods': rotatable_bonds_ext.bond_periods,
+    }
 
 
 def find_rigid_alignment(pos_a, pos_b):
@@ -296,16 +296,42 @@ def find_rigid_alignment(pos_a, pos_b):
     """
     a_mean = pos_a.mean(0)
     b_mean = pos_b.mean(0)
+
+    if isinstance(pos_a, torch.Tensor):
+        if not torch.isfinite(pos_a).all() or not torch.isfinite(pos_b).all():
+            return torch.eye(3, device=pos_a.device, dtype=pos_a.dtype), torch.nan_to_num(b_mean)
+    else:
+        if not np.isfinite(pos_a).all() or not np.isfinite(pos_b).all():
+            return np.eye(3, dtype=np.float32), np.nan_to_num(b_mean).astype(np.float32)
+
     a_centered = pos_a - a_mean
     b_centered = pos_b - b_mean
     # Covariance matrix
     cov_mat = a_centered.T @ b_centered
     if isinstance(pos_a, torch.Tensor):
-        U, _, Vt = torch.linalg.svd(cov_mat)
+        svd_error = None
+        for _ in range(2):
+            try:
+                U, _, Vt = torch.linalg.svd(cov_mat)
+                svd_error = None
+                break
+            except RuntimeError as exc:
+                svd_error = exc
+        if svd_error is not None:
+            return torch.eye(3, device=pos_a.device, dtype=pos_a.dtype), b_mean
         V = Vt.T
         det = torch.linalg.det(V @ U.T)
     else:
-        U, _, Vt = np.linalg.svd(cov_mat)
+        svd_error = None
+        for _ in range(2):
+            try:
+                U, _, Vt = np.linalg.svd(cov_mat)
+                svd_error = None
+                break
+            except np.linalg.LinAlgError as exc:
+                svd_error = exc
+        if svd_error is not None:
+            return np.eye(3, dtype=np.float32), b_mean.astype(np.float32)
         V = Vt.T
         det = np.linalg.det(V @ U.T)
 
