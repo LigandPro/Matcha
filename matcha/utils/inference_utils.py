@@ -7,9 +7,7 @@ import warnings
 import sys
 import copy
 import json
-from collections import defaultdict
 
-from rdkit.Chem import RemoveAllHs
 from rdkit import Chem
 import prody
 from prody import confProDy
@@ -18,10 +16,8 @@ import datamol as dm
 from rdkit import RDLogger
 
 from matcha.utils.datasets import get_datasets
-from matcha.utils.paths import get_ligand_path
 from matcha.dataset.pdbbind import complex_collate_fn
 from matcha.utils.posebusters_utils import calc_posebusters
-from matcha.utils.preprocessing import read_molecule
 from matcha.utils.log import get_logger
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -153,7 +149,6 @@ def compute_fast_filters_from_sdf(conf, inference_run_name, sdf_type='base', n_p
     all_datasets = get_datasets(conf, splits=['test'],
                                 predicted_ligand_transforms_path=None,
                                 use_predicted_tr_only=False,
-                                is_train_dataset=False,
                                 n_preds_to_use=n_preds_to_use,
                                 complex_collate_fn=complex_collate_fn)
     test_datasets = all_datasets['test']
@@ -390,7 +385,6 @@ def run_v2_inference_pipeline(
         test_dataset_docking = get_datasets(
             conf, splits=['test'],
             predicted_ligand_transforms_path=predicted_ligand_transforms_path,
-            is_train_dataset=False,
             complex_collate_fn=complex_collate_fn,
             stage_num=1,
             n_preds_to_use=n_preds_to_use,

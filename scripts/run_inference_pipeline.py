@@ -113,7 +113,6 @@ def main():
         conf.test_dataset_types = [dataset_name]
         test_dataset_docking = get_datasets(conf, splits=['test'],
                                             predicted_ligand_transforms_path=predicted_ligand_transforms_path,
-                                            is_train_dataset=False,
                                             complex_collate_fn=complex_collate_fn,
                                             stage_num=1,
                                             **module['dataset_kwargs'],

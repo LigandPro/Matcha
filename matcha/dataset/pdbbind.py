@@ -7,7 +7,7 @@ import pickle
 import numpy as np
 from deli import load
 from collections import defaultdict
-from typing import List, Optional
+from typing import List
 from torch.utils.data import Dataset
 from rdkit.Chem import RemoveAllHs
 from tqdm import tqdm
@@ -16,8 +16,10 @@ from torch.nn.utils.rnn import pad_sequence
 from matcha.dataset.complex_dataclasses import Ligand, Protein, Complex, LigandBatch, ProteinBatch, ComplexBatch, BondsBatch
 from matcha.utils.preprocessing import (parse_receptor, read_pdbbind_mols,
                                           extract_receptor_structure_prody, lig_atom_featurizer,
-                                          read_molecule, generate_conformer_mols, generate_conformer_mols_batch, read_sdf_with_multiple_confs)
+                                          read_molecule, generate_conformer_mols, generate_conformer_mols_batch)
 from matcha.utils.bond_processing import get_rotatable_and_nonrotatable_bonds, split_molecule
+from matcha.utils.paths import get_protein_path, get_ligand_path
+
 from matcha.utils.transforms import (
     apply_tor_changes_to_pos, get_torsion_angles, find_rigid_alignment, get_bond_properties_for_angles)
 from matcha.utils.log import get_logger
@@ -261,7 +263,7 @@ class PDBBind(Dataset):
                  predicted_ligand_transforms_path=None, dataset_type='pdbbind',
                  add_all_atom_pos=False,
                  use_predicted_tr_only=True, randomize_bond_neighbors=True,
-                 data_dir_conf=None, is_train_dataset=True,
+                 data_dir_conf=None,
                  n_preds_to_use=1, use_all_chains=False,
                  min_lig_size=7, stage_num=None,
                  n_confs_override=None):
@@ -288,7 +290,6 @@ class PDBBind(Dataset):
         self.add_all_atom_pos = add_all_atom_pos
         self.use_predicted_tr_only = use_predicted_tr_only
         self.randomize_bond_neighbors = randomize_bond_neighbors
-        self.is_train_dataset = is_train_dataset
         self.use_all_chains = use_all_chains
         self.min_lig_size = min_lig_size
         self.stage_num = stage_num
@@ -324,16 +325,6 @@ class PDBBind(Dataset):
             complexes.append(complex)
         self.complexes = complexes
 
-        if self.is_train_dataset:
-            logger.debug(f"Complexes count before filtering: {len(self.complexes)}")
-            self.complexes = [complex for complex in self.complexes if complex.ligand.pos.shape[0] <
-                              150 and complex.ligand.pos.shape[0] > 6 and complex.protein.pos.shape[0] + complex.ligand.pos.shape[0] < 2000]
-            logger.debug(f"Complexes count after filtering: {len(self.complexes)}")
-
-        # self.complexes = [compl for compl in self.complexes
-        #                   if compl.protein.pos.shape[0] + compl.ligand.pos.shape[0] > 1000 or compl.ligand.pos.shape[0] > 70]
-
-
         if self.dataset_type.endswith('_conf'):
             self._explode_ligand_conformers(n_preds_to_use)
         else:
@@ -364,7 +355,6 @@ class PDBBind(Dataset):
         name2protein = {}
         for complex in self.complexes:
             if complex.name.endswith('_conf0'):
-                # copy.deepcopy(complex.protein)
                 name2protein[complex.name.split('_conf')[0]] = complex.protein
 
         logger.debug(f"Name2protein length: {len(name2protein)}; complexes length: {len(self.complexes)}")
@@ -372,7 +362,6 @@ class PDBBind(Dataset):
         new_complexes = []
         for complex in self.complexes:
             if not complex.name.endswith('_conf0'):
-                # copy.deepcopy(name2protein[complex.name.split('_conf')[0]])
                 complex.protein = name2protein[complex.name.split('_conf')[0]]
             new_complexes.append(complex)
         self.complexes = new_complexes
@@ -388,7 +377,6 @@ class PDBBind(Dataset):
 
         self.predicted_ligand_transforms = np.load(
             predicted_ligand_transforms_path, allow_pickle=True)[0]
-        self.n_repeats = 1
         self.complexes = [
             c for c in self.complexes if c.name in self.predicted_ligand_transforms]
         if not self.complexes:
@@ -433,9 +421,7 @@ class PDBBind(Dataset):
         return len(self.complexes)
 
     def __get_nonrand_item__(self, idx):
-        complex_idx = idx
-        complex = copy.deepcopy(self.complexes[complex_idx])
-        return complex
+        return copy.deepcopy(self.complexes[idx])
 
     def __getitem__(self, idx):
         complex = self.__get_nonrand_item__(idx)
@@ -483,24 +469,21 @@ class PDBBind(Dataset):
         tokenized_chain_sequences_dictlist = defaultdict(list)
 
         complex_names_set = set(complex_names)
-        for key_base, embedding in id_to_embeddings.items():
-            keys_all = [key_base]
-            for key in keys_all:
-                try:
-                    key_name = '_'.join(key.split('_')[:-2])  # cut _chain_i
-                except IndexError:
-                    raise ValueError(
-                        f"Invalid key format in embeddings: {key}")
+        for key, embedding in id_to_embeddings.items():
+            try:
+                key_name = '_'.join(key.split('_')[:-2])  # cut _chain_i
+            except IndexError:
+                raise ValueError(
+                    f"Invalid key format in embeddings: {key}")
 
-                if key_name in complex_names_set:
-
-                    tokenized_aa_sequence = np.array(
-                        [self.aa_mapping.get(aa, 0) for aa in id_to_sequence[key]])[:, None]
-                    aa_sequence = np.array(list(id_to_sequence[key]))
-                    chain_embeddings_dictlist[key_name].append(embedding)
-                    chain_sequences_dictlist[key_name].append(aa_sequence)
-                    tokenized_chain_sequences_dictlist[key_name].append(
-                        tokenized_aa_sequence)
+            if key_name in complex_names_set:
+                tokenized_aa_sequence = np.array(
+                    [self.aa_mapping.get(aa, 0) for aa in id_to_sequence[key]])[:, None]
+                aa_sequence = np.array(list(id_to_sequence[key]))
+                chain_embeddings_dictlist[key_name].append(embedding)
+                chain_sequences_dictlist[key_name].append(aa_sequence)
+                tokenized_chain_sequences_dictlist[key_name].append(
+                    tokenized_aa_sequence)
 
         lm_embeddings_chains_all = [chain_embeddings_dictlist.get(
             name, []) for name in complex_names]
@@ -518,14 +501,6 @@ class PDBBind(Dataset):
             logger.error(f"Error processing complex: {e}")
             return None
 
-    def _get_receptor_path(self, complex_name):
-        if self.dataset_type in {'pdbbind', 'pdbbind_conf', 'dockgen', 'dockgen_full', 'dockgen_full_conf'}:
-            return os.path.join(self.data_dir, complex_name, f'{complex_name}_protein_processed.pdb')
-        if self.dataset_type.startswith('posebusters') or self.dataset_type.startswith('astex') or \
-                self.dataset_type.startswith('any'):
-            return os.path.join(self.data_dir, complex_name, f'{complex_name}_protein.pdb')
-        raise ValueError(f'Unknown dataset type: {self.dataset_type}')
-
     @staticmethod
     def _sha256_file(path):
         digest = hashlib.sha256()
@@ -542,7 +517,7 @@ class PDBBind(Dataset):
             return True
 
         try:
-            first_path = self._get_receptor_path(complex_names[0])
+            first_path = get_protein_path(complex_names[0], self.dataset_name, self.data_dir)
         except ValueError:
             return False
 
@@ -552,7 +527,7 @@ class PDBBind(Dataset):
         first_size = os.path.getsize(first_path)
         first_hash = self._sha256_file(first_path)
         for complex_name in complex_names[1:]:
-            receptor_path = self._get_receptor_path(complex_name)
+            receptor_path = get_protein_path(complex_name, self.dataset_name, self.data_dir)
             if not os.path.exists(receptor_path):
                 return False
             if os.path.getsize(receptor_path) != first_size:
@@ -587,9 +562,8 @@ class PDBBind(Dataset):
         self._precomputed_conformer_mols_by_name = None
         self._precomputed_orig_lig_by_name = None
         if (
-            (not self.is_train_dataset)
-            and self.split_path is None
-            and self.dataset_type in {"any_conf", "posebusters_conf", "astex_conf"}
+            self.split_path is None
+            and self.dataset_type.endswith("_conf")
             and self.n_confs_to_use > 0
         ):
             try:
@@ -597,7 +571,7 @@ class PDBBind(Dataset):
                 mols_for_confs = []
                 orig_by_name = {}
                 for name in tqdm(complex_names_all, desc="Reading ligands for conformers"):
-                    lig_path = os.path.join(self.data_dir, name, f"{name}_ligand.sdf")
+                    lig_path = get_ligand_path(name, self.dataset_name, self.data_dir)
                     mol = read_molecule(lig_path, remove_hs=False, sanitize=True)
                     if mol is None:
                         continue
@@ -627,8 +601,7 @@ class PDBBind(Dataset):
         #   - build the protein representation once (when use_all_chains=True),
         #   - and iterate ligands without repeating expensive protein processing.
         fast_single_receptor_mode = (
-            (not self.is_train_dataset)
-            and self.use_all_chains
+            self.use_all_chains
             and (self.split_path is None)
             and (self.dataset_type.startswith('any'))
             and self._complexes_share_single_receptor(complex_names_all)
@@ -711,7 +684,6 @@ class PDBBind(Dataset):
         protein_center = None
         if (
             self.use_all_chains
-            and (not self.is_train_dataset)
             and self.dataset_type.startswith('any')
         ):
             try:
