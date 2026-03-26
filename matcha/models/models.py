@@ -527,35 +527,29 @@ class MatchaModel(nn.Module):
     def get_edge_types(self, ligand_tokens, protein_tokens, num_types, device):
         # Update to account for two CLS tokens
         concat_list = [
-            # CLS for translation
-            torch.ones(
-                (ligand_tokens.shape[0], 1), device=device, dtype=int) * (num_types - 2),
-            # CLS for rotation
-            torch.ones(
-                (ligand_tokens.shape[0], 1), device=device, dtype=int) * (num_types - 1),
-            ligand_tokens,
+            torch.full(
+                (ligand_tokens.shape[0], 1),
+                num_types - 2,
+                device=device,
+                dtype=torch.long,
+            ),
+            torch.full(
+                (ligand_tokens.shape[0], 1),
+                num_types - 1,
+                device=device,
+                dtype=torch.long,
+            ),
+            ligand_tokens.long(),
         ]
         if protein_tokens is not None:
-            concat_list.append(protein_tokens + len(self.ligand_atom_types))
+            concat_list.append((protein_tokens + len(self.ligand_atom_types)).long())
 
         # [batch, mol_sz + pocket_sz + 2]
-        node_input = torch.concat(concat_list, dim=1)
+        node_input = torch.cat(concat_list, dim=1)
 
-        edge_types = node_input.unsqueeze(-1) * \
-            num_types + node_input.unsqueeze(-2)
-
-        # Symmetry for interactions
-        N = edge_types.shape[1]
-        upper_mask = torch.triu(torch.ones(N, N), diagonal=1).bool()
-        min_values = torch.min(
-            edge_types[:, upper_mask],
-            edge_types.transpose(1, 2)[:, upper_mask]
-        )
-
-        edge_types[:, upper_mask] = min_values
-        edge_types = edge_types.transpose(1, 2)
-        edge_types[:, upper_mask] = min_values
-        edge_types = edge_types.transpose(1, 2)
+        node_i = node_input.unsqueeze(-1)
+        node_j = node_input.unsqueeze(-2)
+        edge_types = torch.minimum(node_i, node_j) * num_types + torch.maximum(node_i, node_j)
         return edge_types
 
     def get_distance_bias(self, pos, ligand_tokens, protein_tokens):
@@ -685,39 +679,56 @@ class MatchaModel(nn.Module):
         return v_tor
 
     def encode_ligand(self, batch, time_emb):
-        # Convert ligand categorical atom features:
-        lig_seq = self.ligand_atom_encoder(batch.ligand.x)
+        ligand_cache = None
+        if not self.training:
+            ligand_cache = getattr(batch.ligand, '_matcha_inference_cache', None)
+            if ligand_cache is None:
+                ligand_atom_seq = self.ligand_atom_encoder(batch.ligand.x)
+                ligand_mask = torch.cat([
+                    torch.zeros(
+                        batch.ligand.is_padded_mask.shape[0],
+                        2,
+                        device=batch.ligand.is_padded_mask.device,
+                        dtype=torch.bool,
+                    ),
+                    batch.ligand.is_padded_mask,
+                ], dim=-1).unsqueeze(1).unsqueeze(2)
+                ligand_cache = {
+                    'ligand_atom_seq': ligand_atom_seq,
+                    'ligand_tokens': batch.ligand.x[:, :, 0],
+                    'ligand_mask': ligand_mask,
+                }
+                batch.ligand._matcha_inference_cache = ligand_cache
+            ligand_atom_seq = ligand_cache['ligand_atom_seq']
+            ligand_tokens = ligand_cache['ligand_tokens']
+            is_padded_mask_ligand = ligand_cache['ligand_mask']
+        else:
+            ligand_atom_seq = self.ligand_atom_encoder(batch.ligand.x)
+            ligand_tokens = batch.ligand.x[:, :, 0]
+            is_padded_mask_ligand = torch.cat([
+                torch.zeros(batch.ligand.is_padded_mask.shape[0], 2,
+                            device=batch.ligand.is_padded_mask.device, dtype=torch.bool),
+                batch.ligand.is_padded_mask,
+            ], dim=-1).unsqueeze(1).unsqueeze(2)
 
-        # Add CLS tokens for translation and rotation
         ligand_centers = compute_batch_ligand_centers(batch).reshape(-1, 1, 3)
-        cls_token_tr = self.cls_token_tr.expand(lig_seq.shape[0], -1, -1)
-        cls_token_rot = self.cls_token_rot.expand(lig_seq.shape[0], -1, -1)
+        cls_token_tr = self.cls_token_tr.expand(ligand_atom_seq.shape[0], -1, -1)
+        cls_token_rot = self.cls_token_rot.expand(ligand_atom_seq.shape[0], -1, -1)
 
-        # Concatenate cls_tr, cls_rot, and lig:
         lig_seq = torch.cat((
             cls_token_tr,
             cls_token_rot,
-            lig_seq,
+            ligand_atom_seq,
         ), dim=1)
 
-        # Concatenate positions: Add two entries for the two CLS tokens
         lig_pos = torch.cat((
             ligand_centers,
-            ligand_centers,  # two CLS tokens share the same center
+            ligand_centers,
             batch.ligand.pos
         ), dim=1)
 
-        # Compute is_padded_mask for ligand:
-        is_padded_mask_ligand = torch.cat([
-            torch.zeros(batch.ligand.is_padded_mask.shape[0], 2,
-                        device=batch.ligand.is_padded_mask.device, dtype=torch.bool),  # For the two CLS tokens
-            batch.ligand.is_padded_mask,
-        ], dim=-1)
-        is_padded_mask_ligand = is_padded_mask_ligand.unsqueeze(1).unsqueeze(2)
-
-        # Initialize ligand pair embeddings:
         ligand_pair_emb = self.get_distance_bias(lig_pos,
-                                                 ligand_tokens=batch.ligand.x[:, :, 0],
+                                                 ligand_tokens=ligand_tokens,
                                                  protein_tokens=None)
 
         if self.use_single_modulation:
@@ -730,7 +741,6 @@ class MatchaModel(nn.Module):
                     lig_seq, ligand_pair_emb = lig_seq
             del ligand_pair_emb
 
-        # Add coordinate positional encoding
         lig_seq += self.coord_pos_encoding(lig_pos)
 
         return lig_seq, is_padded_mask_ligand, lig_pos
@@ -744,21 +754,36 @@ class MatchaModel(nn.Module):
         # check if model.eval() is called
         lig_seq, is_padded_mask_ligand, lig_pos = self.encode_ligand(
                 batch, time_emb)
-        protein_seq = self.protein_embedder(batch.protein.x)
+
+        protein_cache = None
+        if not self.training and hasattr(batch, 'protein'):
+            protein_cache = getattr(batch.protein, '_matcha_inference_cache', None)
+            if protein_cache is None:
+                protein_seq_cached = self.protein_embedder(batch.protein.x)
+                protein_seq_cached = protein_seq_cached + self.coord_pos_encoding(batch.protein.pos)
+                protein_mask_cached = batch.protein.is_padded_mask.unsqueeze(1).unsqueeze(2)
+                protein_cache = {
+                    'protein_seq': protein_seq_cached,
+                    'protein_mask': protein_mask_cached,
+                }
+                batch.protein._matcha_inference_cache = protein_cache
+            protein_seq = protein_cache['protein_seq']
+            protein_mask = protein_cache['protein_mask']
+        else:
+            protein_seq = self.protein_embedder(batch.protein.x)
+            protein_seq = protein_seq + self.coord_pos_encoding(batch.protein.pos)
+            protein_mask = batch.protein.is_padded_mask.unsqueeze(1).unsqueeze(2)
 
         # Compute is_padded_mask for the whole complex:
         if lig_seq is not None:
             is_padded_mask = torch.cat([
                 is_padded_mask_ligand,
-                batch.protein.is_padded_mask.unsqueeze(1).unsqueeze(2)
+                protein_mask
             ], dim=-1)
         else:
-            is_padded_mask = batch.protein.is_padded_mask.unsqueeze(1).unsqueeze(2)
+            is_padded_mask = protein_mask
 
         # Initialize complex pair embeddings:
-        # Add coordinate positional encoding
-        protein_seq += self.coord_pos_encoding(batch.protein.pos)
-
         # Concatenate ligand with the protein:
         if lig_seq is not None:
             seq = torch.cat((
