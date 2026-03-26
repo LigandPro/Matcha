@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
@@ -27,6 +28,20 @@ def main():
                         required=False, help="number of samples to generate for each ligand", default=40, type=int)
     parser.add_argument("--n-confs", dest="n_confs",
                         required=False, help="number of ligand conformers to generate with RDKit", default=None, type=int)
+    parser.add_argument("--datasets", nargs="+", default=None,
+                        help="optional explicit dataset override")
+    parser.add_argument("--num-steps", dest="num_steps", default=10, type=int,
+                        help="number of Euler integration steps")
+    parser.add_argument("--num-workers", dest="num_workers", default=32, type=int,
+                        help="number of dataloader workers")
+    parser.add_argument("--batch-limit", dest="batch_limit", default=None, type=int,
+                        help="optional override for sorted batching token budget")
+    parser.add_argument("--max-batches", dest="max_batches", default=None, type=int,
+                        help="optional limit for benchmarking/debugging")
+    parser.add_argument("--tf32", choices=["on", "off"], default="off",
+                        help="toggle TF32 matmul/cudnn kernels")
+    parser.add_argument("--benchmark-json", dest="benchmark_json", default=None,
+                        help="optional path to write stage timing summary as JSON")
     args = parser.parse_args()
 
     # Load main model config
@@ -44,6 +59,13 @@ def main():
 
     if args.n_confs is not None:
         conf.n_confs_override = args.n_confs
+    if args.batch_limit is not None:
+        conf.batch_limit = args.batch_limit
+
+    allow_tf32 = args.tf32 == "on"
+    torch.backends.cuda.matmul.allow_tf32 = allow_tf32
+    if torch.backends.cudnn.is_available():
+        torch.backends.cudnn.allow_tf32 = allow_tf32
 
     torch.multiprocessing.set_sharing_strategy('file_system')
     torch.manual_seed(conf.seed)
@@ -56,16 +78,24 @@ def main():
 
     solver = euler
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    num_steps = 10
+    num_steps = args.num_steps
     n_preds_to_use = args.n_samples
-    logger.info(f"Inference config: n_preds_to_use={n_preds_to_use}, num_steps={num_steps}")
-    num_workers = 32
+    num_workers = args.num_workers
+    logger.info(
+        "Inference config: "
+        f"n_preds_to_use={n_preds_to_use}, "
+        f"num_steps={num_steps}, "
+        f"num_workers={num_workers}, "
+        f"batch_limit={conf.batch_limit}, "
+        f"max_batches={args.max_batches}, "
+        f"tf32={allow_tf32}"
+    )
 
     def get_dataloader_docking(dataset): return DataLoader(dataset, batch_size=1, shuffle=False,
                                                            prefetch_factor=2,
                                                            collate_fn=dummy_ranking_collate_fn, num_workers=num_workers)
 
-    dataset_names = conf.test_dataset_types
+    dataset_names = args.datasets or conf.test_dataset_types
     logger.info(f"Dataset names: {dataset_names}")
 
     pipeline = {
@@ -88,10 +118,12 @@ def main():
         ],
     }
 
+    run_dir = os.path.join(conf.inference_results_folder, run_name)
+    benchmark_summary = []
+
     # Save config to the run folder
-    os.makedirs(os.path.join(
-        conf.inference_results_folder, run_name), exist_ok=True)
-    with open(os.path.join(conf.inference_results_folder, run_name, 'config.json'), 'w') as f:
+    os.makedirs(run_dir, exist_ok=True)
+    with open(os.path.join(run_dir, 'config.json'), 'w') as f:
         json.dump(pipeline, f)
 
     docking_modules = pipeline['docking']
@@ -108,7 +140,7 @@ def main():
     for dataset_name in dataset_names:
         predicted_ligand_transforms_path = None
 
-        # # Load datasets
+        dataset_build_start_time = time.perf_counter()
         conf.use_sorted_batching = True
         conf.test_dataset_types = [dataset_name]
         test_dataset_docking = get_datasets(conf, splits=['test'],
@@ -116,8 +148,9 @@ def main():
                                             is_train_dataset=False,
                                             complex_collate_fn=complex_collate_fn,
                                             stage_num=1,
-                                            **module['dataset_kwargs'],
+                                            **docking_modules[0]['dataset_kwargs'],
                                             )['test']
+        dataset_build_seconds = time.perf_counter() - dataset_build_start_time
 
         logger.info({ds_name: len(ds)
                 for ds_name, ds in test_dataset_docking.items()})
@@ -128,7 +161,6 @@ def main():
             module = pipeline['docking'][min(
                 stage_idx, len(pipeline['docking']) - 1)]
             model = module['model']
-            model.to(device)
             solver = euler
             logger.info(f"Stage {stage_idx + 1}, transforms path: {predicted_ligand_transforms_path}")
 
@@ -142,21 +174,41 @@ def main():
 
             # Dataloaders
             test_loader = get_dataloader_docking(test_dataset_docking)
+            stage_batch_timings = []
+            stage_start_time = time.perf_counter()
+            metrics = run_evaluation(
+                test_loader,
+                num_steps=num_steps,
+                solver=solver,
+                model=model,
+                max_batches=args.max_batches,
+                batch_timings=stage_batch_timings,
+            )
+            stage_wall_seconds = time.perf_counter() - stage_start_time
 
-            # In case of using true translations
-            # if stage_idx == 0:
-            #     predicted_ligand_transforms_path = path_to_true_translations
-            #     continue
-
-            metrics = run_evaluation(test_loader, num_steps=num_steps, solver=solver, model=model)
+            benchmark_summary.append({
+                "dataset": dataset_name,
+                "stage": stage_idx + 1,
+                "dataset_build_seconds": dataset_build_seconds,
+                "stage_wall_seconds": stage_wall_seconds,
+                "num_batches": len(stage_batch_timings),
+                "mean_batch_seconds": (
+                    float(np.mean(stage_batch_timings)) if stage_batch_timings else 0.0
+                ),
+                "total_batch_seconds": float(sum(stage_batch_timings)),
+                "num_predictions": n_preds_to_use,
+                "num_steps": num_steps,
+                "num_workers": num_workers,
+                "batch_limit": conf.batch_limit,
+                "tf32": allow_tf32,
+                "max_batches": args.max_batches,
+            })
 
             # Save results
             predicted_ligand_transforms_path = os.path.join(
                 conf.inference_results_folder, run_name, f'stage{stage_idx+1}_{dataset_name}.npy')
             np.save(predicted_ligand_transforms_path, [metrics])
             logger.info(f"Saved metrics to {predicted_ligand_transforms_path}")
-
-            np.save(predicted_ligand_transforms_path, [metrics])
 
             updated_metrics = construct_output_dict(
                 metrics, test_dataset_docking.dataset)
@@ -168,8 +220,12 @@ def main():
             conf.inference_results_folder, run_name, f'{dataset_name}_final_preds.npy')
         np.save(final_metrics_path, [updated_metrics])
 
+    if args.benchmark_json is not None:
+        with open(args.benchmark_json, "w") as f:
+            json.dump(benchmark_summary, f, indent=2)
+        logger.info(f"Saved benchmark summary to {args.benchmark_json}")
+
 
 
 if __name__ == "__main__":
-    torch.backends.cuda.matmul.allow_tf32 = False
     main()

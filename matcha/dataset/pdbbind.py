@@ -378,10 +378,18 @@ class PDBBind(Dataset):
         self.predicted_ligand_transforms = np.load(
             predicted_ligand_transforms_path, allow_pickle=True)[0]
         self.n_repeats = 1
-        n_preds_to_use_real = min(n_preds_to_use, len(
-            self.predicted_ligand_transforms[self.complexes[0].name]))
         self.complexes = [
             complex for complex in self.complexes if complex.name in self.predicted_ligand_transforms]
+        if len(self.complexes) == 0:
+            logger.warning(
+                "No complexes matched predicted ligand transforms from %s",
+                predicted_ligand_transforms_path,
+            )
+            return
+        n_preds_to_use_real = min(
+            n_preds_to_use,
+            min(len(self.predicted_ligand_transforms[complex.name]) for complex in self.complexes),
+        )
 
         # initialize extended complexes
         extended_complexes = []

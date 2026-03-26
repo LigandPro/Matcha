@@ -7,6 +7,7 @@ logger = get_logger(__name__)
 def construct_output_dict(preds, dataset):
     output_dict = {}
     processed_names = set()
+    skipped_missing_preds = 0
     for complex in dataset.complexes:
         uid_full = complex.name
         if uid_full in processed_names:
@@ -14,7 +15,10 @@ def construct_output_dict(preds, dataset):
         processed_names.add(uid_full)
         uid_real = uid_full.split('_conf')[0]
 
-        preds_list = preds[uid_full]
+        preds_list = preds.get(uid_full)
+        if preds_list is None:
+            skipped_missing_preds += 1
+            continue
         if len(preds_list) == 0:
             continue
 
@@ -31,4 +35,9 @@ def construct_output_dict(preds, dataset):
             }
             samples.append(sample)
         output_dict[uid_real]['sample_metrics'].extend(samples)
+    if skipped_missing_preds:
+        logger.warning(
+            "Skipped %d complexes without predictions while constructing output dict",
+            skipped_missing_preds,
+        )
     return output_dict
