@@ -91,9 +91,17 @@ def main():
         f"tf32={allow_tf32}"
     )
 
-    def get_dataloader_docking(dataset): return DataLoader(dataset, batch_size=1, shuffle=False,
-                                                           prefetch_factor=2,
-                                                           collate_fn=dummy_ranking_collate_fn, num_workers=num_workers)
+    def get_dataloader_docking(dataset):
+        dataloader_kwargs = {
+            "dataset": dataset,
+            "batch_size": 1,
+            "shuffle": False,
+            "collate_fn": dummy_ranking_collate_fn,
+            "num_workers": num_workers,
+        }
+        if num_workers > 0:
+            dataloader_kwargs["prefetch_factor"] = 2
+        return DataLoader(**dataloader_kwargs)
 
     dataset_names = args.datasets or conf.test_dataset_types
     logger.info(f"Dataset names: {dataset_names}")
