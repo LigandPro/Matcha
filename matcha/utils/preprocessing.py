@@ -550,15 +550,23 @@ def extract_receptor_structure_prody(rec, lig, sequences_to_embeddings):
     if lig is not None:
         conf = lig.GetConformer()
         lig_coords = conf.GetPositions()
-    seq = rec.ca.getSequence()
-    coords, atom_names, seq_new, resindices = get_coords(rec)
+    coords, atom_names, seq, resindices = get_coords(rec)
 
-    res_chain_ids = rec.ca.getChids()
-    res_seg_ids = rec.ca.getSegnames()
-    res_chain_ids = np.asarray(
-        [s + c for s, c in zip(res_seg_ids, res_chain_ids)])
+    # Align chain metadata to the unique residue indices returned by get_coords.
+    # rec.ca may contain duplicate CA atoms (for example altlocs), which makes
+    # its raw chid/segname arrays longer than coords/seq and breaks boolean
+    # indexing later in this function.
+    res_chain_ids = []
+    for resindex in resindices:
+        sel = rec.select(f"resindex {int(resindex)}")
+        if sel is None:
+            raise ValueError(f"Unable to resolve residue metadata for resindex {resindex}")
+        segname = sel.getSegnames()[0]
+        chid = sel.getChids()[0]
+        res_chain_ids.append(f"{segname}{chid}")
+    res_chain_ids = np.asarray(res_chain_ids)
     chain_ids = np.unique(res_chain_ids)
-    seq = np.array([s for s in seq])
+    seq = np.asarray(seq)
 
     sequences = []
     lm_embeddings = []
@@ -599,7 +607,14 @@ def extract_receptor_structure_prody(rec, lig, sequences_to_embeddings):
         if min_dist_to_lig < 4.5:
             logger.debug(f'keep chain {chain_id} with distance {min_dist_to_lig}')
             # if min_dist_to_lig < 10:
-            embeddings, tokenized_seq = sequences_to_embeddings[chain_seq]
+            chain_embedding = sequences_to_embeddings.get(chain_seq)
+            if chain_embedding is None:
+                logger.warning(
+                    f"Missing protein sequence embedding for chain {chain_id} "
+                    f"(length={len(chain_seq)}); skipping chain"
+                )
+                continue
+            embeddings, tokenized_seq = chain_embedding
             chain_distances_list.append(min_dist_to_lig)
             sequences.append(tokenized_seq)
             lm_embeddings.append(embeddings)
@@ -614,7 +629,7 @@ def extract_receptor_structure_prody(rec, lig, sequences_to_embeddings):
 
     if len(c_alpha_coords) == 0:
         logger.error(f"NO VALID CHAIN found, chain_distances: {chain_distances}")
-        return None, None, None, None, None, None
+        return None, None, None, None, None, None, None
 
     chain_lengths = [(len(seq), dist) for seq, dist in zip(sequences, chain_distances_list)]
     c_alpha_coords = np.concatenate(c_alpha_coords, axis=0)  # [n_residues, 3]
@@ -636,6 +651,6 @@ def extract_receptor_structure_prody(rec, lig, sequences_to_embeddings):
         if fraction_buried < is_buried_threshold:
             logger.warning(
                 f"Ligand is not buried (fraction_buried = {fraction_buried})")
-            return None, None, None, None, None, None
+            return None, None, None, None, None, None, None
 
     return c_alpha_coords, lm_embeddings, sequences, chain_lengths, full_coords, full_atom_names, full_atom_residue_ids

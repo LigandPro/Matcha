@@ -378,12 +378,13 @@ class PDBBind(Dataset):
         self.predicted_ligand_transforms = np.load(
             predicted_ligand_transforms_path, allow_pickle=True)[0]
         self.complexes = [
-            c for c in self.complexes if c.name in self.predicted_ligand_transforms]
+            c for c in self.complexes
+            if c.name in self.predicted_ligand_transforms
+            and len(self.predicted_ligand_transforms[c.name]) > 0
+        ]
         if not self.complexes:
             raise ValueError(
                 f"No complexes found in predicted transforms from {predicted_ligand_transforms_path}")
-        n_preds_to_use_real = min(n_preds_to_use, len(
-            self.predicted_ligand_transforms[self.complexes[0].name]))
 
         # initialize extended complexes
         extended_complexes = []
@@ -392,6 +393,8 @@ class PDBBind(Dataset):
             if complex.name in processed_names:
                 continue
             processed_names.add(complex.name)
+            pred_transforms = self.predicted_ligand_transforms[complex.name]
+            n_preds_to_use_real = min(n_preds_to_use, len(pred_transforms))
             for i in range(n_preds_to_use_real):
                 # Avoid copying the (large) protein object for every sample.
                 # This significantly reduces CPU memory use for batched inference
@@ -402,7 +405,7 @@ class PDBBind(Dataset):
                     protein=complex.protein,
                     original_augm_rot=complex.original_augm_rot,
                 )
-                pred_data = self.predicted_ligand_transforms[complex.name][i]
+                pred_data = pred_transforms[i]
                 extended_complex.ligand.pred_tr = pred_data['tr_pred_init'] + \
                     pred_data['full_protein_center'] - \
                     extended_complex.protein.full_protein_center
@@ -793,12 +796,15 @@ class PDBBind(Dataset):
                         protein = protein_template
                         current_protein_center = protein_center
                     else:
+                        receptor_ligand = lig_mol
+                        if self.use_all_chains:
+                            receptor_ligand = None if protein_template is not None else orig_ligs[lig_idx]
                         if self.dataset_type.endswith('_conf'):
                             c_alpha_coords_list, lm_embeddings_list, sequences_list, chain_lengths, full_coords, full_atom_names, full_atom_residue_ids = extract_receptor_structure_prody(
-                                rec_model, orig_ligs[lig_idx] if not self.use_all_chains else None, sequences_to_embeddings)
+                                rec_model, receptor_ligand, sequences_to_embeddings)
                         else:
                             c_alpha_coords_list, lm_embeddings_list, sequences_list, chain_lengths, full_coords, full_atom_names, full_atom_residue_ids = extract_receptor_structure_prody(
-                                rec_model, lig_mol, sequences_to_embeddings)
+                                rec_model, receptor_ligand, sequences_to_embeddings)
 
                         # positions are positions of C-alpha, other positions are not used
                         if not self.add_all_atom_pos:
