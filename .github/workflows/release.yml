@@ -1,0 +1,133 @@
+name: Release
+
+on:
+  workflow_run:
+    workflows: ["Continuous Integration"]
+    types: [completed]
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: >-
+      ${{
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.head_branch == 'main' &&
+        github.event.workflow_run.actor.login != 'github-actions[bot]'
+      }}
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Bump patch version
+        id: bump
+        shell: bash
+        run: |
+          set -euo pipefail
+          git switch -c release-work
+          python - <<'PY'
+          import pathlib
+          import re
+
+          pyproject = pathlib.Path("pyproject.toml")
+          version_file = pathlib.Path("matcha/__version__.py")
+
+          pyproject_text = pyproject.read_text(encoding="utf-8")
+          pyproject_match = re.search(r'(?m)^version\s*=\s*"([^"]+)"\s*$', pyproject_text)
+          if not pyproject_match:
+              raise SystemExit("Could not find version in pyproject.toml")
+
+          current = pyproject_match.group(1)
+          parts = current.split(".")
+          if len(parts) != 3 or not all(part.isdigit() for part in parts):
+              raise SystemExit(f"Unsupported version format: {current!r}")
+
+          parts[2] = str(int(parts[2]) + 1)
+          new = ".".join(parts)
+
+          pyproject_text = re.sub(
+              r'(?m)^version\s*=\s*"[^"]+"\s*$',
+              f'version = "{new}"',
+              pyproject_text,
+              count=1,
+          )
+          pyproject.write_text(pyproject_text, encoding="utf-8")
+
+          version_text = version_file.read_text(encoding="utf-8")
+          version_text = re.sub(
+              r'(?m)^__version__\s*=\s*"[^"]+"\s*$',
+              f'__version__ = "{new}"',
+              version_text,
+              count=1,
+          )
+          version_file.write_text(version_text, encoding="utf-8")
+
+          print(new)
+          PY
+          echo "version=$(python - <<'PY'
+          import pathlib
+          import re
+          text = pathlib.Path('pyproject.toml').read_text(encoding='utf-8')
+          print(re.search(r'(?m)^version\s*=\s*\"([^\"]+)\"\s*$', text).group(1))
+          PY
+          )" >> "$GITHUB_OUTPUT"
+
+      - name: Commit version bump
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add pyproject.toml matcha/__version__.py
+          git commit -m "chore(release): v${{ steps.bump.outputs.version }}"
+          git push origin HEAD:main
+
+      - name: Build distributions
+        run: uv build
+
+      - name: Check distributions
+        run: uvx twine check dist/*
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v${{ steps.bump.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARGET="$(git rev-parse HEAD)"
+          if git ls-remote --tags origin "$TAG" | grep -q "$TAG"; then
+            echo "Tag already exists: $TAG"
+            exit 0
+          fi
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --generate-notes \
+            --target "$TARGET"
