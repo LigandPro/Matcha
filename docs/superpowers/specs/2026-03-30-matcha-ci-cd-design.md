@@ -5,7 +5,7 @@
 Add GitHub Actions workflows for Matcha so that:
 - pull requests and pushes to `main` run lint, package smoke checks, and tests;
 - Python compatibility is validated on versions `3.11`, `3.12`, and `3.13`;
-- successful changes merged into `main` are automatically released to PyPI;
+- successful changes merged into `main` are automatically released to PyPI with a repository-managed token;
 - package version metadata stays consistent between `pyproject.toml` and `matcha/__version__.py`.
 
 ## Approach
@@ -56,14 +56,14 @@ Steps:
 - commit and push the version bump back to `main`;
 - build sdist and wheel;
 - validate artifacts with `twine check`;
-- publish to PyPI via GitHub OIDC;
+- publish to PyPI via `PYPI_API_TOKEN`;
 - create a GitHub release tag `vX.Y.Z`.
 
 The workflow skips bot-authored runs to avoid infinite release loops after the automated version bump commit.
 
 ## Risks
 
-- Python `3.10` is currently blocked by transitive dependency support, notably `mdtraj>=1.11.0`, so the supported matrix starts at `3.11`.
+- Python `3.10` is currently blocked by dependency support because `numpy>=2.3.5` requires Python `>=3.11`, so the supported matrix starts at `3.11`.
 - If the full matrix proves too strict, the next adjustment should be narrowing full pytest coverage while keeping package smoke coverage on all supported Python versions.
 - Automatic patch release on every `main` push is intentionally aggressive and may produce many PyPI versions.
 
