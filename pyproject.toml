@@ -3,9 +3,19 @@ name = "matcha"
 version = "2.0.0"
 description = "Matcha: Multi-Stage Riemannian Flow Matching for Accurate and Physically Valid Molecular Docking"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 license = { file = "LICENSE" }
 authors = [{ name = "Matcha authors" }]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: GNU Affero General Public License v3",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Chemistry",
+]
 dependencies = [
     "biopython>=1.86",
     "datamol>=0.12.5",
@@ -29,8 +39,22 @@ dependencies = [
     "typer>=0.20.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/LigandPro/Matcha"
+Repository = "https://github.com/LigandPro/Matcha"
+Issues = "https://github.com/LigandPro/Matcha/issues"
+
 [tool.uv]
 package = true
+
+[project.optional-dependencies]
+lint = [
+    "ruff>=0.14.8",
+]
+test = [
+    "pytest>=9.0.1",
+    "pytest-xdist>=3.8.0",
+]
 
 [dependency-groups]
 nb = [
@@ -58,6 +82,7 @@ module-root = ""
 
 [tool.ruff]
 line-length = 100
+target-version = "py311"
 format.docstring-code-format = true
 
 [tool.pytest.ini_options]
