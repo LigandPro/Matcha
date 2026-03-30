@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from matcha.utils.multigpu import build_shard_command
+from matcha.utils.multigpu import build_shard_command, materialize_shards
 
 
 def test_build_shard_command_contains_required_gpu_flags():
@@ -42,3 +42,21 @@ def test_build_shard_command_contains_required_gpu_flags():
     assert "--pin-memory" in cmd
     assert "--persistent-workers" in cmd
     assert "--gnina-batch-mode" in cmd
+
+
+def test_materialize_shards_cleans_existing_shard_dir(tmp_path: Path):
+    source = tmp_path / "ligands"
+    source.mkdir(parents=True, exist_ok=True)
+    (source / "ligand_a.sdf").write_text("new", encoding="utf-8")
+
+    target = tmp_path / "shards"
+    stale_shard = target / "shard_00"
+    stale_shard.mkdir(parents=True, exist_ok=True)
+    stale_file = stale_shard / "stale.sdf"
+    stale_file.write_text("old", encoding="utf-8")
+
+    shard_dirs = materialize_shards([[source / "ligand_a.sdf"]], target)
+
+    assert shard_dirs == [target / "shard_00"]
+    assert not stale_file.exists()
+    assert (target / "shard_00" / "00000__ligand_a.sdf").exists()
