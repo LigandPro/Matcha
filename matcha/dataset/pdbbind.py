@@ -517,7 +517,7 @@ class PDBBind(Dataset):
             return True
 
         try:
-            first_path = get_protein_path(complex_names[0], self.dataset_name, self.data_dir)
+            first_path = get_protein_path(complex_names[0], self.dataset_type, self.data_dir)
         except ValueError:
             return False
 
@@ -527,7 +527,7 @@ class PDBBind(Dataset):
         first_size = os.path.getsize(first_path)
         first_hash = self._sha256_file(first_path)
         for complex_name in complex_names[1:]:
-            receptor_path = get_protein_path(complex_name, self.dataset_name, self.data_dir)
+            receptor_path = get_protein_path(complex_name, self.dataset_type, self.data_dir)
             if not os.path.exists(receptor_path):
                 return False
             if os.path.getsize(receptor_path) != first_size:
@@ -571,7 +571,7 @@ class PDBBind(Dataset):
                 mols_for_confs = []
                 orig_by_name = {}
                 for name in tqdm(complex_names_all, desc="Reading ligands for conformers"):
-                    lig_path = get_ligand_path(name, self.dataset_name, self.data_dir)
+                    lig_path = get_ligand_path(name, self.dataset_type, self.data_dir)
                     mol = read_molecule(lig_path, remove_hs=False, sanitize=True)
                     if mol is None:
                         continue

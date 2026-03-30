@@ -22,6 +22,7 @@ import typer
 from rich.console import Console
 
 from matcha.utils.log import get_logger
+from matcha.utils.multigpu import _remove_tree_if_exists
 
 console = Console()
 logger = get_logger(__name__)
@@ -73,27 +74,6 @@ def _write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
-
-
-def _remove_tree_if_exists(path: Path, *, retries: int = 3, delay_sec: float = 0.2) -> None:
-    if not path.exists():
-        return
-
-    last_error: OSError | None = None
-    for attempt in range(retries):
-        try:
-            shutil.rmtree(path)
-            return
-        except FileNotFoundError:
-            return
-        except OSError as exc:
-            last_error = exc
-            if exc.errno != errno.ENOTEMPTY or attempt == retries - 1:
-                raise
-            time.sleep(delay_sec)
-
-    if last_error is not None:
-        raise last_error
 
 
 def _normalize_ligand(src: Path, dest: Path) -> None:
