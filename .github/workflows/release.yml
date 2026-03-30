@@ -7,7 +7,6 @@ on:
 
 permissions:
   contents: write
-  id-token: write
 
 concurrency:
   group: release-main
@@ -114,6 +113,8 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/
+          user: __token__
+          password: ${{ secrets.PYPI_API_TOKEN }}
 
       - name: Create GitHub release
         env:
