@@ -321,7 +321,6 @@ def _print_usage_and_exit() -> None:
 
 [bold]Options:[/bold]
   -g, --device TEXT        Device: auto, cpu, cuda, cuda:N, mps
-  --n-samples INT         Poses per ligand (default: 20)
   --gpus TEXT              Multi-GPU ids for batch mode, e.g. 2,3
   --n-samples INT          Poses per ligand (default: 20)
   --scorer TEXT            gnina / custom / none (default: gnina)
@@ -364,7 +363,7 @@ def run_matcha(
     scorer_type: str = typer.Option("gnina", "--scorer", help="Pose scorer: gnina, custom, or none."),
     scorer_path: Optional[Path] = typer.Option(None, "--scorer-path", help="Path to gnina binary or custom scorer script."),
     scorer_minimize: bool = typer.Option(True, "--scorer-minimize/--no-scorer-minimize", help="Minimize poses during scoring (gnina)."),
-    gnina_batch_mode: str = typer.Option("combined", "--gnina-batch-mode", help="GNINA batch mode: combined or per-ligand (batch mode only)."),
+    gnina_batch_mode: str = typer.Option("per-ligand", "--gnina-batch-mode", help="GNINA scoring mode for batch runs (currently only per-ligand)."),
     physical_only: bool = typer.Option(False, "--physical-only/--keep-all-poses", help="Keep only PoseBusters-passing poses in outputs (default: False)."),
 ) -> None:
     if out is None:
@@ -687,6 +686,9 @@ def run_matcha(
                                    minimize=scorer_minimize)
             sdf_input = preds_root / dataset_name / "sdf_predictions"
             filters_path = preds_root / dataset_name / "filters_results_minimized.json"
+            if scorer_type.startswith("gnina") and batch_mode:
+                if gnina_batch_mode != "per-ligand":
+                    raise typer.BadParameter("--gnina-batch-mode currently supports only 'per-ligand'")
             scorer.score_poses(str(receptor), str(sdf_input), str(sdf_scored), device=cuda_device_idx)
             compute_fast_filters_from_sdf(conf, run_name, sdf_type='minimized', n_preds_to_use=n_samples)
             scorer.select_top_poses(str(sdf_scored), str(best_scored_dir),
