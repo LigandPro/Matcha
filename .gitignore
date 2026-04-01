@@ -213,3 +213,4 @@ __marimo__/
 outputs/
 web/node_modules/
 web/.next/
+web/tsconfig.tsbuildinfo
