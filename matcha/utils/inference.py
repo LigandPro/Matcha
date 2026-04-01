@@ -14,6 +14,19 @@ from matcha.utils.transforms import (apply_tr_rot_changes_to_batch_inplace, appl
 
 logger = get_logger(__name__)
 
+
+def _batched_l2_norm(value):
+    if value is None:
+        return None
+    if value.ndim == 0:
+        return np.asarray([float(torch.abs(value).detach().cpu().item())], dtype=np.float32)
+    if value.numel() == 0:
+        leading_dim = int(value.shape[0]) if value.ndim > 0 else 0
+        return np.zeros((leading_dim,), dtype=np.float32)
+    flat = value.reshape(value.shape[0], -1)
+    return torch.linalg.norm(flat, dim=1).detach().cpu().numpy().copy()
+
+
 def load_from_checkpoint(model, checkpoint_path, strict=True):
     checkpoint_path = os.path.expanduser(checkpoint_path)
     state_dict = safetensors.torch.load_file(os.path.join(
