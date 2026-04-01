@@ -383,7 +383,7 @@ def run_matcha(
     scorer_type: str = typer.Option("gnina", "--scorer", help="Pose scorer: gnina, custom, or none."),
     scorer_path: Optional[Path] = typer.Option(None, "--scorer-path", help="Path to gnina binary or custom scorer script."),
     scorer_minimize: bool = typer.Option(True, "--scorer-minimize/--no-scorer-minimize", help="Minimize poses during scoring (gnina)."),
-    gnina_batch_mode: str = typer.Option("combined", "--gnina-batch-mode", help="GNINA batch mode: combined or per-ligand (batch mode only)."),
+    gnina_batch_mode: str = typer.Option("per-ligand", "--gnina-batch-mode", help="GNINA scoring mode for batch runs (currently only per-ligand)."),
     physical_only: bool = typer.Option(False, "--physical-only/--keep-all-poses", help="Keep only PoseBusters-passing poses in outputs (default: False)."),
 ) -> None:
     if out is None:
@@ -699,9 +699,6 @@ def run_matcha(
     scorer_used = False
     sdf_scored = preds_root / dataset_name / "minimized_sdf_predictions"
     best_scored_dir = preds_root / dataset_name / "best_minimized_predictions"
-    if scorer_type != "none" and scorer_type.startswith("gnina") and not resolved_device.startswith("cuda"):
-        console.print(f"[bold yellow][matcha][/bold yellow] GNINA requires CUDA; skipping scoring on {resolved_device}")
-        scorer_type = "none"
     if scorer_type != "none":
         scoring_start = time.perf_counter()
         try:
@@ -710,26 +707,12 @@ def run_matcha(
             sdf_input = preds_root / dataset_name / "sdf_predictions"
             filters_path = preds_root / dataset_name / "filters_results_minimized.json"
             if scorer_type.startswith("gnina") and batch_mode:
-                if gnina_batch_mode not in {"combined", "per-ligand"}:
-                    raise typer.BadParameter("--gnina-batch-mode must be 'combined' or 'per-ligand'")
-            if scorer_type.startswith("gnina") and batch_mode and gnina_batch_mode == "combined":
-                scorer.score_poses_combined(
-                    str(receptor), str(sdf_input),
-                    str(sdf_scored), str(best_scored_dir),
-                    filters_path=str(filters_path),
-                    n_samples=n_samples,
-                    device=cuda_device_idx,
-                )
-                compute_fast_filters_from_sdf(conf, run_name, sdf_type='minimized', n_preds_to_use=n_samples)
-                scorer.select_top_poses(
-                    str(sdf_scored), str(best_scored_dir),
-                    filters_path=str(filters_path), n_samples=n_samples
-                )
-            else:
-                scorer.score_poses(str(receptor), str(sdf_input), str(sdf_scored), device=cuda_device_idx)
-                compute_fast_filters_from_sdf(conf, run_name, sdf_type='minimized', n_preds_to_use=n_samples)
-                scorer.select_top_poses(str(sdf_scored), str(best_scored_dir),
-                                        filters_path=str(filters_path), n_samples=n_samples)
+                if gnina_batch_mode != "per-ligand":
+                    raise typer.BadParameter("--gnina-batch-mode currently supports only 'per-ligand'")
+            scorer.score_poses(str(receptor), str(sdf_input), str(sdf_scored), device=cuda_device_idx)
+            compute_fast_filters_from_sdf(conf, run_name, sdf_type='minimized', n_preds_to_use=n_samples)
+            scorer.select_top_poses(str(sdf_scored), str(best_scored_dir),
+                                    filters_path=str(filters_path), n_samples=n_samples)
             scorer_used = True
             console.print(f"[bold green][matcha][/bold green] scoring complete ({scorer.name})")
         except RuntimeError as e:

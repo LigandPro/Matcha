@@ -215,7 +215,7 @@ def _run_local_cli_repro_case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r
         scorer_type="custom",
         scorer_path=fake_scorer_script,
         scorer_minimize=True,
-        gnina_batch_mode="combined",
+        gnina_batch_mode="per-ligand",
         physical_only=False,
         num_dataloader_workers=0,
     )
@@ -313,7 +313,7 @@ def test_run_matcha_overwrite_retries_directory_not_empty(
         scorer_type="custom",
         scorer_path=fake_scorer_script,
         scorer_minimize=True,
-        gnina_batch_mode="combined",
+        gnina_batch_mode="per-ligand",
         physical_only=False,
         num_dataloader_workers=0,
     )

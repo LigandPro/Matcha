@@ -27,7 +27,7 @@ def test_build_shard_command_contains_required_gpu_flags():
         scorer_type="gnina",
         scorer_path=None,
         scorer_minimize=True,
-        gnina_batch_mode="combined",
+        gnina_batch_mode="per-ligand",
         physical_only=False,
     )
 
