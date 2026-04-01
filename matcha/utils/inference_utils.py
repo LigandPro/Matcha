@@ -1,4 +1,5 @@
 import os
+import time
 from tqdm import tqdm
 import numpy as np
 from pathlib import Path
@@ -15,10 +16,14 @@ from prody import confProDy
 import torch
 import datamol as dm
 from rdkit import RDLogger
+from torch.utils.data import DataLoader
 
+from matcha.models import MatchaModel
+from matcha.dataset.pdbbind import complex_collate_fn, dummy_ranking_collate_fn
 from matcha.utils.datasets import get_datasets
 from matcha.utils.paths import get_ligand_path
-from matcha.dataset.pdbbind import complex_collate_fn
+from matcha.utils.inference import euler, load_from_checkpoint, run_evaluation
+from matcha.utils.metrics import construct_output_dict
 from matcha.utils.posebusters_utils import calc_posebusters
 from matcha.utils.preprocessing import read_molecule
 from matcha.utils.log import get_logger
@@ -125,8 +130,19 @@ def load_and_merge_all_stages(conf, inference_run_name):
 def merge_stages(all_stage_updated_metrics):
     updated_metrics = copy.deepcopy(all_stage_updated_metrics[0])
     for uid in updated_metrics.keys():
+        running_index = 0
+        for sample_idx, sample in enumerate(updated_metrics[uid]['sample_metrics'], start=1):
+            running_index += 1
+            sample['stage'] = 1
+            sample['stage_sample_index'] = sample_idx
+            sample['merged_index'] = running_index
         for i in range(1, len(all_stage_updated_metrics)):
             samples = copy.deepcopy(all_stage_updated_metrics[i][uid]['sample_metrics'])
+            for sample_idx, sample in enumerate(samples, start=1):
+                running_index += 1
+                sample['stage'] = i + 1
+                sample['stage_sample_index'] = sample_idx
+                sample['merged_index'] = running_index
             updated_metrics[uid]['sample_metrics'].extend(samples)
     return updated_metrics
 
@@ -249,9 +265,12 @@ def compute_fast_filters_from_sdf(conf, inference_run_name, sdf_type='base', n_p
         
         logger.info(f"Computing filters for {dataset_name} from {sdf_folder}")
         
+        # PDBBindWithSortedBatching wraps the underlying dataset used for cache access.
+        cached_dataset = dataset.dataset if hasattr(dataset, "dataset") else dataset
+
         # Create uid -> protein data mapping from cached dataset
         uid_to_data = {}
-        for data in dataset.complexes:
+        for data in cached_dataset.complexes:
             name, conf_num = data.name.split('_conf')
             if conf_num == '0':
                 uid_to_data[name.split('_mol')[0]] = data
@@ -344,6 +363,163 @@ def compute_fast_filters_from_sdf(conf, inference_run_name, sdf_type='base', n_p
             json.dump(filters_results, f, indent=2)
         
         logger.info(f"Successfully processed {len(filters_results)} UIDs for {dataset_name}")
+
+
+def run_v2_inference_pipeline(
+    conf,
+    run_name,
+    n_preds_to_use,
+    pocket_centers_filename=None,
+    docking_batch_limit=15000,
+    num_workers=0,
+    pin_memory=False,
+    prefetch_factor=2,
+    persistent_workers=False,
+    compute_torsion_angles_pred=False,
+    num_steps=10,
+    capture_trajectory=False,
+):
+    del docking_batch_limit
+    del compute_torsion_angles_pred
+
+    conf = copy.deepcopy(conf)
+    conf.ligand_mask_ratio = 0.0
+    conf.protein_mask_ratio = 0.0
+    conf.std_protein_pos = 0
+    conf.std_lig_pos = 0
+    conf.esm_emb_noise_std = 0
+    conf.randomize_bond_neighbors = False
+    conf.use_sorted_batching = True
+
+    torch.multiprocessing.set_sharing_strategy("file_system")
+    torch.manual_seed(conf.seed)
+
+    device = conf.get("device", "cuda" if torch.cuda.is_available() else "cpu")
+    num_workers = max(int(num_workers), 0)
+
+    def get_dataloader_docking(dataset):
+        kwargs = {
+            "batch_size": 1,
+            "shuffle": False,
+            "collate_fn": dummy_ranking_collate_fn,
+            "num_workers": num_workers,
+            "pin_memory": bool(pin_memory),
+        }
+        if num_workers > 0:
+            kwargs["prefetch_factor"] = max(int(prefetch_factor), 1)
+            kwargs["persistent_workers"] = bool(persistent_workers)
+        return DataLoader(dataset, **kwargs)
+
+    pipeline = {
+        "docking": [
+            {
+                "model_path": "matcha_pipeline/stage1/",
+                "model_kwargs": {},
+                "dataset_kwargs": {"n_preds_to_use": n_preds_to_use},
+            },
+            {
+                "model_path": "matcha_pipeline/stage2/",
+                "model_kwargs": {"use_qk_bias": False},
+                "dataset_kwargs": {"n_preds_to_use": n_preds_to_use},
+            },
+            {
+                "model_path": "matcha_pipeline/stage3/",
+                "model_kwargs": {},
+                "dataset_kwargs": {"use_predicted_tr_only": False, "n_preds_to_use": n_preds_to_use},
+            },
+        ],
+    }
+
+    run_root = os.path.join(conf.inference_results_folder, run_name)
+    os.makedirs(run_root, exist_ok=True)
+    with open(os.path.join(run_root, "config.json"), "w") as f:
+        json.dump(pipeline, f)
+
+    for module in pipeline["docking"]:
+        model = MatchaModel(**module["model_kwargs"], conf=conf)
+        model = load_from_checkpoint(model, os.path.join(conf.checkpoints_folder, module["model_path"]))
+        model.to(device)
+        model.eval()
+        module["model"] = model
+
+    dataset_names = list(conf.test_dataset_types)
+    timings = {"num_steps": int(num_steps), "datasets": {}}
+
+    for dataset_name in dataset_names:
+        dataset_timings = {"stages": []}
+        dataset_start = time.perf_counter()
+        predicted_ligand_transforms_path = str(pocket_centers_filename) if pocket_centers_filename else None
+
+        conf.test_dataset_types = [dataset_name]
+        stage1_kwargs = pipeline["docking"][0]["dataset_kwargs"]
+        test_dataset_docking = get_datasets(
+            conf,
+            splits=["test"],
+            predicted_ligand_transforms_path=predicted_ligand_transforms_path,
+            is_train_dataset=False,
+            complex_collate_fn=complex_collate_fn,
+            stage_num=1,
+            **stage1_kwargs,
+        )["test"][dataset_name]
+
+        logger.info({ds_name: len(ds) for ds_name, ds in {dataset_name: test_dataset_docking}.items()})
+
+        updated_metrics = None
+        for stage_idx in [0, 1, 2]:
+            stage_start = time.perf_counter()
+            module = pipeline["docking"][stage_idx]
+            model = module["model"]
+            model.to(device)
+            model.eval()
+
+            test_dataset_docking.stage_num = stage_idx + 1
+            if predicted_ligand_transforms_path is not None:
+                use_predicted_tr_only = module["dataset_kwargs"].get("use_predicted_tr_only", True)
+                test_dataset_docking.dataset.use_predicted_tr_only = use_predicted_tr_only
+                test_dataset_docking.reset_predicted_ligand_transforms(
+                    predicted_ligand_transforms_path,
+                    n_preds_to_use,
+                )
+
+            test_loader = get_dataloader_docking(test_dataset_docking)
+            metrics = run_evaluation(
+                test_loader,
+                num_steps=num_steps,
+                solver=euler,
+                model=model,
+                capture_trajectory=capture_trajectory,
+            )
+
+            stage_metrics_path = os.path.join(run_root, f"stage{stage_idx + 1}_{dataset_name}.npy")
+            np.save(stage_metrics_path, [metrics])
+            updated_metrics = construct_output_dict(metrics, test_dataset_docking.dataset)
+            final_metrics_path = os.path.join(run_root, f"{dataset_name}_final_preds_{stage_idx + 1}stage.npy")
+            np.save(final_metrics_path, [updated_metrics])
+            predicted_ligand_transforms_path = stage_metrics_path
+
+            dataset_timings["stages"].append(
+                {
+                    "stage": stage_idx + 1,
+                    "dataset": dataset_name,
+                    "seconds": time.perf_counter() - stage_start,
+                }
+            )
+
+        if updated_metrics is not None:
+            final_metrics_path = os.path.join(run_root, f"{dataset_name}_final_preds.npy")
+            np.save(final_metrics_path, [updated_metrics])
+
+        dataset_timings["total_sec"] = time.perf_counter() - dataset_start
+        timings["datasets"][dataset_name] = dataset_timings
+
+    conf.test_dataset_types = dataset_names
+    postprocess_start = time.perf_counter()
+    load_and_merge_all_stages(conf, run_name)
+    save_all_to_sdf(conf, run_name, one_file=True, merge_stages=True)
+    compute_fast_filters_from_sdf(conf, run_name, n_preds_to_use=n_preds_to_use)
+    timings["postprocess_sec"] = time.perf_counter() - postprocess_start
+
+    return timings
 
 
 # Stubs for CLI compatibility (v1 pipeline). In v2 use scripts instead.
