@@ -217,7 +217,6 @@ def _run_local_cli_repro_case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r
         scorer_minimize=True,
         gnina_batch_mode="per-ligand",
         physical_only=False,
-        num_dataloader_workers=0,
     )
 
     return collect_repro_snapshot(output_root / run_name, run_name)
@@ -315,7 +314,6 @@ def test_run_matcha_overwrite_retries_directory_not_empty(
         scorer_minimize=True,
         gnina_batch_mode="per-ligand",
         physical_only=False,
-        num_dataloader_workers=0,
     )
 
     assert calls["n"] >= 2

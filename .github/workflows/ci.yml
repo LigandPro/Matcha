@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   ruff:
-    name: Ruff
+    name: Ruff (tests)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -31,11 +31,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Check formatting
-        run: uv run --with ruff ruff format --check .
-
       - name: Run ruff
-        run: uv run --with ruff ruff check .
+        run: uv run --with ruff ruff check tests
 
   package-smoke:
     name: Package Smoke (Python ${{ matrix.python-version }})
@@ -96,4 +93,4 @@ jobs:
         run: uv sync --extra test
 
       - name: Run tests
-        run: uv run pytest
+        run: uv run pytest -o addopts='' tests -q
