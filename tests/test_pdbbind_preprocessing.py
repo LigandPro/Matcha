@@ -1,6 +1,9 @@
 import numpy as np
+import pytest
 
 from matcha.dataset.pdbbind import PDBBind
+from matcha.dataset.complex_dataclasses import Ligand
+from matcha.utils.preprocessing import extract_receptor_structure_prody
 
 
 def _make_dataset(tmp_path, dataset_type="any_conf"):
@@ -56,3 +59,178 @@ def test_complexes_share_single_receptor_accepts_identical_receptors(tmp_path):
     _write_receptor(tmp_path, "second", protein)
 
     assert dataset._complexes_share_single_receptor(["first", "second"]) is True
+
+
+class _FakeCA:
+    def getChids(self):
+        return np.array(["A", "A", "A"])
+
+    def getSegnames(self):
+        return np.array(["", "", ""])
+
+
+class _FakeSelection:
+    def __init__(self, chid="A", segname=""):
+        self._chid = chid
+        self._segname = segname
+
+    def getSegnames(self):
+        return np.array([self._segname])
+
+    def getChids(self):
+        return np.array([self._chid])
+
+
+class _FakeRec:
+    def __init__(self):
+        self.ca = _FakeCA()
+
+    def select(self, query):
+        if query in {"resindex 10", "resindex 20"}:
+            return _FakeSelection()
+        raise AssertionError(f"unexpected query: {query}")
+
+
+def test_extract_receptor_structure_aligns_chain_ids_to_unique_residues(monkeypatch):
+    coords = np.zeros((2, 14, 3), dtype=np.float32)
+    atom_names = np.full((2, 14), "C", dtype=object)
+    seq = np.array(["A", "A"])
+    resindices = np.array([10, 20])
+    embeddings = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+    tokenized = np.array([[11], [12]])
+
+    monkeypatch.setattr(
+        "matcha.utils.preprocessing.get_coords",
+        lambda rec: (coords, atom_names, seq, resindices),
+    )
+
+    result = extract_receptor_structure_prody(
+        _FakeRec(),
+        None,
+        {"AA": (embeddings, tokenized)},
+    )
+
+    c_alpha_coords, lm_embeddings, sequences, chain_lengths, full_coords, full_atom_names, full_atom_residue_ids = result
+
+    assert c_alpha_coords.shape == (2, 3)
+    np.testing.assert_array_equal(lm_embeddings, embeddings)
+    np.testing.assert_array_equal(sequences, tokenized)
+    assert chain_lengths == [(2, 0)]
+    assert full_coords.shape == (28, 3)
+    assert full_atom_names.shape == (28,)
+    np.testing.assert_array_equal(full_atom_residue_ids, np.repeat(np.arange(2), 14))
+
+
+def test_extract_receptor_structure_returns_full_arity_when_no_valid_chain(monkeypatch):
+    coords = np.zeros((1, 14, 3), dtype=np.float32)
+    atom_names = np.full((1, 14), "C", dtype=object)
+    seq = np.array(["A"])
+    resindices = np.array([10])
+    embeddings = np.zeros((1, 2), dtype=np.float32)
+    tokenized = np.zeros((1, 1), dtype=np.int64)
+
+    monkeypatch.setattr(
+        "matcha.utils.preprocessing.get_coords",
+        lambda rec: (coords, atom_names, seq, resindices),
+    )
+
+    class _FakeConformer:
+        def GetPositions(self):
+            return np.array([[100.0, 100.0, 100.0]], dtype=np.float32)
+
+    class _FakeLigand:
+        def GetConformer(self):
+            return _FakeConformer()
+
+    result = extract_receptor_structure_prody(
+        _FakeRec(),
+        _FakeLigand(),
+        {"A": (embeddings, tokenized)},
+    )
+
+    assert result == (None, None, None, None, None, None, None)
+
+
+def test_extract_receptor_structure_raises_when_chain_embedding_is_missing(monkeypatch):
+    coords = np.zeros((1, 14, 3), dtype=np.float32)
+    atom_names = np.full((1, 14), "C", dtype=object)
+    seq = np.array(["A"])
+    resindices = np.array([10])
+
+    monkeypatch.setattr(
+        "matcha.utils.preprocessing.get_coords",
+        lambda rec: (coords, atom_names, seq, resindices),
+    )
+
+    with pytest.raises(KeyError):
+        extract_receptor_structure_prody(_FakeRec(), None, {})
+
+
+@pytest.mark.parametrize(
+    ("dataset_type", "use_all_chains", "expected_ligand_kind"),
+    [
+        ("any_conf", False, "orig"),
+        ("any_conf", True, "none"),
+        ("any", False, "orig"),
+    ],
+)
+def test_get_complex_uses_original_receptor_extraction_inputs(
+    monkeypatch, tmp_path, dataset_type, use_all_chains, expected_ligand_kind
+):
+    dataset = PDBBind.__new__(PDBBind)
+    dataset.data_dir = str(tmp_path)
+    dataset.dataset_type = dataset_type
+    dataset.use_all_chains = use_all_chains
+    dataset.is_train_dataset = False
+    dataset.add_all_atom_pos = False
+    dataset.min_lig_size = 1
+    dataset.n_confs_to_use = 20
+
+    orig_ligand = object()
+    split_ligand = object()
+    receptor_calls = []
+
+    monkeypatch.setattr("matcha.dataset.pdbbind.parse_receptor", lambda *args, **kwargs: object())
+    monkeypatch.setattr("matcha.dataset.pdbbind.read_molecule", lambda *args, **kwargs: orig_ligand)
+    monkeypatch.setattr(
+        "matcha.dataset.pdbbind.generate_conformer_mols",
+        lambda mol, num_conformers: [split_ligand],
+    )
+    monkeypatch.setattr("matcha.dataset.pdbbind.split_molecule", lambda mol, min_lig_size: [mol])
+
+    def fake_extract(rec_model, lig, sequences_to_embeddings):
+        if receptor_calls:
+            raise AssertionError("protein extraction should run exactly once for this test")
+        receptor_calls.append(lig)
+        return (
+            np.zeros((1, 3), dtype=np.float32),
+            np.zeros((1, 2), dtype=np.float32),
+            np.zeros((1, 1), dtype=np.int64),
+            [(1, 0.0)],
+            None,
+            None,
+            None,
+        )
+
+    monkeypatch.setattr("matcha.dataset.pdbbind.extract_receptor_structure_prody", fake_extract)
+
+    def fake_get_ligand(lig, protein_center, parse_rotbonds=True):
+        ligand = Ligand()
+        ligand.pos = np.zeros((1, 3), dtype=np.float32)
+        ligand.x = np.zeros((1, 1), dtype=np.float32)
+        ligand.final_tr = np.zeros((1, 3), dtype=np.float32)
+        ligand.orig_mol = lig
+        ligand.bond_periods = None
+        return ligand
+
+    monkeypatch.setattr("matcha.dataset.pdbbind.get_ligand_without_randomization", fake_get_ligand)
+
+    complexes = dataset._get_complex(["foo"], {"SEQ": (np.zeros((1, 2), dtype=np.float32), np.zeros((1, 1), dtype=np.int64))})
+
+    assert len(complexes) == 1
+    if expected_ligand_kind == "orig":
+        assert receptor_calls == [orig_ligand]
+    elif expected_ligand_kind == "split":
+        assert receptor_calls == [split_ligand]
+    else:
+        assert receptor_calls == [None]

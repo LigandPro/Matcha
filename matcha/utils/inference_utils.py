@@ -391,6 +391,8 @@ def run_v2_inference_pipeline(
         )['test']
         logger.info({ds_name: len(ds) for ds_name, ds in test_dataset_docking.items()})
         test_dataset_docking = test_dataset_docking[dataset_name]
+        if len(test_dataset_docking) == 0:
+            raise ValueError(f"No valid complexes found for dataset {dataset_name}")
 
         for stage_idx in [0, 1, 2]:
             if pocket_centers_filename is not None and stage_idx == 0:
