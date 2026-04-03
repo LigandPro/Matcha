@@ -796,15 +796,12 @@ class PDBBind(Dataset):
                         protein = protein_template
                         current_protein_center = protein_center
                     else:
-                        receptor_ligand = lig_mol
-                        if self.use_all_chains:
-                            receptor_ligand = None if protein_template is not None else orig_ligs[lig_idx]
                         if self.dataset_type.endswith('_conf'):
                             c_alpha_coords_list, lm_embeddings_list, sequences_list, chain_lengths, full_coords, full_atom_names, full_atom_residue_ids = extract_receptor_structure_prody(
-                                rec_model, receptor_ligand, sequences_to_embeddings)
+                                rec_model, orig_ligs[lig_idx] if not self.use_all_chains else None, sequences_to_embeddings)
                         else:
                             c_alpha_coords_list, lm_embeddings_list, sequences_list, chain_lengths, full_coords, full_atom_names, full_atom_residue_ids = extract_receptor_structure_prody(
-                                rec_model, receptor_ligand, sequences_to_embeddings)
+                                rec_model, lig_mol, sequences_to_embeddings)
 
                         # positions are positions of C-alpha, other positions are not used
                         if not self.add_all_atom_pos:

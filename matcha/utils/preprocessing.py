@@ -607,14 +607,7 @@ def extract_receptor_structure_prody(rec, lig, sequences_to_embeddings):
         if min_dist_to_lig < 4.5:
             logger.debug(f'keep chain {chain_id} with distance {min_dist_to_lig}')
             # if min_dist_to_lig < 10:
-            chain_embedding = sequences_to_embeddings.get(chain_seq)
-            if chain_embedding is None:
-                logger.warning(
-                    f"Missing protein sequence embedding for chain {chain_id} "
-                    f"(length={len(chain_seq)}); skipping chain"
-                )
-                continue
-            embeddings, tokenized_seq = chain_embedding
+            embeddings, tokenized_seq = sequences_to_embeddings[chain_seq]
             chain_distances_list.append(min_dist_to_lig)
             sequences.append(tokenized_seq)
             lm_embeddings.append(embeddings)

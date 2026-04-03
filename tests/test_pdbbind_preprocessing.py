@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from matcha.dataset.pdbbind import PDBBind
 from matcha.dataset.complex_dataclasses import Ligand
@@ -150,7 +151,7 @@ def test_extract_receptor_structure_returns_full_arity_when_no_valid_chain(monke
     assert result == (None, None, None, None, None, None, None)
 
 
-def test_extract_receptor_structure_skips_missing_chain_embeddings(monkeypatch):
+def test_extract_receptor_structure_raises_when_chain_embedding_is_missing(monkeypatch):
     coords = np.zeros((1, 14, 3), dtype=np.float32)
     atom_names = np.full((1, 14), "C", dtype=object)
     seq = np.array(["A"])
@@ -161,33 +162,46 @@ def test_extract_receptor_structure_skips_missing_chain_embeddings(monkeypatch):
         lambda rec: (coords, atom_names, seq, resindices),
     )
 
-    result = extract_receptor_structure_prody(_FakeRec(), None, {})
+    with pytest.raises(KeyError):
+        extract_receptor_structure_prody(_FakeRec(), None, {})
 
-    assert result == (None, None, None, None, None, None, None)
 
-
-def test_get_complex_falls_back_to_ligand_specific_receptor_extraction(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("dataset_type", "use_all_chains", "expected_ligand_kind"),
+    [
+        ("any_conf", False, "orig"),
+        ("any_conf", True, "none"),
+        ("any", False, "orig"),
+    ],
+)
+def test_get_complex_uses_original_receptor_extraction_inputs(
+    monkeypatch, tmp_path, dataset_type, use_all_chains, expected_ligand_kind
+):
     dataset = PDBBind.__new__(PDBBind)
     dataset.data_dir = str(tmp_path)
-    dataset.dataset_type = "any_conf"
-    dataset.use_all_chains = True
+    dataset.dataset_type = dataset_type
+    dataset.use_all_chains = use_all_chains
     dataset.is_train_dataset = False
     dataset.add_all_atom_pos = False
     dataset.min_lig_size = 1
     dataset.n_confs_to_use = 20
 
-    ligand_mol = object()
+    orig_ligand = object()
+    split_ligand = object()
     receptor_calls = []
 
     monkeypatch.setattr("matcha.dataset.pdbbind.parse_receptor", lambda *args, **kwargs: object())
-    monkeypatch.setattr("matcha.dataset.pdbbind.read_molecule", lambda *args, **kwargs: ligand_mol)
+    monkeypatch.setattr("matcha.dataset.pdbbind.read_molecule", lambda *args, **kwargs: orig_ligand)
+    monkeypatch.setattr(
+        "matcha.dataset.pdbbind.generate_conformer_mols",
+        lambda mol, num_conformers: [split_ligand],
+    )
     monkeypatch.setattr("matcha.dataset.pdbbind.split_molecule", lambda mol, min_lig_size: [mol])
-    monkeypatch.setattr("matcha.dataset.pdbbind.generate_conformer_mols", lambda mol, num_conformers: [mol])
 
     def fake_extract(rec_model, lig, sequences_to_embeddings):
+        if receptor_calls:
+            raise AssertionError("protein extraction should run exactly once for this test")
         receptor_calls.append(lig)
-        if lig is None:
-            raise KeyError("shared-template-sequence")
         return (
             np.zeros((1, 3), dtype=np.float32),
             np.zeros((1, 2), dtype=np.float32),
@@ -214,5 +228,9 @@ def test_get_complex_falls_back_to_ligand_specific_receptor_extraction(monkeypat
     complexes = dataset._get_complex(["foo"], {"SEQ": (np.zeros((1, 2), dtype=np.float32), np.zeros((1, 1), dtype=np.int64))})
 
     assert len(complexes) == 1
-    assert receptor_calls[0] is None
-    assert receptor_calls[1] is ligand_mol
+    if expected_ligand_kind == "orig":
+        assert receptor_calls == [orig_ligand]
+    elif expected_ligand_kind == "split":
+        assert receptor_calls == [split_ligand]
+    else:
+        assert receptor_calls == [None]
