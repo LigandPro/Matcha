@@ -1,8 +1,8 @@
 import numpy as np
 import pytest
 
-from matcha.dataset.pdbbind import PDBBind
 from matcha.dataset.complex_dataclasses import Ligand
+from matcha.dataset.pdbbind import PDBBind
 from matcha.utils.preprocessing import extract_receptor_structure_prody
 
 
