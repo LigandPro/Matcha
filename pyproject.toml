@@ -81,7 +81,49 @@ module-root = ""
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-format.docstring-code-format = true
+exclude = [
+    ".git",
+    ".venv",
+    "__pycache__",
+    "*.egg-info",
+    "build",
+    "dist",
+    "*.ipynb",
+]
+
+[tool.ruff.lint]
+ignore = [
+    "E501",
+    "E741",
+    "N803",
+    "N806",
+    "B008",
+    "RET504",
+    "SIM108",
+    "SIM102",
+    "N812",
+    "N802",
+    "E731",
+    "C408",
+    "SIM113",
+    "F541",
+    "F841",
+    "E402",
+    "E722",
+]
+fixable = ["ALL"]
+unfixable = []
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401", "F403"]
+"tests/**/*.py" = ["S101"]
+
+[tool.ruff.format]
+docstring-code-format = true
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
 
 [tool.pytest.ini_options]
 testpaths = [
