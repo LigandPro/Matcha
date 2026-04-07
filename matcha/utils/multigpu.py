@@ -149,7 +149,6 @@ def build_shard_command(
     scorer_path: Optional[Path],
     scorer_minimize: bool,
     gnina_batch_mode: str,
-    physical_only: bool,
 ) -> list[str]:
     cmd: list[str] = [
         "uv",
@@ -198,7 +197,6 @@ def build_shard_command(
     _append_optional_flag(cmd, pin_memory, "--pin-memory", "--no-pin-memory")
     _append_optional_flag(cmd, persistent_workers, "--persistent-workers", "--no-persistent-workers")
     cmd.append("--scorer-minimize" if scorer_minimize else "--no-scorer-minimize")
-    cmd.append("--physical-only" if physical_only else "--keep-all-poses")
     return cmd
 
 
@@ -229,7 +227,6 @@ def _make_shard_specs(
     scorer_path: Optional[Path],
     scorer_minimize: bool,
     gnina_batch_mode: str,
-    physical_only: bool,
 ) -> list[ShardSpec]:
     specs: list[ShardSpec] = []
     for gpu_id, shard_dir, ligand_count in zip(gpu_ids, shard_dirs, shard_counts):
@@ -263,7 +260,6 @@ def _make_shard_specs(
             scorer_path=scorer_path,
             scorer_minimize=scorer_minimize,
             gnina_batch_mode=gnina_batch_mode,
-            physical_only=physical_only,
         )
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
@@ -558,7 +554,6 @@ def run_multigpu_batch(
     scorer_path: Optional[Path],
     scorer_minimize: bool,
     gnina_batch_mode: str,
-    physical_only: bool,
 ) -> dict:
     ligand_files = find_ligand_files(ligand_dir, recursive=recursive)
     sharded = shard_ligand_files(ligand_files, n_shards=len(gpu_ids))
@@ -591,7 +586,6 @@ def run_multigpu_batch(
         scorer_path=scorer_path,
         scorer_minimize=scorer_minimize,
         gnina_batch_mode=gnina_batch_mode,
-        physical_only=physical_only,
     )
 
     repo_root = Path(__file__).resolve().parents[2]

@@ -6,7 +6,6 @@ Example:
 from __future__ import annotations
 
 import copy
-import errno
 import json
 import os
 import shutil
@@ -364,7 +363,6 @@ def run_matcha(
     scorer_path: Optional[Path] = typer.Option(None, "--scorer-path", help="Path to gnina binary or custom scorer script."),
     scorer_minimize: bool = typer.Option(True, "--scorer-minimize/--no-scorer-minimize", help="Minimize poses during scoring (gnina)."),
     gnina_batch_mode: str = typer.Option("per-ligand", "--gnina-batch-mode", help="GNINA scoring mode for batch runs (currently only per-ligand)."),
-    physical_only: bool = typer.Option(False, "--physical-only/--keep-all-poses", help="Keep only PoseBusters-passing poses in outputs (default: False)."),
 ) -> None:
     if out is None:
         _print_usage_and_exit()
@@ -547,7 +545,6 @@ def run_matcha(
             scorer_path=scorer_path,
             scorer_minimize=scorer_minimize,
             gnina_batch_mode=gnina_batch_mode,
-            physical_only=physical_only,
         )
         total_sec = time.perf_counter() - run_timer_start
         _write_json(
@@ -752,34 +749,21 @@ def run_matcha(
         )
         return [(rank, sample_metrics[i]) for rank, i in enumerate(ranked_indices, start=1)]
 
-    def _save_all_poses_for_uid(metrics_data, uid, out_path, filter_non_physical: bool = True):
+    def _save_all_poses_for_uid(metrics_data, uid, out_path):
         if uid not in metrics_data:
             return [], 0, 0
         sample_data = metrics_data[uid]
-        orig_mol = sample_data["orig_mol"]
         ranked = _rank_samples(sample_data["sample_metrics"])
-        best_pb_count = max(int(s.get("posebusters_filters_passed_count_fast", 0)) for s in sample_data["sample_metrics"])
+        uid_real = uid.split("_mol")[0] if "_mol" in uid else uid
+        poses_source = sdf_scored / f"{uid_real}.sdf"
+        if not poses_source.exists():
+            poses_source = preds_root / dataset_name / "sdf_predictions" / f"{uid_real}.sdf"
 
-        # Optionally filter out poses failing PoseBusters fast checks
-        ranked_filtered = [(r, s) for r, s in ranked if not filter_non_physical or int(s.get("posebusters_filters_passed_count_fast", 0)) == best_pb_count]
-        ranked_to_use = ranked_filtered if ranked_filtered else ranked
-
-        writer = Chem.SDWriter(str(out_path))
-        writer.SetKekulize(False)
-        for rank, sample in ranked_to_use:
-            mol = copy.deepcopy(orig_mol)
-            conf = Chem.Conformer(orig_mol.GetNumAtoms())
-            for idx, (x, y, z) in enumerate(sample["pred_pos"]):
-                conf.SetAtomPosition(idx, (float(x), float(y), float(z)))
-            mol.RemoveAllConformers()
-            mol.AddConformer(conf, assignId=True)
-            mol.SetProp("_Name", f"{uid}_rank{rank}")
-            try:
-                writer.write(mol)
-            except Exception as exc:
-                logger.warning(f"Failed to write pose SDF for {uid} rank {rank}: {exc}")
-        writer.close()
-        return ranked_to_use, len(ranked_filtered), len(ranked)
+        if poses_source.exists():
+            shutil.copyfile(poses_source, out_path)
+        else:
+            logger.warning(f"Failed to locate poses SDF for {uid_real} under {preds_root / dataset_name}")
+        return ranked, len(ranked), len(ranked)
 
     def _get_best_sample_idx(pb_counts, gnina_scores=None):
         best_pb_count = max(pb_counts)
@@ -873,7 +857,7 @@ def run_matcha(
 
     def _format_summary_section(n_samples, scorer_type, scorer_used, scorer_name,
                                 pb_counts, gnina_scores, has_gnina, best_idx,
-                                kept_physical, total_samples, physical_only):
+                                saved_poses, total_samples):
         lines = [
             "[ SUMMARY ]",
             f"  Samples per ligand     : {n_samples}",
@@ -881,12 +865,11 @@ def run_matcha(
         ]
         if has_gnina:
             lines.append(f"  GNINA Affinity (kcal/mol): min={min(gnina_scores):.2f}, mean={float(np.mean(gnina_scores)):.2f}, max={max(gnina_scores):.2f}")
-        filter_warning = "  [WARNING: none passed, keeping originals]" if physical_only and kept_physical == 0 else ""
         affinity_str = f", affinity={gnina_scores[best_idx]:.2f}" if has_gnina else ""
         lines.extend([
             f"  PoseBusters checks     : min={min(pb_counts)}/4, max={max(pb_counts)}/4",
             f"  Best sample            : rank={best_idx+1}, pb={pb_counts[best_idx]}/4{affinity_str}",
-            f"  Filtered poses (pb_4/4): kept {kept_physical}/{total_samples}{filter_warning}",
+            f"  Saved poses            : {saved_poses}/{total_samples}",
             "", "",
             "  PoseBusters checks (4 boolean tests):",
             "    1. not_too_far_away   : ligand is close to protein (distance check)",
@@ -912,7 +895,7 @@ def run_matcha(
         scored_path = best_scored_dir / f"{run_name}.sdf" if scorer_used else None
         _write_best_pose_sdf(mdata, best_idx, uid, resolved_out, scored_path=scored_path)
 
-        ranked_samples, kept_physical, total_samples = _save_all_poses_for_uid(metrics, uid, all_poses_dest, filter_non_physical=physical_only)
+        ranked_samples, saved_poses, total_samples = _save_all_poses_for_uid(metrics, uid, all_poses_dest)
 
         end_time = datetime.now(timezone.utc)
         runtime = (end_time - start_time).total_seconds()
@@ -961,7 +944,7 @@ def run_matcha(
         log_lines.extend(_format_summary_section(
             n_samples, scorer_type, scorer_used, scorer_name,
             pb_counts, gnina_scores, has_gnina, best_idx,
-            kept_physical, total_samples, physical_only))
+            saved_poses, total_samples))
         log_lines.append("[ POSE RANKING ]")
         log_lines.extend(_format_pose_ranking_lines(ranked_samples, has_gnina))
 
@@ -987,7 +970,7 @@ def run_matcha(
         for line in _format_summary_section(
                 n_samples, scorer_type, scorer_used, scorer_name,
                 pb_counts, gnina_scores, has_gnina, best_idx,
-                kept_physical, total_samples, physical_only):
+                saved_poses, total_samples):
             console.print(line)
         console.print("[ POSE RANKING ]")
         for line in _format_pose_ranking_lines(ranked_samples, has_gnina):
@@ -1030,9 +1013,7 @@ def run_matcha(
         scored_path = best_scored_dir / f"{mol_uid}.sdf" if scorer_used else None
         _write_best_pose_sdf(mdata, best_idx, mol_uid, best_dest, scored_path=scored_path)
 
-        ranked_samples, kept_physical, total_samples = _save_all_poses_for_uid(
-            metrics, metrics_key, all_dest, filter_non_physical=physical_only
-        )
+        ranked_samples, saved_poses, total_samples = _save_all_poses_for_uid(metrics, metrics_key, all_dest)
 
         ligand_input = (run_workdir / "work" / "datasets" / "any_conf" / mol_uid / f"{mol_uid}_ligand.sdf").resolve()
         per_log_path = per_log_dir / f"{mol_uid}.log"
@@ -1065,7 +1046,7 @@ def run_matcha(
         log_lines.extend(_format_summary_section(
             n_samples, scorer_type, scorer_used, scorer_name,
             pb_counts, gnina_scores, has_gnina, best_idx,
-            kept_physical, total_samples, physical_only))
+            saved_poses, total_samples))
         log_lines.append("[ POSE RANKING ]")
         log_lines.extend(_format_pose_ranking_lines(ranked_samples, has_gnina))
 
