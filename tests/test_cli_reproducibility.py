@@ -216,8 +216,6 @@ def _run_local_cli_repro_case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r
         scorer_path=fake_scorer_script,
         scorer_minimize=True,
         gnina_batch_mode="per-ligand",
-        physical_only=False,
-        num_dataloader_workers=0,
     )
 
     return collect_repro_snapshot(output_root / run_name, run_name)
@@ -230,6 +228,23 @@ def test_cli_matches_committed_baseline_for_scores_and_filters(
     baseline = load_baseline_json(LOCAL_BASELINE)
 
     _assert_snapshot_matches_baseline(snapshot, baseline)
+
+
+def test_all_poses_output_copies_minimized_predictions(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    run_name = "copied_poses"
+    _run_local_cli_repro_case(tmp_path, monkeypatch, run_name)
+
+    run_dir = tmp_path / "out" / run_name
+    copied_all_poses = run_dir / f"{run_name}_poses.sdf"
+    minimized_predictions = (
+        run_dir / "work" / "runs" / run_name / "any_conf" / "minimized_sdf_predictions" / f"{run_name}.sdf"
+    )
+
+    assert copied_all_poses.exists()
+    assert minimized_predictions.exists()
+    assert copied_all_poses.read_text(encoding="utf-8") == minimized_predictions.read_text(encoding="utf-8")
 
 
 def test_prepare_batch_dataset_cleans_existing_sample_dir(tmp_path: Path):
@@ -314,8 +329,6 @@ def test_run_matcha_overwrite_retries_directory_not_empty(
         scorer_path=fake_scorer_script,
         scorer_minimize=True,
         gnina_batch_mode="per-ligand",
-        physical_only=False,
-        num_dataloader_workers=0,
     )
 
     assert calls["n"] >= 2
