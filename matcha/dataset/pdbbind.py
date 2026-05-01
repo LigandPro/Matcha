@@ -377,6 +377,12 @@ class PDBBind(Dataset):
 
         self.predicted_ligand_transforms = np.load(
             predicted_ligand_transforms_path, allow_pickle=True)[0]
+        missing_predictions = sum(
+            1
+            for c in self.complexes
+            if c.name in self.predicted_ligand_transforms
+            and len(self.predicted_ligand_transforms[c.name]) == 0
+        )
         self.complexes = [
             c for c in self.complexes
             if c.name in self.predicted_ligand_transforms
@@ -418,6 +424,12 @@ class PDBBind(Dataset):
                     extended_complex.ligand.predicted_pos = pred_pos.astype(np.float32)
 
                 extended_complexes.append(extended_complex)
+        if missing_predictions > 0:
+            logger.warning(
+                "Skipping %d complexes without predicted ligand transforms from %s",
+                missing_predictions,
+                predicted_ligand_transforms_path,
+            )
         self.complexes = extended_complexes
 
     def __len__(self):
