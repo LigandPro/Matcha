@@ -105,6 +105,8 @@ def main() -> None:
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--n-samples", type=int, default=8)
     parser.add_argument("--torsion-mc-steps", type=int, default=0)
+    parser.add_argument("--gnina-path", type=Path, default=None)
+    parser.add_argument("--gnina-minimize", action="store_true")
     args = parser.parse_args()
 
     args.out.mkdir(parents=True, exist_ok=True)
@@ -114,7 +116,8 @@ def main() -> None:
 
     receptor = args.openbind_data / "structures/x7259a/A71EV2A-x7259a/A71EV2A-x7259a_prepared.pdb"
     template = args.openbind_data / "structures/x7259a/A71EV2A-x7259a/A71EV2A-x7259a_ligand_ref.sdf"
-    run_name = f"openbind_x7259a_76_n{args.n_samples}_tmc{args.torsion_mc_steps}"
+    suffix = "_gnina" if args.gnina_path is not None else ""
+    run_name = f"openbind_x7259a_76_n{args.n_samples}_tmc{args.torsion_mc_steps}{suffix}"
     cmd = [
         sys.executable,
         "-m",
@@ -138,6 +141,10 @@ def main() -> None:
         run_name,
         "--overwrite",
     ]
+    if args.gnina_path is not None:
+        cmd.extend(["--scorer", "gnina", "--scorer-path", str(args.gnina_path)])
+        if not args.gnina_minimize:
+            cmd.append("--no-scorer-minimize")
     log = args.out / f"{run_name}.log"
     with log.open("w") as handle:
         subprocess.run(cmd, check=True, stdout=handle, stderr=subprocess.STDOUT)
@@ -166,7 +173,14 @@ def main() -> None:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
-    summary = {"n": len(rows), "bundle": str(bundle), "report": str(report), "log": str(log)}
+    summary = {
+        "n": len(rows),
+        "bundle": str(bundle),
+        "report": str(report),
+        "log": str(log),
+        "gnina_path": str(args.gnina_path) if args.gnina_path is not None else None,
+        "gnina_minimize": bool(args.gnina_minimize),
+    }
     for threshold in [0.5, 1.0, 2.0, 3.0]:
         summary[f"single_le_{threshold}A"] = sum(row["single_best_rmsd"] <= threshold for row in rows)
         summary[f"ensemble_le_{threshold}A"] = sum(row["ensemble_min_rmsd"] <= threshold for row in rows)
