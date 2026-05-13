@@ -10,12 +10,17 @@ from typing import Iterable, Mapping
 import numpy as np
 from rdkit import Chem
 
+from matcha.utils.log import get_logger
+
 from .constrained_embed import generate_constrained_conformers, mol_positions
 from .fep_export import LigandAnalogueExport, write_fep_bundle
 from .mcs import MCSMapping, find_robust_mcs
 from .ranking import load_receptor_heavy_atom_positions, rank_poses
 from .standardize import standardize_mol
 from .torsion_mc import torsional_mc_refine
+
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -311,13 +316,15 @@ def run_analogue_workflow(
     ranked_by_ligand: dict[str, list[tuple[Chem.Mol, object]]] = {}
     gnina_ranking_rows: list[dict] = []
 
-    for ligand_id, ligand_mol in ligands:
+    for ligand_index, (ligand_id, ligand_mol) in enumerate(ligands, start=1):
+        logger.info("Analogue ligand %d start: %s", ligand_index, ligand_id)
         ligand_std_res = standardize_mol(ligand_mol, remove_hs=True, sanitize=True)
         ligand_warnings = list(ligand_std_res.warnings)
         if ligand_std_res.mol is None:
             mapping = MCSMapping([], status="failed", warnings=["standardization_failed"] + ligand_warnings)
             exports[ligand_id] = LigandAnalogueExport(ligand_id, mapping, [], ligand_warnings, failed=True)
             failures.append({"ligand_id": ligand_id, "reason": "standardization_failed", "warnings": ligand_warnings})
+            logger.info("Analogue ligand %s failed: standardization_failed", ligand_id)
             continue
         ligand_std = ligand_std_res.mol
         ligand_std.SetProp("_Name", ligand_id)
@@ -334,7 +341,19 @@ def run_analogue_workflow(
             warnings = ligand_warnings + list(mapping.warnings)
             exports[ligand_id] = LigandAnalogueExport(ligand_id, mapping, [], warnings, failed=True)
             failures.append({"ligand_id": ligand_id, "reason": "failed_mcs", "warnings": warnings})
+            logger.info(
+                "Analogue ligand %s failed: failed_mcs atoms=%d fraction=%.3f",
+                ligand_id,
+                int(mapping.num_atoms),
+                float(mapping.fraction_ligand),
+            )
             continue
+        logger.info(
+            "Analogue ligand %s MCS ok: atoms=%d fraction=%.3f",
+            ligand_id,
+            int(mapping.num_atoms),
+            float(mapping.fraction_ligand),
+        )
 
         conformer_result = generate_constrained_conformers(
             template_std,
@@ -349,6 +368,7 @@ def run_analogue_workflow(
         )
         poses = conformer_result.conformers
         warnings = ligand_warnings + list(mapping.warnings) + conformer_result.warnings
+        logger.info("Analogue ligand %s generated seed poses: %d", ligand_id, len(poses))
         if cfg.torsion_mc_steps > 0 and poses:
             mc_result = torsional_mc_refine(
                 template_std,
@@ -365,6 +385,7 @@ def run_analogue_workflow(
         if not poses:
             exports[ligand_id] = LigandAnalogueExport(ligand_id, mapping, [], warnings + ["no_seed_poses"], failed=True)
             failures.append({"ligand_id": ligand_id, "reason": "no_seed_poses", "warnings": warnings})
+            logger.info("Analogue ligand %s failed: no_seed_poses", ligand_id)
             continue
 
         ranked = rank_poses(
@@ -377,6 +398,13 @@ def run_analogue_workflow(
             receptor_positions=receptor_positions,
         )[: max(1, int(cfg.n_seed_poses))]
         if cfg.gnina_score_poses and receptor_path is not None:
+            logger.info(
+                "Analogue ligand %s GNINA rerank start: score_type=%s cnn_scoring=%s minimize=%s",
+                ligand_id,
+                cfg.gnina_score_type,
+                cfg.gnina_cnn_scoring,
+                bool(cfg.gnina_minimize),
+            )
             ranked = _gnina_rerank_poses(
                 ligand_id=ligand_id,
                 ranked=ranked,
@@ -388,11 +416,19 @@ def run_analogue_workflow(
                 cfg=cfg,
                 ranking_rows=gnina_ranking_rows,
             )[: max(1, int(cfg.n_seed_poses))]
+            logger.info("Analogue ligand %s GNINA rerank done", ligand_id)
         ranked_by_ligand[ligand_id] = ranked
         final_ranked = ranked[: max(1, int(cfg.n_final_poses))]
         exports[ligand_id] = LigandAnalogueExport(ligand_id, mapping, final_ranked, warnings, failed=False)
         if final_ranked:
             selected_molecules[ligand_id] = _clone_with_name(final_ranked[0][0], ligand_id)
+            _best_mol, best_qc = final_ranked[0]
+            logger.info(
+                "Analogue ligand %s done: selected_status=%s core_rmsd=%.3f",
+                ligand_id,
+                best_qc.status,
+                float(best_qc.core_rmsd),
+            )
 
     seed_transforms = _build_seed_transforms(ranked_by_ligand, n_seed_poses=cfg.n_seed_poses)
     seed_transforms_path = output_dir / "analogue_seed_transforms.npy"

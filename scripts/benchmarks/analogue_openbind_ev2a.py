@@ -117,8 +117,6 @@ def main() -> None:
 
     args.out.mkdir(parents=True, exist_ok=True)
     selected = _rowan_subset(args.benchmark_dir)
-    subset_sdf = args.out / "openbind_ev2a_x7259a_76.sdf"
-    _write_subset_sdf(selected, subset_sdf)
 
     receptor = args.openbind_data / "structures/x7259a/A71EV2A-x7259a/A71EV2A-x7259a_prepared.pdb"
     template = args.openbind_data / "structures/x7259a/A71EV2A-x7259a/A71EV2A-x7259a_ligand_ref.sdf"
@@ -130,6 +128,8 @@ def main() -> None:
         if args.gnina_minimize:
             suffix += "_min"
     run_name = f"openbind_x7259a_76_n{args.n_samples}_tmc{args.torsion_mc_steps}{suffix}"
+    subset_sdf = args.out / f"{run_name}_input.sdf"
+    _write_subset_sdf(selected, subset_sdf)
     cmd = [
         sys.executable,
         "-m",

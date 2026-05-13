@@ -86,7 +86,15 @@ def main() -> None:
 
     target = args.wang_dir / "thrombin"
     args.out.mkdir(parents=True, exist_ok=True)
-    analogues = args.out / f"thrombin_without_{args.template_id}.sdf"
+    suffix = ""
+    if args.gnina_path is not None:
+        suffix = f"_gnina_{_slug(args.gnina_score_type)}"
+        if args.gnina_cnn_scoring != "none":
+            suffix += f"_{_slug(args.gnina_cnn_scoring)}"
+        if args.gnina_minimize:
+            suffix += "_min"
+    run_name = f"jacs_thrombin_template_{args.template_id}_n{args.n_samples}_tmc{args.torsion_mc_steps}{suffix}"
+    analogues = args.out / f"{run_name}_input.sdf"
     writer = Chem.SDWriter(str(analogues))
     names: list[str] = []
     for mol in Chem.SDMolSupplier(str(target / "thrombin_ligands.sdf"), removeHs=False, sanitize=False):
@@ -100,14 +108,6 @@ def main() -> None:
         names.append(name)
     writer.close()
 
-    suffix = ""
-    if args.gnina_path is not None:
-        suffix = f"_gnina_{_slug(args.gnina_score_type)}"
-        if args.gnina_cnn_scoring != "none":
-            suffix += f"_{_slug(args.gnina_cnn_scoring)}"
-        if args.gnina_minimize:
-            suffix += "_min"
-    run_name = f"jacs_thrombin_template_{args.template_id}_n{args.n_samples}_tmc{args.torsion_mc_steps}{suffix}"
     cmd = [
         sys.executable,
         "-m",
