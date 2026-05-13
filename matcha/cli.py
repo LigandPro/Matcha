@@ -75,6 +75,152 @@ def _write_json(path: Path, payload: dict) -> None:
         json.dump(payload, f, indent=2)
 
 
+def _format_optional_float(value: Any) -> str:
+    if value is None or value == "":
+        return "n/a"
+    try:
+        return f"{float(value):.3f}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _write_analogue_run_log(
+    *,
+    log_path: Path,
+    run_name: str,
+    receptor: Path | None,
+    ligand_source: Path | None,
+    analogue_template: Path,
+    output_dir: Path,
+    seed_count: int,
+    final_pose_count: int,
+    min_mcs_atoms: int,
+    min_mcs_fraction: float,
+    core_rmsd_cutoff: float,
+    torsion_mc_steps: int,
+    receptor_aware: bool,
+    scorer_type: str,
+    scorer_path: Path | None,
+    scorer_minimize: bool,
+    result: Any,
+    total_sec: float,
+) -> None:
+    summary = result.summary
+    gnina = summary.get("gnina_ranking", {})
+    selected_score = gnina.get("selected_score", {}) if isinstance(gnina, dict) else {}
+    lines = [
+        "Matcha analogue/FEP run",
+        f"Run name          : {run_name}",
+        f"Runtime           : {_format_runtime(total_sec)}",
+        "",
+        "[ INPUTS ]",
+        f"  Receptor         : {receptor.resolve() if receptor is not None else 'n/a'}",
+        f"  Ligands          : {ligand_source.resolve() if ligand_source is not None else 'single ligand'}",
+        f"  Analogue template: {analogue_template.resolve()}",
+        f"  Output directory : {output_dir.resolve()}",
+        "",
+        "[ ANALOGUE CONFIG ]",
+        f"  Seed poses       : {seed_count}",
+        f"  Final poses      : {final_pose_count}",
+        f"  Min MCS atoms    : {min_mcs_atoms}",
+        f"  Min MCS fraction : {min_mcs_fraction}",
+        f"  Core RMSD cutoff : {core_rmsd_cutoff}",
+        f"  Torsion MC steps : {torsion_mc_steps}",
+        f"  Receptor-aware   : {receptor_aware}",
+        "",
+        "[ GNINA RERANKING ]",
+        f"  Enabled          : {gnina.get('enabled', False) if isinstance(gnina, dict) else False}",
+        f"  Scorer type      : {scorer_type}",
+        f"  Scorer path      : {scorer_path.resolve() if scorer_path is not None else 'n/a'}",
+        f"  Score type       : {gnina.get('score_type', 'n/a') if isinstance(gnina, dict) else 'n/a'}",
+        f"  CNN scoring      : {gnina.get('cnn_scoring', 'n/a') if isinstance(gnina, dict) else 'n/a'}",
+        f"  Minimize         : {scorer_minimize}",
+        f"  Ligands scored   : {gnina.get('ligands_scored', 0) if isinstance(gnina, dict) else 0}",
+        f"  Poses scored     : {gnina.get('poses_scored', 0) if isinstance(gnina, dict) else 0}",
+        f"  Missing scores   : {gnina.get('poses_missing_score', 0) if isinstance(gnina, dict) else 0}",
+        f"  Selected changed : {gnina.get('selected_changed_by_gnina', 0) if isinstance(gnina, dict) else 0}",
+        (
+            "  Selected score   : "
+            f"min={_format_optional_float(selected_score.get('min'))}, "
+            f"mean={_format_optional_float(selected_score.get('mean'))}, "
+            f"max={_format_optional_float(selected_score.get('max'))}"
+        ),
+        "",
+        "[ SUMMARY ]",
+        f"  Ligands total    : {summary.get('ligands_total', 0)}",
+        f"  Seed poses ready : {summary.get('ligands_with_seed_poses', 0)}",
+        f"  FEP_READY        : {summary.get('fep_ready', 0)}",
+        f"  NEEDS_REVIEW     : {summary.get('needs_review', 0)}",
+        f"  Failed           : {summary.get('failed', 0)}",
+        "",
+        "[ ARTIFACTS ]",
+        f"  Analogue summary : {(result.output_dir / 'analogue_summary.json').resolve()}",
+        f"  Seed transforms  : {result.seed_transforms_path.resolve()}",
+        f"  FEP bundle       : {result.fep_bundle_dir.resolve()}",
+        f"  FEP manifest     : {(result.fep_bundle_dir / 'fep_manifest.json').resolve()}",
+        f"  Quality report   : {summary.get('quality_report_csv', 'n/a')}",
+        f"  GNINA summary    : {gnina.get('ranking_summary_csv', 'n/a') if isinstance(gnina, dict) else 'n/a'}",
+        f"  Run timing       : {(output_dir / 'run_timing.json').resolve()}",
+        f"  Log file         : {log_path.resolve()}",
+    ]
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _write_analogue_only_outputs(
+    *,
+    run_workdir: Path,
+    log_path: Path,
+    run_name: str,
+    receptor: Path | None,
+    ligand_source: Path | None,
+    analogue_template: Path,
+    seed_count: int,
+    final_pose_count: int,
+    min_mcs_atoms: int,
+    min_mcs_fraction: float,
+    core_rmsd_cutoff: float,
+    torsion_mc_steps: int,
+    receptor_aware: bool,
+    scorer_type: str,
+    scorer_path: Path | None,
+    scorer_minimize: bool,
+    result: Any,
+    total_sec: float,
+    ligand_count: int | None = None,
+) -> None:
+    payload = {
+        "mode": "analogue_only",
+        "run_name": run_name,
+        "analogue_summary": result.summary,
+        "total_sec": total_sec,
+        "analogue_log_path": str(log_path),
+    }
+    if ligand_count is not None:
+        payload["ligand_count"] = ligand_count
+    _write_json(run_workdir / "run_timing.json", payload)
+    _write_analogue_run_log(
+        log_path=log_path,
+        run_name=run_name,
+        receptor=receptor,
+        ligand_source=ligand_source,
+        analogue_template=analogue_template,
+        output_dir=run_workdir,
+        seed_count=seed_count,
+        final_pose_count=final_pose_count,
+        min_mcs_atoms=min_mcs_atoms,
+        min_mcs_fraction=min_mcs_fraction,
+        core_rmsd_cutoff=core_rmsd_cutoff,
+        torsion_mc_steps=torsion_mc_steps,
+        receptor_aware=receptor_aware,
+        scorer_type=scorer_type,
+        scorer_path=scorer_path,
+        scorer_minimize=scorer_minimize,
+        result=result,
+        total_sec=total_sec,
+    )
+
+
 def _normalize_ligand(src: Path, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     suffix = src.suffix.lower()
@@ -469,6 +615,8 @@ def run_matcha(
         from matcha.analogue import AnalogueWorkflowConfig, run_analogue_workflow
 
         seed_count = int(analogue_seed_poses or n_samples)
+        ligand_source = ligand_dir if ligand_dir is not None else ligand
+        log_path = (log or run_workdir / f"{run_name}.log").resolve()
         console.print(
             f"[bold cyan][matcha][/bold cyan] Analogue/FEP seed-only mode: "
             f"template={analogue_template.name}, ligands={len(molecules)}, seed_poses={seed_count}"
@@ -494,13 +642,27 @@ def run_matcha(
             ),
         )
         total_sec = time.perf_counter() - run_timer_start
-        _write_json(run_workdir / "run_timing.json", {
-            "mode": "analogue_only",
-            "run_name": run_name,
-            "analogue_summary": analogue_result.summary,
-            "total_sec": total_sec,
-            "ligand_count": len(molecules),
-        })
+        _write_analogue_only_outputs(
+            run_workdir=run_workdir,
+            log_path=log_path,
+            run_name=run_name,
+            receptor=receptor,
+            ligand_source=ligand_source,
+            analogue_template=analogue_template,
+            seed_count=seed_count,
+            final_pose_count=analogue_final_poses,
+            min_mcs_atoms=analogue_min_mcs_atoms,
+            min_mcs_fraction=analogue_min_mcs_fraction,
+            core_rmsd_cutoff=analogue_core_rmsd_cutoff,
+            torsion_mc_steps=analogue_torsion_mc_steps,
+            receptor_aware=analogue_receptor_aware,
+            scorer_type=scorer_type,
+            scorer_path=scorer_path,
+            scorer_minimize=scorer_minimize,
+            result=analogue_result,
+            total_sec=total_sec,
+            ligand_count=len(molecules),
+        )
         console.print(f"[bold green][matcha][/bold green] FEP bundle: {analogue_result.fep_bundle_dir}")
         console.print(f"[bold green][matcha][/bold green] FEP manifest: {analogue_result.fep_bundle_dir / 'fep_manifest.json'}")
         console.print(
@@ -510,6 +672,7 @@ def run_matcha(
             f"failed={analogue_result.summary.get('failed', 0)}"
         )
         console.print(f"[bold green][matcha][/bold green] runtime: {_format_runtime(total_sec)}")
+        console.print(f"[bold green][matcha][/bold green] log: {log_path}")
         return
 
     # Lazy imports — heavy libraries loaded only when actually running docking.
@@ -795,13 +958,31 @@ def run_matcha(
                 f"failed={analogue_result.summary.get('failed', 0)}"
             )
             if analogue_only:
-                _write_json(run_workdir / "run_timing.json", {
-                    "mode": "analogue_only",
-                    "run_name": run_name,
-                    "analogue_summary": analogue_result.summary,
-                    "total_sec": time.perf_counter() - run_timer_start,
-                })
+                total_sec = time.perf_counter() - run_timer_start
+                log_path = (log or run_workdir / f"{run_name}.log").resolve()
+                _write_analogue_only_outputs(
+                    run_workdir=run_workdir,
+                    log_path=log_path,
+                    run_name=run_name,
+                    receptor=receptor,
+                    ligand_source=ligand_dir if ligand_dir is not None else ligand,
+                    analogue_template=analogue_template,
+                    seed_count=seed_count,
+                    final_pose_count=analogue_final_poses,
+                    min_mcs_atoms=analogue_min_mcs_atoms,
+                    min_mcs_fraction=analogue_min_mcs_fraction,
+                    core_rmsd_cutoff=analogue_core_rmsd_cutoff,
+                    torsion_mc_steps=analogue_torsion_mc_steps,
+                    receptor_aware=analogue_receptor_aware,
+                    scorer_type=scorer_type,
+                    scorer_path=scorer_path,
+                    scorer_minimize=scorer_minimize,
+                    result=analogue_result,
+                    total_sec=total_sec,
+                    ligand_count=len(molecules),
+                )
                 console.print(f"[bold green][matcha][/bold green] FEP manifest: {analogue_result.fep_bundle_dir / 'fep_manifest.json'}")
+                console.print(f"[bold green][matcha][/bold green] log: {log_path}")
                 return
             if not analogue_result.selected_molecules:
                 raise typer.BadParameter("Analogue mode generated no seed poses; inspect analogue/failures.json")
@@ -845,13 +1026,31 @@ def run_matcha(
             analogue_template_std = standardize_mol(template_mol, remove_hs=True, sanitize=True).mol
             console.print(f"[bold green][matcha][/bold green] analogue seed bundle: {analogue_result.fep_bundle_dir}")
             if analogue_only:
-                _write_json(run_workdir / "run_timing.json", {
-                    "mode": "analogue_only",
-                    "run_name": run_name,
-                    "analogue_summary": analogue_result.summary,
-                    "total_sec": time.perf_counter() - run_timer_start,
-                })
+                total_sec = time.perf_counter() - run_timer_start
+                log_path = (log or run_workdir / f"{run_name}.log").resolve()
+                _write_analogue_only_outputs(
+                    run_workdir=run_workdir,
+                    log_path=log_path,
+                    run_name=run_name,
+                    receptor=receptor,
+                    ligand_source=ligand_dir if ligand_dir is not None else ligand,
+                    analogue_template=analogue_template,
+                    seed_count=seed_count,
+                    final_pose_count=analogue_final_poses,
+                    min_mcs_atoms=analogue_min_mcs_atoms,
+                    min_mcs_fraction=analogue_min_mcs_fraction,
+                    core_rmsd_cutoff=analogue_core_rmsd_cutoff,
+                    torsion_mc_steps=analogue_torsion_mc_steps,
+                    receptor_aware=analogue_receptor_aware,
+                    scorer_type=scorer_type,
+                    scorer_path=scorer_path,
+                    scorer_minimize=scorer_minimize,
+                    result=analogue_result,
+                    total_sec=total_sec,
+                    ligand_count=1,
+                )
                 console.print(f"[bold green][matcha][/bold green] FEP manifest: {analogue_result.fep_bundle_dir / 'fep_manifest.json'}")
+                console.print(f"[bold green][matcha][/bold green] log: {log_path}")
                 return
             if run_name not in analogue_result.selected_molecules:
                 raise typer.BadParameter("Analogue mode generated no seed pose for ligand; inspect analogue/failures.json")

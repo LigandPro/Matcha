@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import csv
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -53,6 +54,14 @@ def _write_json(path: Path, payload: dict | list) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2)
+
+
+def _write_csv(path: Path, rows: list[dict], fieldnames: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def _clone_with_name(mol: Chem.Mol, name: str) -> Chem.Mol:
@@ -121,6 +130,58 @@ def _set_pose_qc_props(mol: Chem.Mol, qc: object) -> None:
     mol.SetProp("analogue_status", qc.status)
 
 
+GNINA_RANKING_FIELDNAMES = [
+    "ligand_id",
+    "final_rank",
+    "pre_gnina_rank",
+    "pose_index",
+    "selected",
+    "status",
+    "fep_ready",
+    "score_type",
+    "gnina_score",
+    "missing_score",
+    "core_rmsd",
+    "receptor_clash_count",
+    "receptor_contact_count",
+    "rank_score",
+    "input_sdf",
+    "scored_sdf",
+]
+
+
+def _score_stats(values: list[float]) -> dict:
+    if not values:
+        return {"min": None, "mean": None, "max": None}
+    return {
+        "min": float(min(values)),
+        "mean": float(sum(values) / len(values)),
+        "max": float(max(values)),
+    }
+
+
+def _summarize_gnina_rows(rows: list[dict], cfg: AnalogueWorkflowConfig, csv_path: Path | None) -> dict:
+    scored_rows = [row for row in rows if row["missing_score"] is False]
+    selected_rows = [row for row in scored_rows if row["selected"] is True]
+    selected_scores = [float(row["gnina_score"]) for row in selected_rows]
+    selected_changed = [row for row in selected_rows if int(row["pre_gnina_rank"]) != 0]
+    return {
+        "enabled": bool(cfg.gnina_score_poses),
+        "scorer_path": cfg.gnina_scorer_path,
+        "score_type": cfg.gnina_score_type,
+        "cnn_scoring": cfg.gnina_cnn_scoring,
+        "minimize": bool(cfg.gnina_minimize),
+        "device": int(cfg.gnina_device),
+        "ranking_summary_csv": str(csv_path.resolve()) if csv_path is not None else None,
+        "ligands_scored": len({row["ligand_id"] for row in scored_rows}),
+        "poses_total": len(rows),
+        "poses_scored": len(scored_rows),
+        "poses_missing_score": len(rows) - len(scored_rows),
+        "selected_changed_by_gnina": len(selected_changed),
+        "selected_score": _score_stats(selected_scores),
+    }
+
+
 def _gnina_rerank_poses(
     *,
     ligand_id: str,
@@ -131,6 +192,7 @@ def _gnina_rerank_poses(
     receptor_positions: np.ndarray | None,
     output_dir: Path,
     cfg: AnalogueWorkflowConfig,
+    ranking_rows: list[dict] | None = None,
 ) -> list[tuple[Chem.Mol, object]]:
     if not ranked:
         return ranked
@@ -168,7 +230,7 @@ def _gnina_rerank_poses(
             continue
         scores.append(_extract_score(mol, cfg.gnina_score_type, cfg.gnina_minimize))
 
-    scored: list[tuple[Chem.Mol, object, float | None]] = []
+    scored: list[tuple[Chem.Mol, object, float | None, int]] = []
     for pose_idx, (mol, qc) in enumerate(ranked):
         score = scores[pose_idx] if pose_idx < len(scores) else None
         if score is not None:
@@ -176,7 +238,7 @@ def _gnina_rerank_poses(
             qc.warnings.append(f"gnina_{cfg.gnina_score_type}:{score:.6f}")
             qc.rank_score = float(score)
         _set_pose_qc_props(mol, qc)
-        scored.append((mol, qc, score))
+        scored.append((mol, qc, score, pose_idx))
 
     if not scored:
         return ranked
@@ -187,7 +249,27 @@ def _gnina_rerank_poses(
             float("inf") if item[2] is None else float(item[2]) if lower_is_better else -float(item[2]),
         )
     )
-    return [(mol, qc) for mol, qc, _score in scored]
+    if ranking_rows is not None:
+        for final_rank, (mol, qc, score, pre_rank) in enumerate(scored):
+            ranking_rows.append({
+                "ligand_id": ligand_id,
+                "final_rank": final_rank,
+                "pre_gnina_rank": pre_rank,
+                "pose_index": int(qc.pose_index),
+                "selected": final_rank == 0,
+                "status": qc.status,
+                "fep_ready": bool(qc.fep_ready),
+                "score_type": cfg.gnina_score_type,
+                "gnina_score": "" if score is None else float(score),
+                "missing_score": score is None,
+                "core_rmsd": float(qc.core_rmsd),
+                "receptor_clash_count": int(qc.receptor_clash_count),
+                "receptor_contact_count": int(qc.receptor_contact_count),
+                "rank_score": float(qc.rank_score),
+                "input_sdf": str(input_sdf.resolve()),
+                "scored_sdf": str(scored_sdf.resolve()),
+            })
+    return [(mol, qc) for mol, qc, _score, _pre_rank in scored]
 
 
 def run_analogue_workflow(
@@ -227,6 +309,7 @@ def run_analogue_workflow(
     mappings: dict[str, MCSMapping] = {}
     failures: list[dict] = []
     ranked_by_ligand: dict[str, list[tuple[Chem.Mol, object]]] = {}
+    gnina_ranking_rows: list[dict] = []
 
     for ligand_id, ligand_mol in ligands:
         ligand_std_res = standardize_mol(ligand_mol, remove_hs=True, sanitize=True)
@@ -303,6 +386,7 @@ def run_analogue_workflow(
                 receptor_positions=receptor_positions,
                 output_dir=output_dir / "gnina_ranking" / ligand_id,
                 cfg=cfg,
+                ranking_rows=gnina_ranking_rows,
             )[: max(1, int(cfg.n_seed_poses))]
         ranked_by_ligand[ligand_id] = ranked
         final_ranked = ranked[: max(1, int(cfg.n_final_poses))]
@@ -316,6 +400,11 @@ def run_analogue_workflow(
 
     _write_json(output_dir / "analogue_mappings.json", {k: v.to_dict() for k, v in mappings.items()})
     _write_json(output_dir / "analogue_failures.json", failures)
+    gnina_ranking_summary_path = output_dir / "gnina_ranking_summary.csv"
+    if cfg.gnina_score_poses:
+        _write_csv(gnina_ranking_summary_path, gnina_ranking_rows, GNINA_RANKING_FIELDNAMES)
+    else:
+        gnina_ranking_summary_path = None
 
     if cfg.export_fep_bundle:
         summary = write_fep_bundle(
@@ -345,6 +434,7 @@ def run_analogue_workflow(
         "failed": len(failures),
         "seed_transforms_path": str(seed_transforms_path.resolve()),
         "fep_bundle_dir": str(fep_bundle_dir.resolve()),
+        "gnina_ranking": _summarize_gnina_rows(gnina_ranking_rows, cfg, gnina_ranking_summary_path),
         **summary,
     }
     _write_json(output_dir / "analogue_summary.json", workflow_summary)

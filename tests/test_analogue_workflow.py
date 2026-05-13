@@ -1,5 +1,6 @@
 from pathlib import Path
 from types import SimpleNamespace
+import csv
 
 import numpy as np
 from rdkit import Chem
@@ -59,6 +60,9 @@ def test_analogue_workflow_writes_fep_bundle(tmp_path: Path):
 
     assert result.summary["ligands_with_seed_poses"] == 1
     assert result.summary["failed"] == 0
+    assert result.summary["gnina_ranking"]["enabled"] is False
+    assert result.summary["gnina_ranking"]["ranking_summary_csv"] is None
+    assert result.summary["gnina_ranking"]["poses_scored"] == 0
     assert (tmp_path / "analogue_seed_transforms.npy").exists()
     assert (tmp_path / "fep_bundle_seed" / "aligned_series.sdf").exists()
     assert (tmp_path / "fep_bundle_seed" / "fep_manifest.json").exists()
@@ -143,6 +147,17 @@ def test_analogue_workflow_uses_gnina_scores_for_reranking(tmp_path: Path, monke
     )
     assert best_pose.HasProp("analogue_gnina_score")
     assert float(best_pose.GetProp("analogue_gnina_score")) == min(scores)
+
+    summary_rows = list(csv.DictReader(open(tmp_path / "gnina_ranking_summary.csv")))
+    assert len(summary_rows) == len(scores)
+    assert sum(row["selected"] == "True" for row in summary_rows) == 1
+    selected_row = next(row for row in summary_rows if row["selected"] == "True")
+    assert float(selected_row["gnina_score"]) == min(scores)
+    assert result.summary["gnina_ranking"]["enabled"] is True
+    assert result.summary["gnina_ranking"]["ligands_scored"] == 1
+    assert result.summary["gnina_ranking"]["poses_scored"] == len(scores)
+    assert result.summary["gnina_ranking"]["poses_missing_score"] == 0
+    assert result.summary["gnina_ranking"]["selected_changed_by_gnina"] == 1
 
 
 def test_gnina_reranking_preserves_fep_ready_before_affinity(tmp_path: Path, monkeypatch):
