@@ -12,7 +12,7 @@ from rdkit import Chem
 from .constrained_embed import generate_constrained_conformers, mol_positions
 from .fep_export import LigandAnalogueExport, write_fep_bundle
 from .mcs import MCSMapping, find_robust_mcs
-from .ranking import load_receptor_heavy_atom_positions, rank_poses
+from .ranking import evaluate_pose, load_receptor_heavy_atom_positions, rank_poses
 from .standardize import standardize_mol
 from .torsion_mc import torsional_mc_refine
 
@@ -30,6 +30,12 @@ class AnalogueWorkflowConfig:
     random_seed: int = 777
     export_fep_bundle: bool = True
     receptor_aware_ranking: bool = True
+    gnina_score_poses: bool = False
+    gnina_scorer_path: str | None = None
+    gnina_minimize: bool = True
+    gnina_score_type: str = "Affinity"
+    gnina_cnn_scoring: str = "none"
+    gnina_device: int = 0
 
 
 @dataclass
@@ -86,6 +92,94 @@ def _build_seed_transforms(
                 })
             transforms[key] = [transform]
     return transforms
+
+
+def _extract_score(mol: Chem.Mol, score_type: str, minimized: bool) -> float | None:
+    names = [score_type]
+    if minimized:
+        names.insert(0, f"minimized{score_type}" if score_type != "Affinity" else "minimizedAffinity")
+    for name in names:
+        if mol.HasProp(name):
+            try:
+                return float(mol.GetProp(name))
+            except (TypeError, ValueError):
+                pass
+    for name, value in mol.GetPropsAsDict(includePrivate=True, includeComputed=True).items():
+        if score_type.lower() in str(name).lower():
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                pass
+    return None
+
+
+def _gnina_rerank_poses(
+    *,
+    ligand_id: str,
+    ranked: list[tuple[Chem.Mol, object]],
+    template: Chem.Mol,
+    mapping: MCSMapping,
+    receptor_path: Path,
+    receptor_positions: np.ndarray | None,
+    output_dir: Path,
+    cfg: AnalogueWorkflowConfig,
+) -> list[tuple[Chem.Mol, object]]:
+    if not ranked:
+        return ranked
+
+    from matcha.scoring.gnina_scorer import GninaScorer
+
+    input_dir = output_dir / "gnina_input"
+    output_scored_dir = output_dir / "gnina_scored"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    output_scored_dir.mkdir(parents=True, exist_ok=True)
+    input_sdf = input_dir / f"{ligand_id}.sdf"
+
+    writer = Chem.SDWriter(str(input_sdf))
+    writer.SetKekulize(False)
+    for pose_idx, (mol, _qc) in enumerate(ranked):
+        mol.SetProp("_Name", f"{ligand_id}::{pose_idx}")
+        writer.write(mol)
+    writer.close()
+
+    scorer = GninaScorer(
+        gnina_path=cfg.gnina_scorer_path,
+        minimize=cfg.gnina_minimize,
+        score_type=cfg.gnina_score_type,
+        cnn_scoring=cfg.gnina_cnn_scoring,
+    )
+    scorer.score_poses(str(receptor_path), str(input_dir), str(output_scored_dir), device=cfg.gnina_device)
+
+    scored_sdf = output_scored_dir / f"{ligand_id}.sdf"
+    if not scored_sdf.exists():
+        return ranked
+
+    scored: list[tuple[Chem.Mol, object]] = []
+    for scored_idx, mol in enumerate(Chem.SDMolSupplier(str(scored_sdf), removeHs=False, sanitize=False)):
+        if mol is None:
+            continue
+        score = _extract_score(mol, cfg.gnina_score_type, cfg.gnina_minimize)
+        qc = evaluate_pose(
+            ligand_id,
+            scored_idx,
+            mol,
+            template,
+            mapping,
+            core_rmsd_cutoff=cfg.core_rmsd_cutoff,
+            min_mcs_fraction=cfg.min_mcs_fraction,
+            receptor_positions=receptor_positions,
+        )
+        if score is not None:
+            mol.SetProp("analogue_gnina_score", f"{score:.6f}")
+            qc.warnings.append(f"gnina_{cfg.gnina_score_type}:{score:.6f}")
+            qc.rank_score = float(score)
+        scored.append((mol, qc))
+
+    if not scored:
+        return ranked
+    reverse = cfg.gnina_score_type not in {"Affinity", "minimizedAffinity"}
+    scored.sort(key=lambda item: item[1].rank_score, reverse=reverse)
+    return scored
 
 
 def run_analogue_workflow(
@@ -191,6 +285,17 @@ def run_analogue_workflow(
             min_mcs_fraction=cfg.min_mcs_fraction,
             receptor_positions=receptor_positions,
         )[: max(1, int(cfg.n_seed_poses))]
+        if cfg.gnina_score_poses and receptor_path is not None:
+            ranked = _gnina_rerank_poses(
+                ligand_id=ligand_id,
+                ranked=ranked,
+                template=template_std,
+                mapping=mapping,
+                receptor_path=Path(receptor_path),
+                receptor_positions=receptor_positions,
+                output_dir=output_dir / "gnina_ranking" / ligand_id,
+                cfg=cfg,
+            )[: max(1, int(cfg.n_seed_poses))]
         ranked_by_ligand[ligand_id] = ranked
         final_ranked = ranked[: max(1, int(cfg.n_final_poses))]
         exports[ligand_id] = LigandAnalogueExport(ligand_id, mapping, final_ranked, warnings, failed=False)
