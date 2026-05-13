@@ -45,7 +45,12 @@ def load_and_merge_all_stages(conf, inference_run_name):
                 metrics = np.load(predicted_ligand_transforms_path, allow_pickle=True).item()
                 all_stage_updated_metrics.append(metrics)
             else:
-                logger.error(f'Merge {stage_idx + 1} stage failed: {predicted_ligand_transforms_path} does not exist')
+                logger.warning(
+                    f'Merge skipped missing stage {stage_idx + 1} file: '
+                    f'{predicted_ligand_transforms_path}'
+                )
+        if not all_stage_updated_metrics:
+            raise ValueError(f"No stage metrics found to merge for dataset {dataset_name}")
         updated_metrics = merge_stages(all_stage_updated_metrics)
         merged_metrics_path = os.path.join(conf.inference_results_folder, inference_run_name, f'{dataset_name}_final_preds_merged.npy')
         logger.info(f'Saving merged metrics to {merged_metrics_path}')
@@ -53,9 +58,13 @@ def load_and_merge_all_stages(conf, inference_run_name):
 
 
 def merge_stages(all_stage_updated_metrics):
+    if not all_stage_updated_metrics:
+        raise ValueError("No stage metrics supplied to merge_stages")
     updated_metrics = copy.deepcopy(all_stage_updated_metrics[0])
-    for uid in updated_metrics.keys():
+    for uid in list(updated_metrics.keys()):
         for i in range(1, len(all_stage_updated_metrics)):
+            if uid not in all_stage_updated_metrics[i]:
+                continue
             samples = copy.deepcopy(all_stage_updated_metrics[i][uid]['sample_metrics'])
             updated_metrics[uid]['sample_metrics'].extend(samples)
     return updated_metrics
@@ -197,7 +206,7 @@ def compute_fast_filters_from_sdf(conf, inference_run_name, sdf_type='base', n_p
                 logger.warning(f"Protein data not found in cache for {uid}, skipping")
                 number_failed += 1
                 continue
-                        
+
             try:
                 # Read all molecules from SDF
                 mols = dm.read_sdf(str(sdf_file_path))
@@ -282,6 +291,8 @@ def run_v2_inference_pipeline(
     prefetch_factor: int = 2,
     persistent_workers: bool = False,
     compute_torsion_angles_pred: bool = False,
+    initial_pose_transforms_path=None,
+    start_stage: int = 1,
 ):
     """Run the full v2 3-stage inference pipeline.
 
@@ -297,6 +308,11 @@ def run_v2_inference_pipeline(
         docking_batch_limit: Token budget per batch.
         num_workers: DataLoader workers (0 = main-process; safer for TUI).
         progress_callback: ``fn(event_type, stage, name, elapsed, progress)`` for UI updates.
+        initial_pose_transforms_path: Optional full-pose analogue seed transforms.
+            When provided, stages before ``start_stage`` are skipped and the
+            first executed stage consumes these full ligand poses.
+        start_stage: First neural stage to execute (1, 2, or 3).  Analogue/FEP
+            mode normally uses ``start_stage=3``.
     """
     from torch.utils.data import DataLoader
     from matcha.models import MatchaModel
@@ -317,6 +333,9 @@ def run_v2_inference_pipeline(
     num_steps = 10
 
     conf.batch_limit = docking_batch_limit
+    start_stage = int(start_stage or 1)
+    if start_stage not in (1, 2, 3):
+        raise ValueError(f"start_stage must be 1, 2, or 3, got {start_stage}")
 
     # v2 3-stage pipeline definition (no scoring model)
     pipeline = {
@@ -377,7 +396,9 @@ def run_v2_inference_pipeline(
     }
 
     for dataset_name in dataset_names:
-        predicted_ligand_transforms_path = None
+        predicted_ligand_transforms_path = (
+            str(initial_pose_transforms_path) if initial_pose_transforms_path is not None else None
+        )
         timings["stage_by_dataset"].setdefault(dataset_name, {})
 
         conf.use_sorted_batching = True
@@ -395,7 +416,13 @@ def run_v2_inference_pipeline(
             raise ValueError(f"No valid complexes found for dataset {dataset_name}")
 
         for stage_idx in [0, 1, 2]:
-            if pocket_centers_filename is not None and stage_idx == 0:
+            if initial_pose_transforms_path is not None and stage_idx < start_stage - 1:
+                logger.info(
+                    f"Skipping stage {stage_idx + 1}, using analogue initial poses from "
+                    f"{initial_pose_transforms_path}"
+                )
+                continue
+            if pocket_centers_filename is not None and stage_idx == 0 and initial_pose_transforms_path is None:
                 predicted_ligand_transforms_path = str(pocket_centers_filename)
                 logger.info(f'Skipping stage 1, using pocket centers from {pocket_centers_filename}')
                 continue

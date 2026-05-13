@@ -103,6 +103,31 @@ def _normalize_ligand(src: Path, dest: Path) -> None:
     writer.close()
 
 
+
+def _load_first_ligand_mol(src: Path):
+    """Load the first molecule from any ligand format accepted by the CLI."""
+    suffix = src.suffix.lower()
+    if suffix == ".sdf":
+        supplier = Chem.SDMolSupplier(str(src), removeHs=False, sanitize=False)
+        for candidate in supplier:
+            if candidate is not None:
+                return candidate
+        return None
+    if suffix == ".mol2":
+        return Chem.MolFromMol2File(str(src), sanitize=False)
+    if suffix == ".mol":
+        return Chem.MolFromMolFile(str(src), removeHs=False, sanitize=False)
+    if suffix == ".pdb":
+        return Chem.MolFromPDBFile(str(src), removeHs=False, sanitize=False)
+    raise typer.BadParameter(f"Unsupported ligand format: {src}")
+
+
+def _sanitize_uid(name: str, fallback: str = "mol") -> str:
+    safe = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in str(name).strip())
+    safe = safe.strip("._")
+    return safe or fallback
+
+
 def _prepare_singleton_dataset(
     receptor: Path,
     ligand: Path,
@@ -130,9 +155,7 @@ def _split_multi_sdf(sdf_path: Path) -> List[Tuple[str, Any]]:
             console.print(f"[yellow]Warning: Failed to read molecule {idx} from {sdf_path.name}[/yellow]")
             continue
         name = mol.GetProp("_Name") if mol.HasProp("_Name") else f"mol_{idx}"
-        name = name.strip().replace(" ", "_").replace("/", "_").replace("\\", "_")
-        if not name:
-            name = f"mol_{idx}"
+        name = _sanitize_uid(name, fallback=f"mol_{idx}")
         molecules.append((name, mol))
     return molecules
 
@@ -151,6 +174,19 @@ def _split_ligand_file(ligand_file: Path) -> List[Tuple[str, Any]]:
     raise ValueError(f"Unsupported ligand file format: {ligand_file.suffix}")
 
 
+def _dedupe_molecule_names(molecules: List[Tuple[str, Any]]) -> List[Tuple[str, Any]]:
+    """Return molecules with deterministic, filesystem-safe unique UIDs."""
+    out: List[Tuple[str, Any]] = []
+    counts: dict[str, int] = {}
+    for idx, (name, mol) in enumerate(molecules):
+        base = _sanitize_uid(name, fallback=f"mol_{idx}")
+        seen = counts.get(base, 0)
+        counts[base] = seen + 1
+        uid = base if seen == 0 else f"{base}__{seen + 1}"
+        out.append((uid, mol))
+    return out
+
+
 def _prepare_batch_dataset(
     protein: Path,
     molecules: List[Tuple[str, Any]],
@@ -164,7 +200,7 @@ def _prepare_batch_dataset(
         base_uid = name
         seen = uid_counts.get(base_uid, 0)
         uid_counts[base_uid] = seen + 1
-        uid = base_uid if seen == 0 else f"{base_uid}_{seen}"
+        uid = base_uid if seen == 0 else f"{base_uid}__{seen + 1}"
         sample_dir = dataset_dir / uid
         _remove_tree_if_exists(sample_dir)
         sample_dir.mkdir(parents=True, exist_ok=True)
@@ -345,6 +381,15 @@ def run_matcha(
     center_z: Optional[float] = typer.Option(None, "--center-z", "--center_z", help="Z coordinate of box center (Å)"),
     autobox_ligand: Optional[Path] = typer.Option(None, "--autobox-ligand", "--autobox_ligand", help="Reference ligand file for autobox (.sdf/.mol/.pdb)"),
     box_json: Optional[Path] = typer.Option(None, "--box-json", help="JSON with binding-site box center (e.g. *_box.json)."),
+    analogue_template: Optional[Path] = typer.Option(None, "--analogue-template", "--template-ligand", help="Bound template ligand for analogue/FEP mode (.sdf/.mol2/.mol/.pdb)."),
+    analogue_only: bool = typer.Option(False, "--analogue-only/--run-matcha-refine", help="Only generate analogue/FEP seed bundle; skip neural Matcha refinement."),
+    analogue_start_stage: int = typer.Option(3, "--analogue-start-stage", help="First Matcha refinement stage to run after analogue seeding (1, 2, or 3)."),
+    analogue_seed_poses: Optional[int] = typer.Option(None, "--analogue-seed-poses", help="Template-aligned seed poses per ligand (default: --n-samples)."),
+    analogue_final_poses: int = typer.Option(8, "--analogue-final-poses", help="Final seed poses retained in the FEP seed bundle."),
+    analogue_min_mcs_atoms: int = typer.Option(8, "--analogue-min-mcs-atoms", help="Minimum MCS heavy atoms for analogue mapping."),
+    analogue_min_mcs_fraction: float = typer.Option(0.35, "--analogue-min-mcs-fraction", help="Minimum analogue MCS coverage fraction."),
+    analogue_core_rmsd_cutoff: float = typer.Option(1.0, "--analogue-core-rmsd-cutoff", help="Core RMSD cutoff for FEP_READY classification (Å)."),
+    analogue_torsion_mc_steps: int = typer.Option(0, "--analogue-torsion-mc-steps", help="Optional torsional Monte Carlo steps per seed pose."),
     run_name: str = typer.Option("matcha_cli_run", "--run-name", help="Name for this docking run."),
     n_samples: int = typer.Option(20, "--n-samples", help="Number of samples (poses) to generate per ligand."),
     n_confs: Optional[int] = typer.Option(None, "--n-confs", help="Number of ligand conformers to generate with RDKit (default min(10, n-samples))."),
@@ -374,6 +419,94 @@ def run_matcha(
         console.print("[bold red]Error:[/bold red] --n-samples must be >= 1")
         raise typer.Exit(code=1)
 
+    # Pure RDKit analogue/FEP export path.  Keep this before the heavy Matcha
+    # imports so users can generate FEP-ready template-aligned structures even
+    # on machines without torch/checkpoints configured.
+    if analogue_template is not None and analogue_only:
+        if receptor is None:
+            raise typer.BadParameter("--receptor is required in analogue mode")
+        if not analogue_template.exists():
+            raise typer.BadParameter(f"Analogue template not found: {analogue_template}")
+        base_workdir = workdir or out
+        run_workdir = base_workdir / run_name
+        if run_workdir.exists():
+            if overwrite:
+                _remove_tree_if_exists(run_workdir)
+            else:
+                raise typer.BadParameter(
+                    f"Working directory {run_workdir} already exists. Use --overwrite or change --run-name."
+                )
+        run_workdir.mkdir(parents=True, exist_ok=True)
+        run_timer_start = time.perf_counter()
+
+        if ligand_dir is not None:
+            if ligand_dir.is_file():
+                molecules = _split_ligand_file(ligand_dir)
+            elif ligand_dir.is_dir():
+                ligand_files = (
+                    list(ligand_dir.rglob("*.sdf")) + list(ligand_dir.rglob("*.mol2"))
+                    if recursive else list(ligand_dir.glob("*.sdf")) + list(ligand_dir.glob("*.mol2"))
+                )
+                molecules = []
+                for ligand_file in sorted(ligand_files, key=lambda p: str(p).lower()):
+                    molecules.extend(_split_ligand_file(ligand_file))
+            else:
+                raise typer.BadParameter("--ligand-dir must be a file or directory")
+        else:
+            ligand_mol = _load_first_ligand_mol(ligand)
+            if ligand_mol is None:
+                raise typer.BadParameter(f"Failed to read ligand: {ligand}")
+            molecules = [(run_name, ligand_mol)]
+        molecules = _dedupe_molecule_names(molecules)
+        if not molecules:
+            raise typer.BadParameter("No analogue ligands found")
+
+        template_mol = _load_first_ligand_mol(analogue_template)
+        if template_mol is None:
+            raise typer.BadParameter(f"Failed to read analogue template: {analogue_template}")
+
+        from matcha.analogue import AnalogueWorkflowConfig, run_analogue_workflow
+
+        seed_count = int(analogue_seed_poses or n_samples)
+        console.print(
+            f"[bold cyan][matcha][/bold cyan] Analogue/FEP seed-only mode: "
+            f"template={analogue_template.name}, ligands={len(molecules)}, seed_poses={seed_count}"
+        )
+        analogue_result = run_analogue_workflow(
+            template_mol=template_mol,
+            ligands=molecules,
+            output_dir=run_workdir / "analogue",
+            receptor_path=receptor,
+            config=AnalogueWorkflowConfig(
+                n_seed_poses=seed_count,
+                n_final_poses=analogue_final_poses,
+                min_mcs_atoms=analogue_min_mcs_atoms,
+                min_mcs_fraction=analogue_min_mcs_fraction,
+                core_rmsd_cutoff=analogue_core_rmsd_cutoff,
+                torsion_mc_steps=analogue_torsion_mc_steps,
+                random_seed=DEFAULT_CONF["seed"],
+                export_fep_bundle=True,
+            ),
+        )
+        total_sec = time.perf_counter() - run_timer_start
+        _write_json(run_workdir / "run_timing.json", {
+            "mode": "analogue_only",
+            "run_name": run_name,
+            "analogue_summary": analogue_result.summary,
+            "total_sec": total_sec,
+            "ligand_count": len(molecules),
+        })
+        console.print(f"[bold green][matcha][/bold green] FEP bundle: {analogue_result.fep_bundle_dir}")
+        console.print(f"[bold green][matcha][/bold green] FEP manifest: {analogue_result.fep_bundle_dir / 'fep_manifest.json'}")
+        console.print(
+            f"[bold green][matcha][/bold green] summary: "
+            f"ready={analogue_result.summary.get('fep_ready', 0)}, "
+            f"review={analogue_result.summary.get('needs_review', 0)}, "
+            f"failed={analogue_result.summary.get('failed', 0)}"
+        )
+        console.print(f"[bold green][matcha][/bold green] runtime: {_format_runtime(total_sec)}")
+        return
+
     # Lazy imports — heavy libraries loaded only when actually running docking.
     # `global` so module-level helpers (_normalize_ligand, _autobox_from_ligand, etc.) can use them.
     global snapshot_download, np, OmegaConf, Chem
@@ -386,6 +519,9 @@ def run_matcha(
     from matcha.utils.multigpu import parse_gpus, run_multigpu_batch
     from matcha.scoring import create_scorer
     from matcha.utils.device import resolve_device
+    from matcha.analogue import AnalogueWorkflowConfig, run_analogue_workflow
+    from matcha.analogue.fep_export import export_pose_files_as_fep_bundle
+    from matcha.analogue.standardize import standardize_mol
     import torch
 
     multi_gpu_ids: list[int] = []
@@ -441,7 +577,11 @@ def run_matcha(
         torch.backends.cudnn.allow_tf32 = False
         torch.set_float32_matmul_precision("highest")
 
-    checkpoints = _ensure_checkpoints(checkpoints or Path("checkpoints"))
+    if analogue_template is not None and analogue_only:
+        # Seed-only FEP export is pure RDKit/QC and should not require model checkpoints.
+        checkpoints = checkpoints or Path("checkpoints")
+    else:
+        checkpoints = _ensure_checkpoints(checkpoints or Path("checkpoints"))
 
     start_time = datetime.now(timezone.utc)
     base_workdir = workdir or out
@@ -486,10 +626,16 @@ def run_matcha(
     # Box handling
     manual_box_specified = center_x is not None or center_y is not None or center_z is not None
     autobox_specified = autobox_ligand is not None
+    analogue_specified = analogue_template is not None
     box_center_val: Optional[Tuple[float, float, float]] = None
 
+    if analogue_specified and autobox_ligand is None:
+        # In analogue/FEP mode the bound template ligand is also the safest box reference.
+        autobox_ligand = analogue_template
+        autobox_specified = True
+
     if sum((manual_box_specified, autobox_specified, box_json is not None)) > 1:
-        raise typer.BadParameter("Cannot combine --box-json with manual box or --autobox-ligand.")
+        raise typer.BadParameter("Cannot combine --box-json with manual box, --autobox-ligand, or --analogue-template autoboxing.")
     if manual_box_specified:
         if center_x is None or center_y is None or center_z is None:
             raise typer.BadParameter("Manual box requires --center-x/--center-y/--center-z")
@@ -571,6 +717,8 @@ def run_matcha(
 
     receptor_for_run = receptor
     pocket_centers_filename = None
+    analogue_result = None
+    analogue_template_std = None
 
     dataset_dir = work_dir / "datasets" / "any_conf"
     dataset_dir.mkdir(parents=True, exist_ok=True)
@@ -598,9 +746,110 @@ def run_matcha(
             raise typer.BadParameter("--ligand-dir must be a file or directory")
         if not molecules:
             raise typer.BadParameter(f"No molecules found in {ligand_dir}")
+        molecules = _dedupe_molecule_names(molecules)
         console.print(f"[bold green][matcha][/bold green] Found {len(molecules)} molecules to process")
+
+        if analogue_template is not None:
+            if not analogue_template.exists():
+                raise typer.BadParameter(f"Analogue template not found: {analogue_template}")
+            template_mol = _load_first_ligand_mol(analogue_template)
+            if template_mol is None:
+                raise typer.BadParameter(f"Failed to read analogue template: {analogue_template}")
+            seed_count = int(analogue_seed_poses or n_samples)
+            analogue_dir = run_workdir / "analogue"
+            console.print(
+                f"[bold cyan][matcha][/bold cyan] Analogue/FEP mode: template={analogue_template.name}, "
+                f"seed_poses={seed_count}"
+            )
+            analogue_result = run_analogue_workflow(
+                template_mol=template_mol,
+                ligands=molecules,
+                output_dir=analogue_dir,
+                receptor_path=receptor,
+                config=AnalogueWorkflowConfig(
+                    n_seed_poses=seed_count,
+                    n_final_poses=analogue_final_poses,
+                    min_mcs_atoms=analogue_min_mcs_atoms,
+                    min_mcs_fraction=analogue_min_mcs_fraction,
+                    core_rmsd_cutoff=analogue_core_rmsd_cutoff,
+                    torsion_mc_steps=analogue_torsion_mc_steps,
+                    random_seed=DEFAULT_CONF["seed"],
+                    export_fep_bundle=True,
+                ),
+            )
+            analogue_template_std = standardize_mol(template_mol, remove_hs=True, sanitize=True).mol
+            console.print(f"[bold green][matcha][/bold green] analogue seed bundle: {analogue_result.fep_bundle_dir}")
+            console.print(
+                f"[bold green][matcha][/bold green] analogue summary: "
+                f"ready={analogue_result.summary.get('fep_ready', 0)}, "
+                f"review={analogue_result.summary.get('needs_review', 0)}, "
+                f"failed={analogue_result.summary.get('failed', 0)}"
+            )
+            if analogue_only:
+                _write_json(run_workdir / "run_timing.json", {
+                    "mode": "analogue_only",
+                    "run_name": run_name,
+                    "analogue_summary": analogue_result.summary,
+                    "total_sec": time.perf_counter() - run_timer_start,
+                })
+                console.print(f"[bold green][matcha][/bold green] FEP manifest: {analogue_result.fep_bundle_dir / 'fep_manifest.json'}")
+                return
+            if not analogue_result.selected_molecules:
+                raise typer.BadParameter("Analogue mode generated no seed poses; inspect analogue/failures.json")
+            # Feed the selected template-aligned molecules into the normal dataset path so
+            # ESM/cache/preprocessing still operate on the same UID set as the seed transforms.
+            selected = analogue_result.selected_molecules
+            molecules = [(uid, selected[uid]) for uid, _ in molecules if uid in selected]
+            n_samples = min(n_samples, seed_count)
+
         molecule_uids = _prepare_batch_dataset(receptor, molecules, dataset_dir)
     else:
+        if analogue_template is not None:
+            if not analogue_template.exists():
+                raise typer.BadParameter(f"Analogue template not found: {analogue_template}")
+            template_mol = _load_first_ligand_mol(analogue_template)
+            ligand_mol = _load_first_ligand_mol(ligand)
+            if template_mol is None or ligand_mol is None:
+                raise typer.BadParameter("Failed to read analogue template or ligand")
+            seed_count = int(analogue_seed_poses or n_samples)
+            analogue_dir = run_workdir / "analogue"
+            analogue_result = run_analogue_workflow(
+                template_mol=template_mol,
+                ligands=[(run_name, ligand_mol)],
+                output_dir=analogue_dir,
+                receptor_path=receptor,
+                config=AnalogueWorkflowConfig(
+                    n_seed_poses=seed_count,
+                    n_final_poses=analogue_final_poses,
+                    min_mcs_atoms=analogue_min_mcs_atoms,
+                    min_mcs_fraction=analogue_min_mcs_fraction,
+                    core_rmsd_cutoff=analogue_core_rmsd_cutoff,
+                    torsion_mc_steps=analogue_torsion_mc_steps,
+                    random_seed=DEFAULT_CONF["seed"],
+                    export_fep_bundle=True,
+                ),
+            )
+            analogue_template_std = standardize_mol(template_mol, remove_hs=True, sanitize=True).mol
+            console.print(f"[bold green][matcha][/bold green] analogue seed bundle: {analogue_result.fep_bundle_dir}")
+            if analogue_only:
+                _write_json(run_workdir / "run_timing.json", {
+                    "mode": "analogue_only",
+                    "run_name": run_name,
+                    "analogue_summary": analogue_result.summary,
+                    "total_sec": time.perf_counter() - run_timer_start,
+                })
+                console.print(f"[bold green][matcha][/bold green] FEP manifest: {analogue_result.fep_bundle_dir / 'fep_manifest.json'}")
+                return
+            if run_name not in analogue_result.selected_molecules:
+                raise typer.BadParameter("Analogue mode generated no seed pose for ligand; inspect analogue/failures.json")
+            prepared_ligand = work_dir / f"{run_name}_analogue_selected.sdf"
+            writer = Chem.SDWriter(str(prepared_ligand))
+            writer.SetKekulize(False)
+            writer.write(analogue_result.selected_molecules[run_name])
+            writer.close()
+            ligand = prepared_ligand
+            n_samples = min(n_samples, seed_count)
+
         _prepare_singleton_dataset(
             receptor_for_run,
             ligand,
@@ -618,6 +867,11 @@ def run_matcha(
     conf = _build_conf(base_conf, work_dir, checkpoints)
     if n_confs is not None and n_confs < 1:
         raise typer.BadParameter("--n-confs must be >= 1")
+    if n_confs is not None:
+        conf.n_confs_override = int(n_confs)
+    elif analogue_result is not None:
+        # Keep conformer names aligned with analogue_seed_transforms.npy keys.
+        conf.n_confs_override = int(n_samples)
     console.print(f"[bold green][matcha][/bold green] workdir: {run_workdir}")
     console.print(f"[bold green][matcha][/bold green] checkpoints: {checkpoints}")
     console.print(f"[bold green][matcha][/bold green] samples per ligand: {n_samples}")
@@ -645,6 +899,11 @@ def run_matcha(
         pocket_centers_filename=pocket_centers_filename,
         docking_batch_limit=docking_batch_limit,
         num_workers=num_workers,
+        pin_memory=pin_memory,
+        prefetch_factor=prefetch_factor,
+        persistent_workers=persistent_workers,
+        initial_pose_transforms_path=(analogue_result.seed_transforms_path if analogue_result is not None else None),
+        start_stage=(analogue_start_stage if analogue_result is not None else 1),
     )
     inference_sec = time.perf_counter() - inference_start
 
@@ -899,6 +1158,18 @@ def run_matcha(
 
         end_time = datetime.now(timezone.utc)
         runtime = (end_time - start_time).total_seconds()
+        refined_fep_summary = None
+        if analogue_result is not None and analogue_template_std is not None:
+            refined_fep_summary = export_pose_files_as_fep_bundle(
+                output_dir=run_workdir / "analogue_fep_refined",
+                pose_files={run_name: resolved_out},
+                template_mol=analogue_template_std,
+                mappings=analogue_result.mappings,
+                receptor_path=receptor,
+                core_rmsd_cutoff=analogue_core_rmsd_cutoff,
+                min_mcs_fraction=analogue_min_mcs_fraction,
+            )
+
         _write_json(
             run_workdir / "run_timing.json",
             {
@@ -910,6 +1181,8 @@ def run_matcha(
                 "scoring_sec": scoring_sec,
                 "total_sec": runtime,
                 "pipeline_timings": pipeline_timings or {},
+                "analogue_seed_summary": analogue_result.summary if analogue_result is not None else None,
+                "analogue_refined_summary": refined_fep_summary,
             },
         )
 
@@ -980,6 +1253,8 @@ def run_matcha(
             console.print("")
         console.print(f"  Best pose SDF    : {resolved_out_abs}")
         console.print(f"  All poses SDF    : {all_poses_abs}")
+        if refined_fep_summary is not None:
+            console.print(f"  Refined FEP bundle: {(run_workdir / 'analogue_fep_refined').resolve()}")
         console.print(f"  Log file         : {log_path}")
         console.print(f"  Runtime          : {_format_runtime(runtime)}")
         console.print("")
@@ -1067,6 +1342,23 @@ def run_matcha(
         with open(per_log_path, "w") as log_file:
             log_file.write("\n".join(log_lines))
 
+    refined_fep_summary = None
+    if analogue_result is not None and analogue_template_std is not None:
+        pose_files = {
+            mol_uid: best_dir / f"{mol_uid}.sdf"
+            for mol_uid in molecule_uids
+            if (best_dir / f"{mol_uid}.sdf").exists()
+        }
+        refined_fep_summary = export_pose_files_as_fep_bundle(
+            output_dir=run_workdir / "analogue_fep_refined",
+            pose_files=pose_files,
+            template_mol=analogue_template_std,
+            mappings=analogue_result.mappings,
+            receptor_path=receptor,
+            core_rmsd_cutoff=analogue_core_rmsd_cutoff,
+            min_mcs_fraction=analogue_min_mcs_fraction,
+        )
+
     end_time = datetime.now(timezone.utc)
     runtime = (end_time - start_time).total_seconds()
     _write_json(
@@ -1081,6 +1373,8 @@ def run_matcha(
             "total_sec": runtime,
             "pipeline_timings": pipeline_timings or {},
             "ligand_count": len(molecule_uids),
+            "analogue_seed_summary": analogue_result.summary if analogue_result is not None else None,
+            "analogue_refined_summary": refined_fep_summary,
         },
     )
 
@@ -1136,6 +1430,8 @@ def run_matcha(
     console.print("[ BATCH SUMMARY ]")
     console.print(f"  Processed {len(molecule_uids)} molecules")
     console.print(f"  Results saved to : {run_workdir}")
+    if refined_fep_summary is not None:
+        console.print(f"  Refined FEP bundle: {(run_workdir / 'analogue_fep_refined').resolve()}")
     console.print(f"  Log file         : {log_path}")
     console.print(f"  Runtime          : {_format_runtime(runtime)}")
     console.print("")
