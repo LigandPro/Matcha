@@ -163,10 +163,10 @@ def test_gnina_reranking_preserves_fep_ready_before_affinity(tmp_path: Path, mon
                     writer.write(mol)
                 writer.close()
 
-    def fake_evaluate_pose(ligand_id, pose_idx, mol, *_args, **_kwargs):
+    def fake_qc(pose_idx):
         fep_ready = pose_idx == 0
         return SimpleNamespace(
-            ligand_id=ligand_id,
+            ligand_id="analogue",
             pose_index=pose_idx,
             core_rmsd=0.1 if fep_ready else 4.0,
             receptor_clash_count=0,
@@ -177,18 +177,16 @@ def test_gnina_reranking_preserves_fep_ready_before_affinity(tmp_path: Path, mon
             warnings=[],
         )
 
-    import matcha.analogue.workflow as workflow
     import matcha.scoring.gnina_scorer as gnina_scorer
 
     monkeypatch.setattr(gnina_scorer, "GninaScorer", FakeGninaScorer)
-    monkeypatch.setattr(workflow, "evaluate_pose", fake_evaluate_pose)
 
     receptor = tmp_path / "receptor.pdb"
     receptor.write_text(
         "ATOM      1  C   ALA A   1       8.000   8.000   8.000  1.00  0.00           C\n"
         "END\n"
     )
-    ranked = [(_mol3d("Cc1ccccc1", "ready"), object()), (_mol3d("CCc1ccccc1", "review"), object())]
+    ranked = [(_mol3d("Cc1ccccc1", "ready"), fake_qc(0)), (_mol3d("CCc1ccccc1", "review"), fake_qc(1))]
 
     reranked = _gnina_rerank_poses(
         ligand_id="analogue",

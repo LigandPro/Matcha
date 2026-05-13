@@ -12,7 +12,7 @@ from rdkit import Chem
 from .constrained_embed import generate_constrained_conformers, mol_positions
 from .fep_export import LigandAnalogueExport, write_fep_bundle
 from .mcs import MCSMapping, find_robust_mcs
-from .ranking import evaluate_pose, load_receptor_heavy_atom_positions, rank_poses
+from .ranking import load_receptor_heavy_atom_positions, rank_poses
 from .standardize import standardize_mol
 from .torsion_mc import torsional_mc_refine
 
@@ -162,32 +162,31 @@ def _gnina_rerank_poses(
     if not scored_sdf.exists():
         return ranked
 
-    scored: list[tuple[Chem.Mol, object, float]] = []
-    for scored_idx, mol in enumerate(Chem.SDMolSupplier(str(scored_sdf), removeHs=False, sanitize=False)):
+    scores: list[float | None] = []
+    for mol in Chem.SDMolSupplier(str(scored_sdf), removeHs=False, sanitize=False):
         if mol is None:
             continue
-        score = _extract_score(mol, cfg.gnina_score_type, cfg.gnina_minimize)
-        qc = evaluate_pose(
-            ligand_id,
-            scored_idx,
-            mol,
-            template,
-            mapping,
-            core_rmsd_cutoff=cfg.core_rmsd_cutoff,
-            min_mcs_fraction=cfg.min_mcs_fraction,
-            receptor_positions=receptor_positions,
-        )
+        scores.append(_extract_score(mol, cfg.gnina_score_type, cfg.gnina_minimize))
+
+    scored: list[tuple[Chem.Mol, object, float | None]] = []
+    for pose_idx, (mol, qc) in enumerate(ranked):
+        score = scores[pose_idx] if pose_idx < len(scores) else None
         if score is not None:
             mol.SetProp("analogue_gnina_score", f"{score:.6f}")
             qc.warnings.append(f"gnina_{cfg.gnina_score_type}:{score:.6f}")
             qc.rank_score = float(score)
         _set_pose_qc_props(mol, qc)
-        scored.append((mol, qc, float("inf") if score is None else float(score)))
+        scored.append((mol, qc, score))
 
     if not scored:
         return ranked
-    score_multiplier = 1.0 if cfg.gnina_score_type in {"Affinity", "minimizedAffinity"} else -1.0
-    scored.sort(key=lambda item: (0 if item[1].fep_ready else 1, score_multiplier * item[2]))
+    lower_is_better = cfg.gnina_score_type in {"Affinity", "minimizedAffinity"}
+    scored.sort(
+        key=lambda item: (
+            0 if item[1].fep_ready else 1,
+            float("inf") if item[2] is None else float(item[2]) if lower_is_better else -float(item[2]),
+        )
+    )
     return [(mol, qc) for mol, qc, _score in scored]
 
 
