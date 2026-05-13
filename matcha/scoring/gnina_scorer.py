@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import signal
 import shutil
 import subprocess
 import sys
@@ -445,21 +446,33 @@ class GninaScorer(PoseScorer):
             cmd.extend(["-o", str(output_sdf)])
 
             try:
-                subprocess.run(cmd, capture_output=True, text=True, check=True,
-                               env=_gnina_env(), timeout=self.timeout_seconds)
-            except subprocess.CalledProcessError as e:
-                logger.error(f"gnina failed for {sdf_file.name}: {e.stderr}")
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    env=_gnina_env(),
+                    start_new_session=True,
+                )
+                _stdout, stderr = proc.communicate(timeout=self.timeout_seconds)
             except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGKILL)
+                _stdout, stderr = proc.communicate()
                 logger.error(
-                    f"gnina timed out after {self.timeout_seconds}s for {sdf_file.name}"
+                    f"gnina timed out after {self.timeout_seconds}s for {sdf_file.name}: {stderr}"
                 )
                 if output_sdf.exists():
                     output_sdf.unlink()
+                continue
             except FileNotFoundError:
                 raise RuntimeError(
                     f"gnina binary not found at {self.gnina_path}. "
                     "Please install gnina or use --scorer none."
                 )
+            if proc.returncode != 0:
+                logger.error(f"gnina failed for {sdf_file.name}: {stderr}")
+                if output_sdf.exists() and output_sdf.stat().st_size == 0:
+                    output_sdf.unlink()
             
     def select_top_poses(self, sdf_dir, output_dir, filters_path=None, n_samples=20):
         sdf_dir = Path(sdf_dir)
