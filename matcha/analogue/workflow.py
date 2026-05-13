@@ -41,6 +41,7 @@ class AnalogueWorkflowConfig:
     gnina_minimize: bool = True
     gnina_score_type: str = "Affinity"
     gnina_cnn_scoring: str = "none"
+    gnina_timeout_seconds: int | None = 300
     gnina_device: int = 0
 
 
@@ -175,6 +176,7 @@ def _summarize_gnina_rows(rows: list[dict], cfg: AnalogueWorkflowConfig, csv_pat
         "scorer_path": cfg.gnina_scorer_path,
         "score_type": cfg.gnina_score_type,
         "cnn_scoring": cfg.gnina_cnn_scoring,
+        "timeout_seconds": cfg.gnina_timeout_seconds,
         "minimize": bool(cfg.gnina_minimize),
         "device": int(cfg.gnina_device),
         "ranking_summary_csv": str(csv_path.resolve()) if csv_path is not None else None,
@@ -222,18 +224,22 @@ def _gnina_rerank_poses(
         minimize=cfg.gnina_minimize,
         score_type=cfg.gnina_score_type,
         cnn_scoring=cfg.gnina_cnn_scoring,
+        timeout_seconds=cfg.gnina_timeout_seconds,
     )
     scorer.score_poses(str(receptor_path), str(input_dir), str(output_scored_dir), device=cfg.gnina_device)
 
-    scored_sdf = output_scored_dir / f"{ligand_id}.sdf"
-    if not scored_sdf.exists():
-        return ranked
-
     scores: list[float | None] = []
-    for mol in Chem.SDMolSupplier(str(scored_sdf), removeHs=False, sanitize=False):
-        if mol is None:
-            continue
-        scores.append(_extract_score(mol, cfg.gnina_score_type, cfg.gnina_minimize))
+    scored_sdf = output_scored_dir / f"{ligand_id}.sdf"
+    if scored_sdf.exists():
+        try:
+            for mol in Chem.SDMolSupplier(str(scored_sdf), removeHs=False, sanitize=False):
+                if mol is None:
+                    continue
+                scores.append(_extract_score(mol, cfg.gnina_score_type, cfg.gnina_minimize))
+        except OSError as exc:
+            logger.error("GNINA scored SDF is unreadable for %s: %s", ligand_id, exc)
+    else:
+        logger.error("GNINA scored SDF missing for %s: %s", ligand_id, scored_sdf)
 
     scored: list[tuple[Chem.Mol, object, float | None, int]] = []
     for pose_idx, (mol, qc) in enumerate(ranked):

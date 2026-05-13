@@ -560,6 +560,7 @@ def run_matcha(
     scorer_minimize: bool = typer.Option(True, "--scorer-minimize/--no-scorer-minimize", help="Minimize poses during scoring (gnina)."),
     gnina_score_type: str = typer.Option("Affinity", "--gnina-score-type", help="GNINA SDF score field used for reranking, e.g. Affinity, CNNscore, or CNNaffinity."),
     gnina_cnn_scoring: str = typer.Option("none", "--gnina-cnn-scoring", help="Value passed to GNINA --cnn_scoring, e.g. none or rescore."),
+    gnina_timeout_seconds: Optional[int] = typer.Option(300, "--gnina-timeout-seconds", help="Per-ligand GNINA scoring timeout in seconds."),
     gnina_batch_mode: str = typer.Option("per-ligand", "--gnina-batch-mode", help="GNINA scoring mode for batch runs (currently only per-ligand)."),
 ) -> None:
     analogue_template = _option_default(analogue_template, None)
@@ -574,6 +575,7 @@ def run_matcha(
     analogue_receptor_aware = _option_default(analogue_receptor_aware, True)
     gnina_score_type = _option_default(gnina_score_type, "Affinity")
     gnina_cnn_scoring = _option_default(gnina_cnn_scoring, "none")
+    gnina_timeout_seconds = _option_default(gnina_timeout_seconds, 300)
 
     if out is None:
         _print_usage_and_exit()
@@ -658,6 +660,7 @@ def run_matcha(
                 gnina_minimize=scorer_minimize,
                 gnina_score_type=gnina_score_type,
                 gnina_cnn_scoring=gnina_cnn_scoring,
+                gnina_timeout_seconds=gnina_timeout_seconds,
                 random_seed=DEFAULT_CONF["seed"],
                 export_fep_bundle=True,
             ),
@@ -881,6 +884,7 @@ def run_matcha(
             scorer_minimize=scorer_minimize,
             gnina_score_type=gnina_score_type,
             gnina_cnn_scoring=gnina_cnn_scoring,
+            gnina_timeout_seconds=gnina_timeout_seconds,
             gnina_batch_mode=gnina_batch_mode,
         )
         total_sec = time.perf_counter() - run_timer_start
@@ -970,6 +974,7 @@ def run_matcha(
                     gnina_minimize=scorer_minimize,
                     gnina_score_type=gnina_score_type,
                     gnina_cnn_scoring=gnina_cnn_scoring,
+                    gnina_timeout_seconds=gnina_timeout_seconds,
                     random_seed=DEFAULT_CONF["seed"],
                     export_fep_bundle=True,
                 ),
@@ -1046,6 +1051,7 @@ def run_matcha(
                     gnina_minimize=scorer_minimize,
                     gnina_score_type=gnina_score_type,
                     gnina_cnn_scoring=gnina_cnn_scoring,
+                    gnina_timeout_seconds=gnina_timeout_seconds,
                     random_seed=DEFAULT_CONF["seed"],
                     export_fep_bundle=True,
                 ),
@@ -1182,7 +1188,8 @@ def run_matcha(
         try:
             scorer = create_scorer(scorer_type, scorer_path=str(scorer_path) if scorer_path else None,
                                    minimize=scorer_minimize, score_type=gnina_score_type,
-                                   cnn_scoring=gnina_cnn_scoring)
+                                   cnn_scoring=gnina_cnn_scoring,
+                                   timeout_seconds=gnina_timeout_seconds)
             sdf_input = preds_root / dataset_name / "sdf_predictions"
             filters_path = preds_root / dataset_name / "filters_results_minimized.json"
             if scorer_type.startswith("gnina") and batch_mode:

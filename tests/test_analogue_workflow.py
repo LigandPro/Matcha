@@ -76,7 +76,7 @@ def test_analogue_workflow_writes_fep_bundle(tmp_path: Path):
 
 def test_analogue_workflow_uses_gnina_scores_for_reranking(tmp_path: Path, monkeypatch):
     class FakeGninaScorer:
-        def __init__(self, *, gnina_path, minimize, score_type, cnn_scoring):
+        def __init__(self, *, gnina_path, minimize, score_type, cnn_scoring, **_kwargs):
             assert gnina_path == "/bin/gnina"
             assert minimize is False
             assert score_type == "Affinity"

@@ -82,6 +82,7 @@ def main() -> None:
     parser.add_argument("--gnina-minimize", action="store_true")
     parser.add_argument("--gnina-score-type", default="Affinity")
     parser.add_argument("--gnina-cnn-scoring", default="none")
+    parser.add_argument("--gnina-timeout-seconds", type=int, default=300)
     args = parser.parse_args()
 
     target = args.wang_dir / "thrombin"
@@ -141,6 +142,8 @@ def main() -> None:
             args.gnina_score_type,
             "--gnina-cnn-scoring",
             args.gnina_cnn_scoring,
+            "--gnina-timeout-seconds",
+            str(args.gnina_timeout_seconds),
         ])
         if not args.gnina_minimize:
             cmd.append("--no-scorer-minimize")
@@ -182,6 +185,7 @@ def main() -> None:
         "gnina_minimize": bool(args.gnina_minimize),
         "gnina_score_type": args.gnina_score_type,
         "gnina_cnn_scoring": args.gnina_cnn_scoring,
+        "gnina_timeout_seconds": args.gnina_timeout_seconds,
     }
     for threshold in [0.5, 1.0, 2.0, 3.0]:
         summary[f"single_le_{threshold}A"] = sum(row["single_best_rmsd"] <= threshold for row in rows)

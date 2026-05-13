@@ -151,6 +151,7 @@ def build_shard_command(
     gnina_batch_mode: str,
     gnina_score_type: str = "Affinity",
     gnina_cnn_scoring: str = "none",
+    gnina_timeout_seconds: int | None = 300,
 ) -> list[str]:
     cmd: list[str] = [
         "uv",
@@ -180,6 +181,8 @@ def build_shard_command(
         gnina_score_type,
         "--gnina-cnn-scoring",
         gnina_cnn_scoring,
+        "--gnina-timeout-seconds",
+        str(gnina_timeout_seconds),
         "--overwrite",
         "--keep-workdir",
     ]
@@ -235,6 +238,7 @@ def _make_shard_specs(
     gnina_batch_mode: str,
     gnina_score_type: str = "Affinity",
     gnina_cnn_scoring: str = "none",
+    gnina_timeout_seconds: int | None = 300,
 ) -> list[ShardSpec]:
     specs: list[ShardSpec] = []
     for gpu_id, shard_dir, ligand_count in zip(gpu_ids, shard_dirs, shard_counts):
@@ -270,6 +274,7 @@ def _make_shard_specs(
             gnina_batch_mode=gnina_batch_mode,
             gnina_score_type=gnina_score_type,
             gnina_cnn_scoring=gnina_cnn_scoring,
+            gnina_timeout_seconds=gnina_timeout_seconds,
         )
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
@@ -566,6 +571,7 @@ def run_multigpu_batch(
     gnina_batch_mode: str,
     gnina_score_type: str = "Affinity",
     gnina_cnn_scoring: str = "none",
+    gnina_timeout_seconds: int | None = 300,
 ) -> dict:
     ligand_files = find_ligand_files(ligand_dir, recursive=recursive)
     sharded = shard_ligand_files(ligand_files, n_shards=len(gpu_ids))
@@ -600,6 +606,7 @@ def run_multigpu_batch(
         gnina_batch_mode=gnina_batch_mode,
         gnina_score_type=gnina_score_type,
         gnina_cnn_scoring=gnina_cnn_scoring,
+        gnina_timeout_seconds=gnina_timeout_seconds,
     )
 
     repo_root = Path(__file__).resolve().parents[2]

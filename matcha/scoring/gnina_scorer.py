@@ -394,12 +394,19 @@ def _find_top_scored_molecule(sdf_path, score_type="CNNscore", use_minimized=Tru
 class GninaScorer(PoseScorer):
     """Scorer using the GNINA molecular docking program."""
 
-    def __init__(self, gnina_path=None, minimize=True, score_type="Affinity",
-                 cnn_scoring="none"):
+    def __init__(
+        self,
+        gnina_path=None,
+        minimize=True,
+        score_type="Affinity",
+        cnn_scoring="none",
+        timeout_seconds=300,
+    ):
         self._gnina_path = str(gnina_path) if gnina_path is not None else ensure_gnina()
         self.minimize = minimize
         self.score_type = score_type
         self.cnn_scoring = cnn_scoring
+        self.timeout_seconds = timeout_seconds
 
     @property
     def name(self) -> str:
@@ -439,9 +446,15 @@ class GninaScorer(PoseScorer):
 
             try:
                 subprocess.run(cmd, capture_output=True, text=True, check=True,
-                               env=_gnina_env())
+                               env=_gnina_env(), timeout=self.timeout_seconds)
             except subprocess.CalledProcessError as e:
                 logger.error(f"gnina failed for {sdf_file.name}: {e.stderr}")
+            except subprocess.TimeoutExpired:
+                logger.error(
+                    f"gnina timed out after {self.timeout_seconds}s for {sdf_file.name}"
+                )
+                if output_sdf.exists():
+                    output_sdf.unlink()
             except FileNotFoundError:
                 raise RuntimeError(
                     f"gnina binary not found at {self.gnina_path}. "
@@ -585,7 +598,14 @@ class CustomScriptScorer(PoseScorer):
         logger.info(f"Top pose selection: {successful} successful, {failed} failed")
 
 
-def create_scorer(scorer_type, scorer_path=None, minimize=True, score_type="Affinity", cnn_scoring="none"):
+def create_scorer(
+    scorer_type,
+    scorer_path=None,
+    minimize=True,
+    score_type="Affinity",
+    cnn_scoring="none",
+    timeout_seconds=300,
+):
     """Factory function to create a PoseScorer instance.
 
     Args:
@@ -594,6 +614,7 @@ def create_scorer(scorer_type, scorer_path=None, minimize=True, score_type="Affi
         minimize: Whether to minimize poses (gnina only).
         score_type: GNINA SDF score field used when selecting poses.
         cnn_scoring: Value passed to gnina --cnn_scoring.
+        timeout_seconds: Per-file GNINA subprocess timeout.
 
     Returns:
         PoseScorer instance.
@@ -604,6 +625,7 @@ def create_scorer(scorer_type, scorer_path=None, minimize=True, score_type="Affi
             minimize=minimize,
             score_type=score_type,
             cnn_scoring=cnn_scoring,
+            timeout_seconds=timeout_seconds,
         )
     if scorer_type == "custom":
         if scorer_path is None:

@@ -30,6 +30,7 @@ def test_build_shard_command_contains_required_gpu_flags():
         gnina_batch_mode="per-ligand",
         gnina_score_type="CNNscore",
         gnina_cnn_scoring="rescore",
+        gnina_timeout_seconds=120,
     )
 
     assert cmd[:3] == ["uv", "run", "matcha"]
@@ -45,6 +46,7 @@ def test_build_shard_command_contains_required_gpu_flags():
     assert "--gnina-batch-mode" in cmd
     assert cmd[cmd.index("--gnina-score-type") + 1] == "CNNscore"
     assert cmd[cmd.index("--gnina-cnn-scoring") + 1] == "rescore"
+    assert cmd[cmd.index("--gnina-timeout-seconds") + 1] == "120"
 
 
 def test_materialize_shards_cleans_existing_shard_dir(tmp_path: Path):
