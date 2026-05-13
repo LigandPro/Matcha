@@ -35,11 +35,17 @@ def test_robust_mcs_maps_congeneric_core():
 def test_analogue_workflow_writes_fep_bundle(tmp_path: Path):
     template = _mol3d("Cc1ccccc1", "template")
     analogue = _mol3d("CCc1ccccc1", "analogue")
+    receptor = tmp_path / "receptor.pdb"
+    receptor.write_text(
+        "ATOM      1  C   ALA A   1       8.000   8.000   8.000  1.00  0.00           C\n"
+        "END\n"
+    )
 
     result = run_analogue_workflow(
         template_mol=template,
         ligands=[("analogue", analogue)],
         output_dir=tmp_path,
+        receptor_path=receptor,
         config=AnalogueWorkflowConfig(
             n_seed_poses=4,
             n_final_poses=2,
@@ -54,6 +60,9 @@ def test_analogue_workflow_writes_fep_bundle(tmp_path: Path):
     assert (tmp_path / "analogue_seed_transforms.npy").exists()
     assert (tmp_path / "fep_bundle_seed" / "aligned_series.sdf").exists()
     assert (tmp_path / "fep_bundle_seed" / "fep_manifest.json").exists()
+    quality_report = (tmp_path / "fep_bundle_seed" / "quality_report.csv").read_text()
+    assert "receptor_clash_count" in quality_report
+    assert "receptor_contact_count" in quality_report
 
     transforms = np.load(tmp_path / "analogue_seed_transforms.npy", allow_pickle=True)[0]
     assert any(key.startswith("analogue_mol0_conf") for key in transforms)

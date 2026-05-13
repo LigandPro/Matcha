@@ -12,7 +12,7 @@ from rdkit import Chem
 from .constrained_embed import generate_constrained_conformers, mol_positions
 from .fep_export import LigandAnalogueExport, write_fep_bundle
 from .mcs import MCSMapping, find_robust_mcs
-from .ranking import rank_poses
+from .ranking import load_receptor_heavy_atom_positions, rank_poses
 from .standardize import standardize_mol
 from .torsion_mc import torsional_mc_refine
 
@@ -29,6 +29,7 @@ class AnalogueWorkflowConfig:
     torsion_mc_keep: int = 64
     random_seed: int = 777
     export_fep_bundle: bool = True
+    receptor_aware_ranking: bool = True
 
 
 @dataclass
@@ -113,6 +114,11 @@ def run_analogue_workflow(
         raise ValueError("Analogue template must be readable and contain 3D coordinates.")
     template_std = template_std_res.mol
     template_std.SetProp("_Name", template_mol.GetProp("_Name") if template_mol.HasProp("_Name") else "template")
+    receptor_positions = (
+        load_receptor_heavy_atom_positions(receptor_path)
+        if cfg.receptor_aware_ranking and receptor_path is not None
+        else None
+    )
 
     exports: dict[str, LigandAnalogueExport] = {}
     selected_molecules: dict[str, Chem.Mol] = {}
@@ -183,6 +189,7 @@ def run_analogue_workflow(
             mapping,
             core_rmsd_cutoff=cfg.core_rmsd_cutoff,
             min_mcs_fraction=cfg.min_mcs_fraction,
+            receptor_positions=receptor_positions,
         )[: max(1, int(cfg.n_seed_poses))]
         ranked_by_ligand[ligand_id] = ranked
         final_ranked = ranked[: max(1, int(cfg.n_final_poses))]

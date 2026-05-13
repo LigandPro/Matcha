@@ -127,6 +127,8 @@ def write_fep_bundle(
         "core_rmsd",
         "whole_centroid_distance",
         "internal_clash_count",
+        "receptor_clash_count",
+        "receptor_contact_count",
         "strain_energy",
         "mcs_atoms",
         "mcs_fraction_ligand",
