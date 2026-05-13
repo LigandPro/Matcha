@@ -66,3 +66,78 @@ def test_analogue_workflow_writes_fep_bundle(tmp_path: Path):
 
     transforms = np.load(tmp_path / "analogue_seed_transforms.npy", allow_pickle=True)[0]
     assert any(key.startswith("analogue_mol0_conf") for key in transforms)
+
+
+def test_analogue_workflow_uses_gnina_scores_for_reranking(tmp_path: Path, monkeypatch):
+    class FakeGninaScorer:
+        def __init__(self, *, gnina_path, minimize, score_type, cnn_scoring):
+            assert gnina_path == "/bin/gnina"
+            assert minimize is False
+            assert score_type == "Affinity"
+            assert cnn_scoring == "none"
+
+        def score_poses(self, receptor_path, sdf_input_dir, sdf_output_dir, device=0):
+            assert device == 0
+            assert Path(receptor_path).exists()
+            sdf_output_dir = Path(sdf_output_dir)
+            sdf_output_dir.mkdir(parents=True, exist_ok=True)
+            for sdf_path in Path(sdf_input_dir).glob("*.sdf"):
+                writer = Chem.SDWriter(str(sdf_output_dir / sdf_path.name))
+                writer.SetKekulize(False)
+                for idx, mol in enumerate(Chem.SDMolSupplier(str(sdf_path), removeHs=False, sanitize=False)):
+                    if mol is None:
+                        continue
+                    mol.SetProp("Affinity", f"{10 - idx:.3f}")
+                    writer.write(mol)
+                writer.close()
+
+    import matcha.scoring.gnina_scorer as gnina_scorer
+
+    monkeypatch.setattr(gnina_scorer, "GninaScorer", FakeGninaScorer)
+
+    template = _mol3d("Cc1ccccc1", "template")
+    analogue = _mol3d("CCc1ccccc1", "analogue")
+    receptor = tmp_path / "receptor.pdb"
+    receptor.write_text(
+        "ATOM      1  C   ALA A   1       8.000   8.000   8.000  1.00  0.00           C\n"
+        "END\n"
+    )
+
+    result = run_analogue_workflow(
+        template_mol=template,
+        ligands=[("analogue", analogue)],
+        output_dir=tmp_path,
+        receptor_path=receptor,
+        config=AnalogueWorkflowConfig(
+            n_seed_poses=4,
+            n_final_poses=2,
+            min_mcs_atoms=5,
+            min_mcs_fraction=0.3,
+            core_rmsd_cutoff=1.0,
+            gnina_score_poses=True,
+            gnina_scorer_path="/bin/gnina",
+            gnina_minimize=False,
+        ),
+    )
+
+    scored_sdf = tmp_path / "gnina_ranking" / "analogue" / "gnina_scored" / "analogue.sdf"
+    scores = [
+        float(mol.GetProp("Affinity"))
+        for mol in Chem.SDMolSupplier(str(scored_sdf), removeHs=False, sanitize=False)
+        if mol is not None
+    ]
+
+    selected = result.selected_molecules["analogue"]
+    assert selected.HasProp("analogue_gnina_score")
+    assert float(selected.GetProp("analogue_gnina_score")) == min(scores)
+    assert scores[0] != min(scores)
+
+    best_pose = next(
+        Chem.SDMolSupplier(
+            str(tmp_path / "fep_bundle_seed" / "complexes" / "analogue" / "best_pose.sdf"),
+            removeHs=False,
+            sanitize=False,
+        )
+    )
+    assert best_pose.HasProp("analogue_gnina_score")
+    assert float(best_pose.GetProp("analogue_gnina_score")) == min(scores)

@@ -30,6 +30,21 @@ matcha \
   --analogue-core-rmsd-cutoff 1.0
 ```
 
+GNINA pose rescoring for analogue bundles:
+
+```bash
+matcha \
+  -r protein.pdb \
+  --ligand-dir analogs.sdf \
+  --analogue-template reference_bound.sdf \
+  --analogue-only \
+  --scorer gnina \
+  --scorer-path /path/to/gnina \
+  --no-scorer-minimize \
+  -o out \
+  --run-name analogue_gnina_ranked
+```
+
 ## Workflow
 
 1. Standardize template and analogues conservatively without tautomer/protomer edits.
@@ -42,8 +57,9 @@ matcha \
 3. Generate template-constrained conformers with RDKit ETKDG and MCS coordinate anchors.
 4. Optionally diversify poses using torsional Monte Carlo outside the MCS core.
 5. Rank poses with FEP-aware gates: MCS coverage, core RMSD, internal clashes, strain estimate, and receptor clash/contact terms when a receptor is supplied.
-6. Export a generic FEP bundle and an RBFE graph manifest.
-7. Optionally feed full seed poses into Matcha stage 3 via `analogue_seed_transforms.npy`.
+6. If `--scorer gnina --scorer-path ...` is supplied, rescore the analogue candidate poses with GNINA and use the GNINA-ranked order for `best_pose.sdf`, `poses.sdf`, and downstream Matcha seed selection.
+7. Export a generic FEP bundle and an RBFE graph manifest.
+8. Optionally feed full seed poses into Matcha stage 3 via `analogue_seed_transforms.npy`.
 
 ## Output
 
@@ -55,6 +71,7 @@ Seed-only output is written under:
   analogue_mappings.json
   analogue_failures.json
   analogue_summary.json
+  gnina_ranking/<ligand_id>/gnina_scored/<ligand_id>.sdf
   fep_bundle_seed/
     aligned_series.sdf
     quality_report.csv
