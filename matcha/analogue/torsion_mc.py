@@ -16,6 +16,14 @@ from .mcs import MCSMapping
 _ROTATABLE_SMARTS = "[!$(*#*)&!D1]-!@[!$(*#*)&!D1]"
 
 
+def _ensure_ring_info(mol: Chem.Mol) -> None:
+    mol.UpdatePropertyCache(strict=False)
+    try:
+        Chem.GetSymmSSSR(mol)
+    except Exception:
+        pass
+
+
 @dataclass
 class TorsionMCResult:
     poses: list[Chem.Mol]
@@ -23,9 +31,11 @@ class TorsionMCResult:
 
 
 def _rotatable_bonds(mol: Chem.Mol, fixed_atoms: set[int]) -> list[tuple[int, int]]:
+    _ensure_ring_info(mol)
     patt = Chem.MolFromSmarts(_ROTATABLE_SMARTS)
     if patt is None:
         return []
+    _ensure_ring_info(patt)
     bonds: list[tuple[int, int]] = []
     for a, b in mol.GetSubstructMatches(patt):
         bond = mol.GetBondBetweenAtoms(int(a), int(b))
