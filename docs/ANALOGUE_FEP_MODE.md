@@ -41,7 +41,7 @@ matcha \
    - last-resort heavy-atom mapping.
 3. Generate template-constrained conformers with RDKit ETKDG and MCS coordinate anchors.
 4. Optionally diversify poses using torsional Monte Carlo outside the MCS core.
-5. Rank poses with FEP-aware gates: MCS coverage, core RMSD, internal clashes, and strain estimate.
+5. Rank poses with FEP-aware gates: MCS coverage, core RMSD, internal clashes, strain estimate, and receptor clash/contact terms when a receptor is supplied.
 6. Export a generic FEP bundle and an RBFE graph manifest.
 7. Optionally feed full seed poses into Matcha stage 3 via `analogue_seed_transforms.npy`.
 
@@ -82,5 +82,8 @@ A pose is marked `FEP_READY` when it has:
 - MCS ligand coverage above `--analogue-min-mcs-fraction`;
 - MCS core RMSD below `--analogue-core-rmsd-cutoff`;
 - no detected internal ligand clashes.
+- no detected receptor heavy-atom clashes when receptor-aware ranking is enabled.
 
 `NEEDS_REVIEW` poses are exported but clearly marked in `quality_report.csv` and `quality.json`.
+
+Use `--no-analogue-receptor-aware` to disable receptor clash/contact scoring for isolated ligand-only experiments.
