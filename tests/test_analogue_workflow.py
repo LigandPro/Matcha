@@ -222,3 +222,67 @@ def test_gnina_reranking_preserves_fep_ready_before_affinity(tmp_path: Path, mon
     assert reranked[0][0].GetProp("analogue_gnina_score") == "100.000000"
     assert reranked[1][1].status == "NEEDS_REVIEW"
     assert reranked[1][0].GetProp("analogue_gnina_score") == "-100.000000"
+
+
+def test_gnina_reranking_uses_higher_cnn_scores(tmp_path: Path, monkeypatch):
+    class FakeGninaScorer:
+        def __init__(self, *, score_type, cnn_scoring, **_kwargs):
+            assert score_type == "CNNscore"
+            assert cnn_scoring == "rescore"
+
+        def score_poses(self, _receptor_path, sdf_input_dir, sdf_output_dir, device=0):
+            sdf_output_dir = Path(sdf_output_dir)
+            sdf_output_dir.mkdir(parents=True, exist_ok=True)
+            for sdf_path in Path(sdf_input_dir).glob("*.sdf"):
+                writer = Chem.SDWriter(str(sdf_output_dir / sdf_path.name))
+                writer.SetKekulize(False)
+                for idx, mol in enumerate(Chem.SDMolSupplier(str(sdf_path), removeHs=False, sanitize=False)):
+                    if mol is None:
+                        continue
+                    mol.SetProp("CNNscore", "0.1" if idx == 0 else "0.9")
+                    writer.write(mol)
+                writer.close()
+
+    def fake_qc(pose_idx):
+        return SimpleNamespace(
+            ligand_id="analogue",
+            pose_index=pose_idx,
+            core_rmsd=0.1,
+            receptor_clash_count=0,
+            receptor_contact_count=0,
+            rank_score=0.0,
+            status="FEP_READY",
+            fep_ready=True,
+            warnings=[],
+        )
+
+    import matcha.scoring.gnina_scorer as gnina_scorer
+
+    monkeypatch.setattr(gnina_scorer, "GninaScorer", FakeGninaScorer)
+
+    receptor = tmp_path / "receptor.pdb"
+    receptor.write_text(
+        "ATOM      1  C   ALA A   1       8.000   8.000   8.000  1.00  0.00           C\n"
+        "END\n"
+    )
+    ranked = [(_mol3d("Cc1ccccc1", "low"), fake_qc(0)), (_mol3d("CCc1ccccc1", "high"), fake_qc(1))]
+
+    reranked = _gnina_rerank_poses(
+        ligand_id="analogue",
+        ranked=ranked,
+        template=_mol3d("Cc1ccccc1", "template"),
+        mapping=None,
+        receptor_path=receptor,
+        receptor_positions=None,
+        output_dir=tmp_path / "gnina",
+        cfg=AnalogueWorkflowConfig(
+            gnina_score_poses=True,
+            gnina_scorer_path="/bin/gnina",
+            gnina_minimize=False,
+            gnina_score_type="CNNscore",
+            gnina_cnn_scoring="rescore",
+        ),
+    )
+
+    assert reranked[0][1].pose_index == 1
+    assert reranked[0][0].GetProp("analogue_gnina_score") == "0.900000"

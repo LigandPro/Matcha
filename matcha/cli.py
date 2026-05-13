@@ -69,6 +69,10 @@ def _format_runtime(seconds: float) -> str:
     return " ".join(parts)
 
 
+def _option_default(value: Any, default: Any) -> Any:
+    return default if isinstance(value, typer.models.OptionInfo) else value
+
+
 def _write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
@@ -554,8 +558,23 @@ def run_matcha(
     scorer_type: str = typer.Option("gnina", "--scorer", help="Pose scorer: gnina, custom, or none."),
     scorer_path: Optional[Path] = typer.Option(None, "--scorer-path", help="Path to gnina binary or custom scorer script."),
     scorer_minimize: bool = typer.Option(True, "--scorer-minimize/--no-scorer-minimize", help="Minimize poses during scoring (gnina)."),
+    gnina_score_type: str = typer.Option("Affinity", "--gnina-score-type", help="GNINA SDF score field used for reranking, e.g. Affinity, CNNscore, or CNNaffinity."),
+    gnina_cnn_scoring: str = typer.Option("none", "--gnina-cnn-scoring", help="Value passed to GNINA --cnn_scoring, e.g. none or rescore."),
     gnina_batch_mode: str = typer.Option("per-ligand", "--gnina-batch-mode", help="GNINA scoring mode for batch runs (currently only per-ligand)."),
 ) -> None:
+    analogue_template = _option_default(analogue_template, None)
+    analogue_only = _option_default(analogue_only, False)
+    analogue_start_stage = _option_default(analogue_start_stage, 3)
+    analogue_seed_poses = _option_default(analogue_seed_poses, None)
+    analogue_final_poses = _option_default(analogue_final_poses, 8)
+    analogue_min_mcs_atoms = _option_default(analogue_min_mcs_atoms, 8)
+    analogue_min_mcs_fraction = _option_default(analogue_min_mcs_fraction, 0.35)
+    analogue_core_rmsd_cutoff = _option_default(analogue_core_rmsd_cutoff, 1.0)
+    analogue_torsion_mc_steps = _option_default(analogue_torsion_mc_steps, 0)
+    analogue_receptor_aware = _option_default(analogue_receptor_aware, True)
+    gnina_score_type = _option_default(gnina_score_type, "Affinity")
+    gnina_cnn_scoring = _option_default(gnina_cnn_scoring, "none")
+
     if out is None:
         _print_usage_and_exit()
     batch_mode = ligand_dir is not None
@@ -637,6 +656,8 @@ def run_matcha(
                 gnina_score_poses=scorer_type.startswith("gnina") and scorer_path is not None,
                 gnina_scorer_path=str(scorer_path) if scorer_path is not None else None,
                 gnina_minimize=scorer_minimize,
+                gnina_score_type=gnina_score_type,
+                gnina_cnn_scoring=gnina_cnn_scoring,
                 random_seed=DEFAULT_CONF["seed"],
                 export_fep_bundle=True,
             ),
@@ -858,6 +879,8 @@ def run_matcha(
             scorer_type=scorer_type,
             scorer_path=scorer_path,
             scorer_minimize=scorer_minimize,
+            gnina_score_type=gnina_score_type,
+            gnina_cnn_scoring=gnina_cnn_scoring,
             gnina_batch_mode=gnina_batch_mode,
         )
         total_sec = time.perf_counter() - run_timer_start
@@ -945,6 +968,8 @@ def run_matcha(
                     gnina_score_poses=scorer_type.startswith("gnina") and scorer_path is not None,
                     gnina_scorer_path=str(scorer_path) if scorer_path is not None else None,
                     gnina_minimize=scorer_minimize,
+                    gnina_score_type=gnina_score_type,
+                    gnina_cnn_scoring=gnina_cnn_scoring,
                     random_seed=DEFAULT_CONF["seed"],
                     export_fep_bundle=True,
                 ),
@@ -1019,6 +1044,8 @@ def run_matcha(
                     gnina_score_poses=scorer_type.startswith("gnina") and scorer_path is not None,
                     gnina_scorer_path=str(scorer_path) if scorer_path is not None else None,
                     gnina_minimize=scorer_minimize,
+                    gnina_score_type=gnina_score_type,
+                    gnina_cnn_scoring=gnina_cnn_scoring,
                     random_seed=DEFAULT_CONF["seed"],
                     export_fep_bundle=True,
                 ),
@@ -1106,16 +1133,19 @@ def run_matcha(
     compute_esm_embeddings(conf)
     esm_sec = time.perf_counter() - esm_start
     inference_start = time.perf_counter()
+    inference_kwargs = {
+        "pocket_centers_filename": pocket_centers_filename,
+        "docking_batch_limit": docking_batch_limit,
+        "num_workers": num_workers,
+        "pin_memory": pin_memory,
+        "prefetch_factor": prefetch_factor,
+        "persistent_workers": persistent_workers,
+    }
+    if analogue_result is not None:
+        inference_kwargs["initial_pose_transforms_path"] = analogue_result.seed_transforms_path
+        inference_kwargs["start_stage"] = analogue_start_stage
     pipeline_timings = run_v2_inference_pipeline(
-        copy.deepcopy(conf), run_name, n_samples,
-        pocket_centers_filename=pocket_centers_filename,
-        docking_batch_limit=docking_batch_limit,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-        prefetch_factor=prefetch_factor,
-        persistent_workers=persistent_workers,
-        initial_pose_transforms_path=(analogue_result.seed_transforms_path if analogue_result is not None else None),
-        start_stage=(analogue_start_stage if analogue_result is not None else 1),
+        copy.deepcopy(conf), run_name, n_samples, **inference_kwargs
     )
     inference_sec = time.perf_counter() - inference_start
 
@@ -1151,7 +1181,8 @@ def run_matcha(
         scoring_start = time.perf_counter()
         try:
             scorer = create_scorer(scorer_type, scorer_path=str(scorer_path) if scorer_path else None,
-                                   minimize=scorer_minimize)
+                                   minimize=scorer_minimize, score_type=gnina_score_type,
+                                   cnn_scoring=gnina_cnn_scoring)
             sdf_input = preds_root / dataset_name / "sdf_predictions"
             filters_path = preds_root / dataset_name / "filters_results_minimized.json"
             if scorer_type.startswith("gnina") and batch_mode:

@@ -5,7 +5,6 @@ import shutil
 import subprocess
 import sys
 import urllib.request
-from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -586,19 +585,26 @@ class CustomScriptScorer(PoseScorer):
         logger.info(f"Top pose selection: {successful} successful, {failed} failed")
 
 
-def create_scorer(scorer_type, scorer_path=None, minimize=True):
+def create_scorer(scorer_type, scorer_path=None, minimize=True, score_type="Affinity", cnn_scoring="none"):
     """Factory function to create a PoseScorer instance.
 
     Args:
         scorer_type: "gnina" or "custom".
         scorer_path: Path to gnina binary or custom script.
         minimize: Whether to minimize poses (gnina only).
+        score_type: GNINA SDF score field used when selecting poses.
+        cnn_scoring: Value passed to gnina --cnn_scoring.
 
     Returns:
         PoseScorer instance.
     """
     if scorer_type == "gnina":
-        return GninaScorer(gnina_path=scorer_path, minimize=minimize)
+        return GninaScorer(
+            gnina_path=scorer_path,
+            minimize=minimize,
+            score_type=score_type,
+            cnn_scoring=cnn_scoring,
+        )
     if scorer_type == "custom":
         if scorer_path is None:
             raise ValueError("--scorer-path is required for custom scorer")

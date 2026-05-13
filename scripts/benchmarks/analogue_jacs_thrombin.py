@@ -12,6 +12,10 @@ from rdkit import Chem
 from rdkit.Chem import rdFMCS
 
 
+def _slug(value: str) -> str:
+    return "".join(ch.lower() if ch.isalnum() else "_" for ch in value).strip("_")
+
+
 def _first_sdf(path: Path):
     return next((m for m in Chem.SDMolSupplier(str(path), removeHs=False, sanitize=False) if m), None)
 
@@ -76,6 +80,8 @@ def main() -> None:
     parser.add_argument("--torsion-mc-steps", type=int, default=100)
     parser.add_argument("--gnina-path", type=Path, default=None)
     parser.add_argument("--gnina-minimize", action="store_true")
+    parser.add_argument("--gnina-score-type", default="Affinity")
+    parser.add_argument("--gnina-cnn-scoring", default="none")
     args = parser.parse_args()
 
     target = args.wang_dir / "thrombin"
@@ -94,7 +100,13 @@ def main() -> None:
         names.append(name)
     writer.close()
 
-    suffix = "_gnina" if args.gnina_path is not None else ""
+    suffix = ""
+    if args.gnina_path is not None:
+        suffix = f"_gnina_{_slug(args.gnina_score_type)}"
+        if args.gnina_cnn_scoring != "none":
+            suffix += f"_{_slug(args.gnina_cnn_scoring)}"
+        if args.gnina_minimize:
+            suffix += "_min"
     run_name = f"jacs_thrombin_template_{args.template_id}_n{args.n_samples}_tmc{args.torsion_mc_steps}{suffix}"
     cmd = [
         sys.executable,
@@ -120,7 +132,16 @@ def main() -> None:
         "--overwrite",
     ]
     if args.gnina_path is not None:
-        cmd.extend(["--scorer", "gnina", "--scorer-path", str(args.gnina_path)])
+        cmd.extend([
+            "--scorer",
+            "gnina",
+            "--scorer-path",
+            str(args.gnina_path),
+            "--gnina-score-type",
+            args.gnina_score_type,
+            "--gnina-cnn-scoring",
+            args.gnina_cnn_scoring,
+        ])
         if not args.gnina_minimize:
             cmd.append("--no-scorer-minimize")
     log = args.out / f"{run_name}.log"
@@ -159,6 +180,8 @@ def main() -> None:
         "log": str(log),
         "gnina_path": str(args.gnina_path) if args.gnina_path is not None else None,
         "gnina_minimize": bool(args.gnina_minimize),
+        "gnina_score_type": args.gnina_score_type,
+        "gnina_cnn_scoring": args.gnina_cnn_scoring,
     }
     for threshold in [0.5, 1.0, 2.0, 3.0]:
         summary[f"single_le_{threshold}A"] = sum(row["single_best_rmsd"] <= threshold for row in rows)
