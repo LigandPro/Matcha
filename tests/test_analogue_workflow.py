@@ -1,10 +1,12 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 from rdkit import Chem
 from rdkit.Chem import AllChem
 
 from matcha.analogue import AnalogueWorkflowConfig, run_analogue_workflow
+from matcha.analogue.workflow import _gnina_rerank_poses
 from matcha.analogue.mcs import find_robust_mcs
 from matcha.analogue.standardize import standardize_mol
 
@@ -141,3 +143,69 @@ def test_analogue_workflow_uses_gnina_scores_for_reranking(tmp_path: Path, monke
     )
     assert best_pose.HasProp("analogue_gnina_score")
     assert float(best_pose.GetProp("analogue_gnina_score")) == min(scores)
+
+
+def test_gnina_reranking_preserves_fep_ready_before_affinity(tmp_path: Path, monkeypatch):
+    class FakeGninaScorer:
+        def __init__(self, **_kwargs):
+            pass
+
+        def score_poses(self, _receptor_path, sdf_input_dir, sdf_output_dir, device=0):
+            sdf_output_dir = Path(sdf_output_dir)
+            sdf_output_dir.mkdir(parents=True, exist_ok=True)
+            for sdf_path in Path(sdf_input_dir).glob("*.sdf"):
+                writer = Chem.SDWriter(str(sdf_output_dir / sdf_path.name))
+                writer.SetKekulize(False)
+                for idx, mol in enumerate(Chem.SDMolSupplier(str(sdf_path), removeHs=False, sanitize=False)):
+                    if mol is None:
+                        continue
+                    mol.SetProp("Affinity", "-100.0" if idx == 1 else "100.0")
+                    writer.write(mol)
+                writer.close()
+
+    def fake_evaluate_pose(ligand_id, pose_idx, mol, *_args, **_kwargs):
+        fep_ready = pose_idx == 0
+        return SimpleNamespace(
+            ligand_id=ligand_id,
+            pose_index=pose_idx,
+            core_rmsd=0.1 if fep_ready else 4.0,
+            receptor_clash_count=0,
+            receptor_contact_count=0,
+            rank_score=0.0,
+            status="FEP_READY" if fep_ready else "NEEDS_REVIEW",
+            fep_ready=fep_ready,
+            warnings=[],
+        )
+
+    import matcha.analogue.workflow as workflow
+    import matcha.scoring.gnina_scorer as gnina_scorer
+
+    monkeypatch.setattr(gnina_scorer, "GninaScorer", FakeGninaScorer)
+    monkeypatch.setattr(workflow, "evaluate_pose", fake_evaluate_pose)
+
+    receptor = tmp_path / "receptor.pdb"
+    receptor.write_text(
+        "ATOM      1  C   ALA A   1       8.000   8.000   8.000  1.00  0.00           C\n"
+        "END\n"
+    )
+    ranked = [(_mol3d("Cc1ccccc1", "ready"), object()), (_mol3d("CCc1ccccc1", "review"), object())]
+
+    reranked = _gnina_rerank_poses(
+        ligand_id="analogue",
+        ranked=ranked,
+        template=_mol3d("Cc1ccccc1", "template"),
+        mapping=None,
+        receptor_path=receptor,
+        receptor_positions=None,
+        output_dir=tmp_path / "gnina",
+        cfg=AnalogueWorkflowConfig(
+            gnina_score_poses=True,
+            gnina_scorer_path="/bin/gnina",
+            gnina_minimize=False,
+        ),
+    )
+
+    assert reranked[0][1].status == "FEP_READY"
+    assert reranked[0][0].GetProp("analogue_gnina_score") == "100.000000"
+    assert reranked[1][1].status == "NEEDS_REVIEW"
+    assert reranked[1][0].GetProp("analogue_gnina_score") == "-100.000000"

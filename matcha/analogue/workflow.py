@@ -113,6 +113,14 @@ def _extract_score(mol: Chem.Mol, score_type: str, minimized: bool) -> float | N
     return None
 
 
+def _set_pose_qc_props(mol: Chem.Mol, qc: object) -> None:
+    mol.SetProp("analogue_core_rmsd", f"{float(qc.core_rmsd):.6f}")
+    mol.SetProp("analogue_receptor_clashes", str(int(qc.receptor_clash_count)))
+    mol.SetProp("analogue_receptor_contacts", str(int(qc.receptor_contact_count)))
+    mol.SetProp("analogue_rank_score", f"{float(qc.rank_score):.6f}")
+    mol.SetProp("analogue_status", qc.status)
+
+
 def _gnina_rerank_poses(
     *,
     ligand_id: str,
@@ -154,7 +162,7 @@ def _gnina_rerank_poses(
     if not scored_sdf.exists():
         return ranked
 
-    scored: list[tuple[Chem.Mol, object]] = []
+    scored: list[tuple[Chem.Mol, object, float]] = []
     for scored_idx, mol in enumerate(Chem.SDMolSupplier(str(scored_sdf), removeHs=False, sanitize=False)):
         if mol is None:
             continue
@@ -173,13 +181,14 @@ def _gnina_rerank_poses(
             mol.SetProp("analogue_gnina_score", f"{score:.6f}")
             qc.warnings.append(f"gnina_{cfg.gnina_score_type}:{score:.6f}")
             qc.rank_score = float(score)
-        scored.append((mol, qc))
+        _set_pose_qc_props(mol, qc)
+        scored.append((mol, qc, float("inf") if score is None else float(score)))
 
     if not scored:
         return ranked
-    reverse = cfg.gnina_score_type not in {"Affinity", "minimizedAffinity"}
-    scored.sort(key=lambda item: item[1].rank_score, reverse=reverse)
-    return scored
+    score_multiplier = 1.0 if cfg.gnina_score_type in {"Affinity", "minimizedAffinity"} else -1.0
+    scored.sort(key=lambda item: (0 if item[1].fep_ready else 1, score_multiplier * item[2]))
+    return [(mol, qc) for mol, qc, _score in scored]
 
 
 def run_analogue_workflow(
