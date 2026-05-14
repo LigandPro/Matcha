@@ -47,6 +47,8 @@ class AnalogueWorkflowConfig:
     gnina_timeout_seconds: int | None = 300
     gnina_device: int = 0
     embed_timeout_seconds: int | None = 30
+    embed_oversample_factor: int = 4
+    embed_unconstrained_supplement: bool = True
 
 
 @dataclass
@@ -409,9 +411,10 @@ def run_analogue_workflow(
             template_std,
             ligand_std,
             mapping,
-            n_conformers=cfg.n_seed_poses,
+            n_conformers=max(1, int(cfg.n_seed_poses) * max(1, int(cfg.embed_oversample_factor))),
             random_seed=cfg.random_seed,
             embed_timeout_seconds=cfg.embed_timeout_seconds,
+            include_unconstrained_supplement=cfg.embed_unconstrained_supplement,
             # Keep the seed generator deterministic and fast.  Strain is still
             # estimated during ranking; expensive QM/MM relaxation can be added
             # downstream for top-N poses.
@@ -542,6 +545,8 @@ def run_analogue_workflow(
         "fep_bundle_dir": str(fep_bundle_dir.resolve()),
         "gnina_ranking": _summarize_gnina_rows(gnina_ranking_rows, cfg, gnina_ranking_summary_path),
         "embed_timeout_seconds": cfg.embed_timeout_seconds,
+        "embed_oversample_factor": cfg.embed_oversample_factor,
+        "embed_unconstrained_supplement": cfg.embed_unconstrained_supplement,
         "rbfe_pairwise_edges": cfg.rbfe_pairwise_edges,
         "final_pose_diversity_rmsd": cfg.final_pose_diversity_rmsd,
         **summary,

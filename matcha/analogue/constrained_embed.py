@@ -194,6 +194,30 @@ def _single_conformer_copy(mol: Chem.Mol, conf_id: int) -> Chem.Mol:
     return out
 
 
+def _append_aligned_conformers(
+    out: list[Chem.Mol],
+    source: Chem.Mol,
+    conf_ids: list[int],
+    template: Chem.Mol,
+    mapping: MCSMapping,
+    *,
+    optimize: bool,
+) -> None:
+    for conf_id in conf_ids:
+        if int(conf_id) < 0:
+            continue
+        if optimize:
+            _mmff_or_uff_optimize(source, int(conf_id))
+        mol_conf = _single_conformer_copy(source, int(conf_id))
+        try:
+            mol_conf = Chem.RemoveHs(mol_conf, sanitize=False)
+        except Exception:
+            pass
+        mol_conf = align_mol_to_template_core(mol_conf, template, mapping)
+        mol_conf.SetProp("analogue_core_rmsd", f"{core_rmsd(mol_conf, template, mapping):.6f}")
+        out.append(mol_conf)
+
+
 def _deduplicate_by_core_and_whole_rmsd(
     mols: list[Chem.Mol],
     template: Chem.Mol,
@@ -235,6 +259,7 @@ def generate_constrained_conformers(
     optimize: bool = True,
     deduplicate: bool = True,
     embed_timeout_seconds: int | None = 30,
+    include_unconstrained_supplement: bool = True,
 ) -> ConformerGenerationResult:
     """Generate analogue conformers whose MCS core is aligned to ``template``.
 
@@ -278,6 +303,7 @@ def generate_constrained_conformers(
     except Exception as exc:
         warnings.append(f"constrained_embed_failed:{type(exc).__name__}")
 
+    used_unconstrained_fallback = False
     if not conf_ids:
         # Fallback: unconstrained ETKDG followed by explicit MCS alignment.  This
         # often rescues cases where coordMap overconstrains macrocycles/linkers.
@@ -293,23 +319,32 @@ def generate_constrained_conformers(
                 timeout_seconds=embed_timeout_seconds,
             )
             warnings.append("used_unconstrained_embed_fallback")
+            used_unconstrained_fallback = True
         except Exception as exc:  # pragma: no cover - RDKit-version dependent
             return ConformerGenerationResult([], warnings + [f"embed_fallback_failed:{type(exc).__name__}"], failures=1)
 
     out: list[Chem.Mol] = []
-    for conf_id in conf_ids:
-        if int(conf_id) < 0:
-            continue
-        if optimize:
-            _mmff_or_uff_optimize(work, int(conf_id))
-        mol_conf = _single_conformer_copy(work, int(conf_id))
+    _append_aligned_conformers(out, work, conf_ids, template, mapping, optimize=optimize)
+
+    if include_unconstrained_supplement and not used_unconstrained_fallback:
+        supplement = copy.deepcopy(work)
+        supplement.RemoveAllConformers()
         try:
-            mol_conf = Chem.RemoveHs(mol_conf, sanitize=False)
-        except Exception:
-            pass
-        mol_conf = align_mol_to_template_core(mol_conf, template, mapping)
-        mol_conf.SetProp("analogue_core_rmsd", f"{core_rmsd(mol_conf, template, mapping):.6f}")
-        out.append(mol_conf)
+            params = AllChem.ETKDGv3()
+            params.randomSeed = int(random_seed) + 104729
+            params.useRandomCoords = True
+            params.clearConfs = True
+            _set_embed_timeout(params, embed_timeout_seconds)
+            supplement_ids = _embed_multiple_confs(
+                supplement,
+                max(1, int(n_conformers)),
+                params,
+                timeout_seconds=embed_timeout_seconds,
+            )
+            _append_aligned_conformers(out, supplement, supplement_ids, template, mapping, optimize=optimize)
+            warnings.append("used_unconstrained_embed_supplement")
+        except Exception as exc:
+            warnings.append(f"unconstrained_embed_supplement_failed:{type(exc).__name__}")
 
     if deduplicate:
         out = _deduplicate_by_core_and_whole_rmsd(

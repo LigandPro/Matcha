@@ -541,6 +541,8 @@ def run_matcha(
     analogue_core_rmsd_cutoff: float = typer.Option(1.0, "--analogue-core-rmsd-cutoff", help="Core RMSD cutoff for FEP_READY classification (Å)."),
     analogue_torsion_mc_steps: int = typer.Option(0, "--analogue-torsion-mc-steps", help="Optional torsional Monte Carlo steps per seed pose."),
     analogue_embed_timeout_seconds: Optional[int] = typer.Option(30, "--analogue-embed-timeout-seconds", help="Per-ligand RDKit constrained embedding timeout in seconds."),
+    analogue_embed_oversample_factor: int = typer.Option(4, "--analogue-embed-oversample-factor", help="Raw RDKit conformer multiplier before analogue ranking."),
+    analogue_unconstrained_supplement: bool = typer.Option(True, "--analogue-unconstrained-supplement/--no-analogue-unconstrained-supplement", help="Supplement coord-map constrained seeds with unconstrained ETKDG seeds aligned to the MCS core."),
     analogue_rbfe_pairwise_edges: bool = typer.Option(True, "--analogue-rbfe-pairwise-edges/--no-analogue-rbfe-pairwise-edges", help="Write pairwise analogue RBFE graph edges in FEP bundle."),
     analogue_final_pose_diversity_rmsd: float = typer.Option(0.75, "--analogue-final-pose-diversity-rmsd", help="Minimum whole-molecule RMSD diversity used to fill final analogue pose ensemble."),
     analogue_receptor_aware: bool = typer.Option(True, "--analogue-receptor-aware/--no-analogue-receptor-aware", help="Rank analogue seeds with receptor clash/contact terms when a receptor is provided."),
@@ -576,6 +578,8 @@ def run_matcha(
     analogue_core_rmsd_cutoff = _option_default(analogue_core_rmsd_cutoff, 1.0)
     analogue_torsion_mc_steps = _option_default(analogue_torsion_mc_steps, 0)
     analogue_embed_timeout_seconds = _option_default(analogue_embed_timeout_seconds, 30)
+    analogue_embed_oversample_factor = _option_default(analogue_embed_oversample_factor, 4)
+    analogue_unconstrained_supplement = _option_default(analogue_unconstrained_supplement, True)
     analogue_rbfe_pairwise_edges = _option_default(analogue_rbfe_pairwise_edges, True)
     analogue_final_pose_diversity_rmsd = _option_default(analogue_final_pose_diversity_rmsd, 0.75)
     analogue_receptor_aware = _option_default(analogue_receptor_aware, True)
@@ -661,6 +665,8 @@ def run_matcha(
                 core_rmsd_cutoff=analogue_core_rmsd_cutoff,
                 torsion_mc_steps=analogue_torsion_mc_steps,
                 embed_timeout_seconds=analogue_embed_timeout_seconds,
+                embed_oversample_factor=analogue_embed_oversample_factor,
+                embed_unconstrained_supplement=analogue_unconstrained_supplement,
                 rbfe_pairwise_edges=analogue_rbfe_pairwise_edges,
                 final_pose_diversity_rmsd=analogue_final_pose_diversity_rmsd,
                 receptor_aware_ranking=analogue_receptor_aware,
@@ -978,6 +984,8 @@ def run_matcha(
                     core_rmsd_cutoff=analogue_core_rmsd_cutoff,
                     torsion_mc_steps=analogue_torsion_mc_steps,
                     embed_timeout_seconds=analogue_embed_timeout_seconds,
+                    embed_oversample_factor=analogue_embed_oversample_factor,
+                    embed_unconstrained_supplement=analogue_unconstrained_supplement,
                     rbfe_pairwise_edges=analogue_rbfe_pairwise_edges,
                     final_pose_diversity_rmsd=analogue_final_pose_diversity_rmsd,
                     receptor_aware_ranking=analogue_receptor_aware,
@@ -1058,6 +1066,8 @@ def run_matcha(
                     core_rmsd_cutoff=analogue_core_rmsd_cutoff,
                     torsion_mc_steps=analogue_torsion_mc_steps,
                     embed_timeout_seconds=analogue_embed_timeout_seconds,
+                    embed_oversample_factor=analogue_embed_oversample_factor,
+                    embed_unconstrained_supplement=analogue_unconstrained_supplement,
                     rbfe_pairwise_edges=analogue_rbfe_pairwise_edges,
                     final_pose_diversity_rmsd=analogue_final_pose_diversity_rmsd,
                     receptor_aware_ranking=analogue_receptor_aware,
