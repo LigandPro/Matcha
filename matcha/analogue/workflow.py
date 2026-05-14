@@ -36,6 +36,7 @@ class AnalogueWorkflowConfig:
     torsion_mc_keep: int = 64
     random_seed: int = 777
     export_fep_bundle: bool = True
+    rbfe_pairwise_edges: bool = True
     receptor_aware_ranking: bool = True
     gnina_score_poses: bool = False
     gnina_scorer_path: str | None = None
@@ -461,12 +462,19 @@ def run_analogue_workflow(
         gnina_ranking_summary_path = None
 
     if cfg.export_fep_bundle:
+        logger.info(
+            "Analogue FEP bundle write start: ligands=%d rbfe_pairwise_edges=%s",
+            len(exports),
+            bool(cfg.rbfe_pairwise_edges),
+        )
         summary = write_fep_bundle(
             output_dir=fep_bundle_dir,
             template_mol=template_std,
             exports=exports,
             receptor_path=receptor_path,
+            include_pairwise_edges=cfg.rbfe_pairwise_edges,
         )
+        logger.info("Analogue FEP bundle write done: %s", fep_bundle_dir)
     else:
         summary = {}
 
@@ -490,6 +498,7 @@ def run_analogue_workflow(
         "fep_bundle_dir": str(fep_bundle_dir.resolve()),
         "gnina_ranking": _summarize_gnina_rows(gnina_ranking_rows, cfg, gnina_ranking_summary_path),
         "embed_timeout_seconds": cfg.embed_timeout_seconds,
+        "rbfe_pairwise_edges": cfg.rbfe_pairwise_edges,
         **summary,
     }
     _write_json(output_dir / "analogue_summary.json", workflow_summary)

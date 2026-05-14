@@ -10,7 +10,7 @@ from typing import Mapping
 from rdkit import Chem
 
 from .mcs import MCSMapping, find_robust_mcs, pairwise_mapping_score
-from .ranking import PoseQC, evaluate_pose, rank_poses
+from .ranking import PoseQC, rank_poses
 
 
 @dataclass
@@ -48,6 +48,7 @@ def write_fep_bundle(
     exports: Mapping[str, LigandAnalogueExport],
     receptor_path: Path | None = None,
     template_id: str = "template",
+    include_pairwise_edges: bool = True,
 ) -> dict:
     """Write a generic FEP/RBFE-ready bundle from ranked analogue poses."""
 
@@ -144,7 +145,7 @@ def write_fep_bundle(
         for row in quality_rows:
             writer.writerow({key: row.get(key, "") for key in fieldnames})
 
-    rbfe_graph = _build_rbfe_graph(template_id, template_mol, exports)
+    rbfe_graph = _build_rbfe_graph(template_id, template_mol, exports, include_pairwise_edges=include_pairwise_edges)
     manifest = {
         "format": "matcha_fep_manifest_v1",
         "template_id": template_id,
@@ -166,6 +167,7 @@ def write_fep_bundle(
         "aligned_series_sdf": str((output_dir / "aligned_series.sdf").resolve()),
         "quality_report_csv": str(csv_path.resolve()),
         "fep_manifest_json": str((output_dir / "fep_manifest.json").resolve()),
+        "rbfe_pairwise_edges": bool(include_pairwise_edges),
     }
     _write_json(output_dir / "summary.json", summary)
     return summary
@@ -175,6 +177,8 @@ def _build_rbfe_graph(
     template_id: str,
     template_mol: Chem.Mol,
     exports: Mapping[str, LigandAnalogueExport],
+    *,
+    include_pairwise_edges: bool = True,
 ) -> dict:
     nodes = [{"id": template_id, "role": "template"}]
     edges: list[dict] = []
@@ -197,8 +201,10 @@ def _build_rbfe_graph(
             "atom_mapping_template_to_ligand": [[int(a), int(b)] for a, b in record.mapping.template_to_ligand],
         })
 
-    # Add a sparse pairwise analogue network for RBFE planning.  For N<=80 this
-    # is cheap; for bigger libraries a caller can prune this manifest upstream.
+    if not include_pairwise_edges:
+        return {"format": "matcha_rbfe_graph_v1", "nodes": nodes, "edges": edges}
+
+    # Add a sparse pairwise analogue network for RBFE planning.
     for i, (id_a, mol_a, _) in enumerate(accepted):
         for id_b, mol_b, _ in accepted[i + 1 :]:
             mapping = find_robust_mcs(mol_a, mol_b, min_atoms=6, min_fraction=0.35, timeout=5)

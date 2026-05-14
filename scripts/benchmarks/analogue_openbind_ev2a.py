@@ -151,6 +151,7 @@ def main() -> None:
         str(args.torsion_mc_steps),
         "--analogue-embed-timeout-seconds",
         str(args.analogue_embed_timeout_seconds),
+        "--no-analogue-rbfe-pairwise-edges",
         "-o",
         str(args.out),
         "--run-name",
