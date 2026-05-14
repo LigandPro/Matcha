@@ -12,6 +12,8 @@ import pandas as pd
 from rdkit import Chem
 from rdkit.Chem import AllChem, rdFMCS
 
+from matcha.analogue.constrained_embed import _embed_multiple_confs
+
 
 CORE_SMARTS = "CSc1ncnc(N)c1CC(=O)N"
 
@@ -90,9 +92,14 @@ def _write_subset_sdf(selected: list[tuple[str, str]], path: Path) -> None:
     writer = Chem.SDWriter(str(path))
     for name, smiles in selected:
         mol = Chem.AddHs(Chem.MolFromSmiles(smiles))
-        status = AllChem.EmbedMolecule(mol, randomSeed=20260513)
-        if status != 0:
-            AllChem.EmbedMolecule(mol, randomSeed=20260513, useRandomCoords=True)
+        params = AllChem.ETKDGv3()
+        params.randomSeed = 20260513
+        conf_ids = _embed_multiple_confs(mol, 1, params, timeout_seconds=30)
+        if not conf_ids:
+            params = AllChem.ETKDGv3()
+            params.randomSeed = 20260513
+            params.useRandomCoords = True
+            _embed_multiple_confs(mol, 1, params, timeout_seconds=30)
         try:
             AllChem.UFFOptimizeMolecule(mol, maxIters=100)
         except Exception:
