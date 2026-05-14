@@ -310,7 +310,7 @@ def generate_constrained_conformers(
     deduplicate: bool = True,
     embed_timeout_seconds: int | None = 30,
     include_unconstrained_supplement: bool = True,
-    seed_batches: int = 4,
+    seed_batches: int = 1,
 ) -> ConformerGenerationResult:
     """Generate analogue conformers whose MCS core is aligned to ``template``.
 

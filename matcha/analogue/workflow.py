@@ -49,7 +49,7 @@ class AnalogueWorkflowConfig:
     embed_timeout_seconds: int | None = 30
     embed_oversample_factor: int = 4
     embed_unconstrained_supplement: bool = True
-    embed_seed_batches: int = 4
+    embed_seed_batches: int = 1
 
 
 @dataclass

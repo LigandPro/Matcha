@@ -123,7 +123,7 @@ def main() -> None:
     parser.add_argument("--gnina-cnn-scoring", default="none")
     parser.add_argument("--gnina-timeout-seconds", type=int, default=300)
     parser.add_argument("--analogue-embed-timeout-seconds", type=int, default=30)
-    parser.add_argument("--analogue-embed-seed-batches", type=int, default=4)
+    parser.add_argument("--analogue-embed-seed-batches", type=int, default=1)
     args = parser.parse_args()
 
     args.out.mkdir(parents=True, exist_ok=True)
@@ -139,6 +139,8 @@ def main() -> None:
         if args.gnina_minimize:
             suffix += "_min"
     run_name = f"openbind_x7259a_76_n{args.n_samples}_tmc{args.torsion_mc_steps}{suffix}"
+    if args.analogue_embed_seed_batches != 1:
+        run_name += f"_sb{args.analogue_embed_seed_batches}"
     for stale_path in [
         args.out / f"{run_name}_rmsd.csv",
         args.out / f"{run_name}_summary.json",
