@@ -22,8 +22,18 @@ def _slug(value: str) -> str:
     return "".join(ch.lower() if ch.isalnum() else "_" for ch in value).strip("_")
 
 
+def _read_sdf_mols(path: Path) -> list[Chem.Mol]:
+    if not path.exists():
+        return []
+    try:
+        return [m for m in Chem.SDMolSupplier(str(path), removeHs=False, sanitize=False) if m]
+    except OSError:
+        return []
+
+
 def _first_sdf(path: Path):
-    return next((m for m in Chem.SDMolSupplier(str(path), removeHs=False, sanitize=False) if m), None)
+    mols = _read_sdf_mols(path)
+    return mols[0] if mols else None
 
 
 def _prep(mol: Chem.Mol) -> Chem.Mol:
@@ -43,7 +53,9 @@ def _coords(mol: Chem.Mol) -> np.ndarray:
     return np.asarray(mol.GetConformer().GetPositions(), dtype=float)
 
 
-def _mcs_rmsd(pred: Chem.Mol, ref: Chem.Mol) -> tuple[float, int]:
+def _mcs_rmsd(pred: Chem.Mol | None, ref: Chem.Mol | None) -> tuple[float, int]:
+    if pred is None or ref is None:
+        return float("nan"), 0
     pred = _prep(pred)
     ref = _prep(ref)
     res = rdFMCS.FindMCS([pred, ref], timeout=10, ringMatchesRingOnly=True, completeRingsOnly=True)
@@ -191,7 +203,7 @@ def main() -> None:
         ref = _first_sdf(ref_by_name[name])
         cdir = bundle / "complexes" / name
         best = _first_sdf(cdir / "best_pose.sdf")
-        poses = [m for m in Chem.SDMolSupplier(str(cdir / "poses.sdf"), removeHs=False, sanitize=False) if m]
+        poses = _read_sdf_mols(cdir / "poses.sdf")
         best_rmsd, atoms = _mcs_rmsd(best, ref)
         ensemble = [_mcs_rmsd(m, ref)[0] for m in poses]
         finite = [x for x in ensemble if np.isfinite(x)]
