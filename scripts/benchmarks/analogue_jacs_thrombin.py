@@ -98,6 +98,7 @@ def main() -> None:
     parser.add_argument("--gnina-timeout-seconds", type=int, default=300)
     parser.add_argument("--analogue-embed-timeout-seconds", type=int, default=30)
     parser.add_argument("--analogue-embed-seed-batches", type=int, default=1)
+    parser.add_argument("--analogue-unconstrained-supplement", action=argparse.BooleanOptionalAction, default=False)
     args = parser.parse_args()
 
     target = args.wang_dir / "thrombin"
@@ -112,6 +113,8 @@ def main() -> None:
     run_name = f"jacs_thrombin_template_{args.template_id}_n{args.n_samples}_tmc{args.torsion_mc_steps}{suffix}"
     if args.analogue_embed_seed_batches != 1:
         run_name += f"_sb{args.analogue_embed_seed_batches}"
+    if args.analogue_unconstrained_supplement:
+        run_name += "_supp"
     for stale_path in [
         args.out / f"{run_name}_rmsd.csv",
         args.out / f"{run_name}_summary.json",
@@ -161,6 +164,10 @@ def main() -> None:
         run_name,
         "--overwrite",
     ]
+    if args.analogue_unconstrained_supplement:
+        cmd.append("--analogue-unconstrained-supplement")
+    else:
+        cmd.append("--no-analogue-unconstrained-supplement")
     if args.gnina_path is not None:
         cmd.extend([
             "--scorer",
@@ -217,6 +224,7 @@ def main() -> None:
         "gnina_timeout_seconds": args.gnina_timeout_seconds,
         "analogue_embed_timeout_seconds": args.analogue_embed_timeout_seconds,
         "analogue_embed_seed_batches": args.analogue_embed_seed_batches,
+        "analogue_unconstrained_supplement": args.analogue_unconstrained_supplement,
     }
     for threshold in [0.5, 1.0, 2.0, 3.0]:
         summary[f"single_le_{threshold}A"] = sum(row["single_best_rmsd"] <= threshold for row in rows)

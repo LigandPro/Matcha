@@ -48,7 +48,7 @@ class AnalogueWorkflowConfig:
     gnina_device: int = 0
     embed_timeout_seconds: int | None = 30
     embed_oversample_factor: int = 4
-    embed_unconstrained_supplement: bool = True
+    embed_unconstrained_supplement: bool = False
     embed_seed_batches: int = 1
 
 
