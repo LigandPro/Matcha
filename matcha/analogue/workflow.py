@@ -345,7 +345,7 @@ def run_analogue_workflow(
     stage-3 refinement.
     """
 
-    RDLogger.DisableLog("rdApp.warning")
+    RDLogger.DisableLog("rdApp.*")
     cfg = config or AnalogueWorkflowConfig()
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Sequence
 
 import numpy as np
-from rdkit import Chem
+from rdkit import Chem, RDLogger
 from rdkit.Chem import AllChem
 from rdkit.Geometry import Point3D
 
@@ -117,6 +117,7 @@ def _embed_multiple_confs_once(mol: Chem.Mol, num_conformers: int, params) -> li
 
 
 def _embed_multiple_confs_worker(mol: Chem.Mol, num_conformers: int, params, out_queue) -> None:
+    RDLogger.DisableLog("rdApp.*")
     try:
         conf_ids = _embed_multiple_confs_once(mol, num_conformers, params)
         out_queue.put(("ok", mol, conf_ids))
