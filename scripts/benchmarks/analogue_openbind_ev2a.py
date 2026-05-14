@@ -149,6 +149,11 @@ def main() -> None:
         if args.gnina_minimize:
             suffix += "_min"
     run_name = f"openbind_x7259a_76_n{args.n_samples}_tmc{args.torsion_mc_steps}{suffix}"
+    for stale_path in [
+        args.out / f"{run_name}_rmsd.csv",
+        args.out / f"{run_name}_summary.json",
+    ]:
+        stale_path.unlink(missing_ok=True)
     subset_sdf = args.out / f"{run_name}_input.sdf"
     _write_subset_sdf(selected, subset_sdf)
     cmd = [

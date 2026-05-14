@@ -108,6 +108,11 @@ def main() -> None:
         if args.gnina_minimize:
             suffix += "_min"
     run_name = f"jacs_thrombin_template_{args.template_id}_n{args.n_samples}_tmc{args.torsion_mc_steps}{suffix}"
+    for stale_path in [
+        args.out / f"{run_name}_rmsd.csv",
+        args.out / f"{run_name}_summary.json",
+    ]:
+        stale_path.unlink(missing_ok=True)
     analogues = args.out / f"{run_name}_input.sdf"
     writer = Chem.SDWriter(str(analogues))
     names: list[str] = []
