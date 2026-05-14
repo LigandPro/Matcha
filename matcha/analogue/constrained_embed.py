@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import multiprocessing as mp
+import queue
 from dataclasses import dataclass, field
 from typing import Sequence
 
@@ -107,6 +109,63 @@ def _set_embed_timeout(params, timeout_seconds: int | None) -> None:
     params.timeout = max(0, int(timeout_seconds))
 
 
+def _embed_multiple_confs_once(mol: Chem.Mol, num_conformers: int, params) -> list[int]:
+    return list(AllChem.EmbedMultipleConfs(mol, numConfs=int(num_conformers), params=params))
+
+
+def _embed_multiple_confs_worker(mol: Chem.Mol, num_conformers: int, params, out_queue) -> None:
+    try:
+        conf_ids = _embed_multiple_confs_once(mol, num_conformers, params)
+        out_queue.put(("ok", mol, conf_ids))
+    except BaseException as exc:
+        out_queue.put(("error", type(exc).__name__, str(exc)))
+
+
+def _copy_conformers(target: Chem.Mol, source: Chem.Mol) -> None:
+    target.RemoveAllConformers()
+    for conf in source.GetConformers():
+        target.AddConformer(Chem.Conformer(conf), assignId=False)
+
+
+def _embed_multiple_confs(
+    mol: Chem.Mol,
+    num_conformers: int,
+    params,
+    *,
+    timeout_seconds: int | float | None,
+) -> list[int]:
+    if timeout_seconds is None or float(timeout_seconds) <= 0:
+        return _embed_multiple_confs_once(mol, num_conformers, params)
+
+    ctx = mp.get_context("fork") if "fork" in mp.get_all_start_methods() else mp.get_context()
+    out_queue = ctx.Queue()
+    proc = ctx.Process(
+        target=_embed_multiple_confs_worker,
+        args=(copy.deepcopy(mol), int(num_conformers), params, out_queue),
+    )
+    proc.start()
+    proc.join(float(timeout_seconds))
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(2)
+        if proc.is_alive():  # pragma: no cover - terminate should be enough on supported hosts
+            proc.kill()
+            proc.join()
+        raise TimeoutError(f"rdkit_embed_timeout:{float(timeout_seconds):.1f}s")
+
+    try:
+        status, payload, extra = out_queue.get_nowait()
+    except queue.Empty as exc:
+        raise RuntimeError(f"rdkit_embed_worker_failed:exitcode={proc.exitcode}") from exc
+    finally:
+        out_queue.close()
+
+    if status == "error":
+        raise RuntimeError(f"{payload}:{extra}")
+    _copy_conformers(mol, payload)
+    return list(extra)
+
+
 def _mmff_or_uff_optimize(mol: Chem.Mol, conf_id: int) -> float | None:
     try:
         props = AllChem.MMFFGetMoleculeProperties(mol, mmffVariant="MMFF94s")
@@ -210,7 +269,12 @@ def generate_constrained_conformers(
 
     conf_ids: list[int] = []
     try:
-        conf_ids = list(AllChem.EmbedMultipleConfs(work, numConfs=int(n_conformers), params=params))
+        conf_ids = _embed_multiple_confs(
+            work,
+            int(n_conformers),
+            params,
+            timeout_seconds=embed_timeout_seconds,
+        )
     except Exception as exc:
         warnings.append(f"constrained_embed_failed:{type(exc).__name__}")
 
@@ -222,7 +286,12 @@ def generate_constrained_conformers(
             params.randomSeed = int(random_seed)
             params.useRandomCoords = True
             _set_embed_timeout(params, embed_timeout_seconds)
-            conf_ids = list(AllChem.EmbedMultipleConfs(work, numConfs=max(1, int(n_conformers)), params=params))
+            conf_ids = _embed_multiple_confs(
+                work,
+                max(1, int(n_conformers)),
+                params,
+                timeout_seconds=embed_timeout_seconds,
+            )
             warnings.append("used_unconstrained_embed_fallback")
         except Exception as exc:  # pragma: no cover - RDKit-version dependent
             return ConformerGenerationResult([], warnings + [f"embed_fallback_failed:{type(exc).__name__}"], failures=1)

@@ -1,13 +1,16 @@
 from pathlib import Path
 from types import SimpleNamespace
 import csv
+import multiprocessing as mp
+import time
 
 import numpy as np
+import pytest
 from rdkit import Chem
 from rdkit.Chem import AllChem
 
 from matcha.analogue import AnalogueWorkflowConfig, run_analogue_workflow
-from matcha.analogue.constrained_embed import generate_constrained_conformers
+from matcha.analogue import constrained_embed
 from matcha.analogue.workflow import _gnina_rerank_poses
 from matcha.analogue.mcs import find_robust_mcs
 from matcha.analogue.standardize import standardize_mol
@@ -36,28 +39,28 @@ def test_robust_mcs_maps_congeneric_core():
     assert mapping.fraction_ligand >= 0.75
 
 
-def test_constrained_embed_sets_rdkit_timeout(monkeypatch):
-    template = standardize_mol(_mol3d("Cc1ccccc1", "template")).mol
-    analogue = standardize_mol(_mol3d("CCc1ccccc1", "analogue")).mol
-    mapping = find_robust_mcs(template, analogue, min_atoms=5, min_fraction=0.3, timeout=2)
-    timeouts = []
+def test_constrained_embed_sets_rdkit_timeout():
+    params = AllChem.ETKDGv3()
 
-    def fake_embed_multiple_confs(_mol, numConfs, params):
-        timeouts.append(getattr(params, "timeout", None))
+    constrained_embed._set_embed_timeout(params, 12)
+
+    assert params.timeout == 12
+
+
+def test_constrained_embed_process_watchdog_times_out(monkeypatch):
+    if "fork" not in mp.get_all_start_methods():
+        pytest.skip("process watchdog test requires fork")
+
+    def slow_embed(_mol, _num_conformers, _params):
+        time.sleep(5)
         return []
 
-    monkeypatch.setattr(AllChem, "EmbedMultipleConfs", fake_embed_multiple_confs)
+    monkeypatch.setattr(constrained_embed, "_embed_multiple_confs_once", slow_embed)
+    mol = Chem.AddHs(Chem.MolFromSmiles("CCO"))
+    params = AllChem.ETKDGv3()
 
-    result = generate_constrained_conformers(
-        template,
-        analogue,
-        mapping,
-        n_conformers=4,
-        embed_timeout_seconds=12,
-    )
-
-    assert result.conformers == []
-    assert timeouts == [12, 12]
+    with pytest.raises(TimeoutError):
+        constrained_embed._embed_multiple_confs(mol, 1, params, timeout_seconds=0.2)
 
 
 def test_analogue_workflow_writes_fep_bundle(tmp_path: Path):
