@@ -37,6 +37,7 @@ class AnalogueWorkflowConfig:
     random_seed: int = 777
     export_fep_bundle: bool = True
     rbfe_pairwise_edges: bool = True
+    final_pose_diversity_rmsd: float = 0.75
     receptor_aware_ranking: bool = True
     gnina_score_poses: bool = False
     gnina_scorer_path: str | None = None
@@ -110,6 +111,45 @@ def _build_seed_transforms(
                 })
             transforms[key] = [transform]
     return transforms
+
+
+def _whole_mol_rmsd(a: Chem.Mol, b: Chem.Mol) -> float:
+    a_pos = mol_positions(a)
+    b_pos = mol_positions(b)
+    if a_pos.shape != b_pos.shape:
+        return float("inf")
+    return float(np.sqrt(np.mean(np.sum((a_pos - b_pos) ** 2, axis=1))))
+
+
+def _select_final_ranked_poses(
+    ranked: list[tuple[Chem.Mol, object]],
+    *,
+    n_final_poses: int,
+    diversity_rmsd_cutoff: float,
+) -> list[tuple[Chem.Mol, object]]:
+    limit = max(1, int(n_final_poses))
+    if len(ranked) <= limit:
+        return ranked[:limit]
+
+    selected = [ranked[0]]
+    selected_ids = {id(ranked[0][0])}
+    cutoff = max(0.0, float(diversity_rmsd_cutoff))
+    for item in ranked[1:]:
+        mol, _qc = item
+        if all(_whole_mol_rmsd(mol, old_mol) >= cutoff for old_mol, _old_qc in selected):
+            selected.append(item)
+            selected_ids.add(id(mol))
+            if len(selected) >= limit:
+                return selected
+
+    for item in ranked[1:]:
+        mol, _qc = item
+        if id(mol) in selected_ids:
+            continue
+        selected.append(item)
+        if len(selected) >= limit:
+            break
+    return selected
 
 
 def _extract_score(mol: Chem.Mol, score_type: str, minimized: bool) -> float | None:
@@ -437,7 +477,11 @@ def run_analogue_workflow(
             )[: max(1, int(cfg.n_seed_poses))]
             logger.info("Analogue ligand %s GNINA rerank done", ligand_id)
         ranked_by_ligand[ligand_id] = ranked
-        final_ranked = ranked[: max(1, int(cfg.n_final_poses))]
+        final_ranked = _select_final_ranked_poses(
+            ranked,
+            n_final_poses=cfg.n_final_poses,
+            diversity_rmsd_cutoff=cfg.final_pose_diversity_rmsd,
+        )
         exports[ligand_id] = LigandAnalogueExport(ligand_id, mapping, final_ranked, warnings, failed=False)
         if final_ranked:
             selected_molecules[ligand_id] = _clone_with_name(final_ranked[0][0], ligand_id)
@@ -499,6 +543,7 @@ def run_analogue_workflow(
         "gnina_ranking": _summarize_gnina_rows(gnina_ranking_rows, cfg, gnina_ranking_summary_path),
         "embed_timeout_seconds": cfg.embed_timeout_seconds,
         "rbfe_pairwise_edges": cfg.rbfe_pairwise_edges,
+        "final_pose_diversity_rmsd": cfg.final_pose_diversity_rmsd,
         **summary,
     }
     _write_json(output_dir / "analogue_summary.json", workflow_summary)

@@ -11,7 +11,7 @@ from rdkit.Chem import AllChem
 
 from matcha.analogue import AnalogueWorkflowConfig, run_analogue_workflow
 from matcha.analogue import constrained_embed
-from matcha.analogue.workflow import _gnina_rerank_poses
+from matcha.analogue.workflow import _gnina_rerank_poses, _select_final_ranked_poses
 from matcha.analogue.mcs import find_robust_mcs
 from matcha.analogue.standardize import standardize_mol
 
@@ -61,6 +61,26 @@ def test_constrained_embed_process_watchdog_times_out(monkeypatch):
 
     with pytest.raises(TimeoutError):
         constrained_embed._embed_multiple_confs(mol, 1, params, timeout_seconds=0.2)
+
+
+def test_final_pose_selection_keeps_best_and_fills_diverse():
+    best = _mol3d("CCO", "best")
+    duplicate = Chem.Mol(best)
+    diverse = Chem.Mol(best)
+    shifted = constrained_embed.mol_positions(diverse)
+    shifted[:, 0] += 2.0
+    constrained_embed.set_mol_positions(diverse, shifted)
+
+    ranked = [
+        (best, SimpleNamespace(rank_score=0.0)),
+        (duplicate, SimpleNamespace(rank_score=1.0)),
+        (diverse, SimpleNamespace(rank_score=2.0)),
+    ]
+
+    selected = _select_final_ranked_poses(ranked, n_final_poses=2, diversity_rmsd_cutoff=0.75)
+
+    assert selected[0][0] is best
+    assert selected[1][0] is diverse
 
 
 def test_analogue_workflow_writes_fep_bundle(tmp_path: Path):
