@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -134,6 +135,7 @@ def main() -> None:
     parser.add_argument("--gnina-cnn-scoring", default="none")
     parser.add_argument("--gnina-timeout-seconds", type=int, default=300)
     parser.add_argument("--analogue-embed-timeout-seconds", type=int, default=30)
+    parser.add_argument("--analogue-embed-seed-batches", type=int, default=4)
     args = parser.parse_args()
 
     args.out.mkdir(parents=True, exist_ok=True)
@@ -152,8 +154,10 @@ def main() -> None:
     for stale_path in [
         args.out / f"{run_name}_rmsd.csv",
         args.out / f"{run_name}_summary.json",
+        args.out / f"{run_name}.log",
     ]:
         stale_path.unlink(missing_ok=True)
+    shutil.rmtree(args.out / run_name, ignore_errors=True)
     subset_sdf = args.out / f"{run_name}_input.sdf"
     _write_subset_sdf(selected, subset_sdf)
     cmd = [
@@ -175,6 +179,8 @@ def main() -> None:
         str(args.torsion_mc_steps),
         "--analogue-embed-timeout-seconds",
         str(args.analogue_embed_timeout_seconds),
+        "--analogue-embed-seed-batches",
+        str(args.analogue_embed_seed_batches),
         "--no-analogue-rbfe-pairwise-edges",
         "-o",
         str(args.out),
@@ -236,6 +242,7 @@ def main() -> None:
         "gnina_cnn_scoring": args.gnina_cnn_scoring,
         "gnina_timeout_seconds": args.gnina_timeout_seconds,
         "analogue_embed_timeout_seconds": args.analogue_embed_timeout_seconds,
+        "analogue_embed_seed_batches": args.analogue_embed_seed_batches,
     }
     for threshold in [0.5, 1.0, 2.0, 3.0]:
         summary[f"single_le_{threshold}A"] = sum(row["single_best_rmsd"] <= threshold for row in rows)

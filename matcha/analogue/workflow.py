@@ -49,6 +49,7 @@ class AnalogueWorkflowConfig:
     embed_timeout_seconds: int | None = 30
     embed_oversample_factor: int = 4
     embed_unconstrained_supplement: bool = True
+    embed_seed_batches: int = 4
 
 
 @dataclass
@@ -366,6 +367,10 @@ def run_analogue_workflow(
     failures: list[dict] = []
     ranked_by_ligand: dict[str, list[tuple[Chem.Mol, object]]] = {}
     gnina_ranking_rows: list[dict] = []
+    conformer_requested_count = 0
+    conformer_raw_count = 0
+    conformer_after_dedup_count = 0
+    conformer_warning_count = 0
 
     for ligand_index, (ligand_id, ligand_mol) in enumerate(ligands, start=1):
         logger.info("Analogue ligand %d start: %s", ligand_index, ligand_id)
@@ -415,6 +420,7 @@ def run_analogue_workflow(
             random_seed=cfg.random_seed,
             embed_timeout_seconds=cfg.embed_timeout_seconds,
             include_unconstrained_supplement=cfg.embed_unconstrained_supplement,
+            seed_batches=cfg.embed_seed_batches,
             # Keep the seed generator deterministic and fast.  Strain is still
             # estimated during ranking; expensive QM/MM relaxation can be added
             # downstream for top-N poses.
@@ -423,10 +429,20 @@ def run_analogue_workflow(
         embed_elapsed = time.perf_counter() - embed_start
         poses = conformer_result.conformers
         warnings = ligand_warnings + list(mapping.warnings) + conformer_result.warnings
+        conformer_requested_count += conformer_result.requested_conformers
+        conformer_raw_count += conformer_result.raw_conformers
+        conformer_after_dedup_count += len(poses)
+        conformer_warning_count += len(conformer_result.warnings)
         logger.info(
-            "Analogue ligand %s generated seed poses: %d elapsed_sec=%.2f warnings=%d embed_timeout_seconds=%s",
+            (
+                "Analogue ligand %s generated seed poses: %d raw=%d requested=%d "
+                "seed_batches=%d elapsed_sec=%.2f warnings=%d embed_timeout_seconds=%s"
+            ),
             ligand_id,
             len(poses),
+            conformer_result.raw_conformers,
+            conformer_result.requested_conformers,
+            conformer_result.seed_batches,
             embed_elapsed,
             len(conformer_result.warnings),
             cfg.embed_timeout_seconds,
@@ -547,6 +563,11 @@ def run_analogue_workflow(
         "embed_timeout_seconds": cfg.embed_timeout_seconds,
         "embed_oversample_factor": cfg.embed_oversample_factor,
         "embed_unconstrained_supplement": cfg.embed_unconstrained_supplement,
+        "embed_seed_batches": cfg.embed_seed_batches,
+        "conformer_request_count": conformer_requested_count,
+        "conformer_raw_count": conformer_raw_count,
+        "conformer_after_dedup_count": conformer_after_dedup_count,
+        "conformer_warning_count": conformer_warning_count,
         "rbfe_pairwise_edges": cfg.rbfe_pairwise_edges,
         "final_pose_diversity_rmsd": cfg.final_pose_diversity_rmsd,
         **summary,

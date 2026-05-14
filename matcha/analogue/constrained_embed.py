@@ -19,6 +19,9 @@ class ConformerGenerationResult:
     conformers: list[Chem.Mol]
     warnings: list[str] = field(default_factory=list)
     failures: int = 0
+    requested_conformers: int = 0
+    raw_conformers: int = 0
+    seed_batches: int = 1
 
 
 def mol_positions(mol: Chem.Mol, conf_id: int = 0) -> np.ndarray:
@@ -218,6 +221,49 @@ def _append_aligned_conformers(
         out.append(mol_conf)
 
 
+def _embed_seed_batches(
+    work: Chem.Mol,
+    *,
+    n_conformers: int,
+    seed_batches: int,
+    random_seed: int,
+    use_random_coords: bool,
+    embed_timeout_seconds: int | None,
+    coord_map: dict[int, Point3D] | None,
+    warnings: list[str],
+) -> list[Chem.Mol]:
+    embedded: list[Chem.Mol] = []
+    batches = max(1, int(seed_batches))
+    batch_size = max(1, int(np.ceil(max(1, int(n_conformers)) / batches)))
+    for batch_idx in range(batches):
+        batch = copy.deepcopy(work)
+        batch.RemoveAllConformers()
+        params = AllChem.ETKDGv3()
+        params.randomSeed = int(random_seed) + batch_idx * 9973
+        params.useRandomCoords = bool(use_random_coords)
+        params.clearConfs = True
+        _set_embed_timeout(params, embed_timeout_seconds)
+        if coord_map is not None:
+            try:
+                _set_coord_map(params, coord_map)
+            except Exception as exc:  # pragma: no cover - RDKit-version dependent
+                warnings.append(f"coord_map_failed:{type(exc).__name__}")
+                coord_map = None
+        try:
+            conf_ids = _embed_multiple_confs(
+                batch,
+                batch_size,
+                params,
+                timeout_seconds=embed_timeout_seconds,
+            )
+        except Exception as exc:
+            warnings.append(f"embed_batch_{batch_idx}_failed:{type(exc).__name__}")
+            continue
+        if conf_ids:
+            embedded.append(batch)
+    return embedded
+
+
 def _deduplicate_by_core_and_whole_rmsd(
     mols: list[Chem.Mol],
     template: Chem.Mol,
@@ -260,6 +306,7 @@ def generate_constrained_conformers(
     deduplicate: bool = True,
     embed_timeout_seconds: int | None = 30,
     include_unconstrained_supplement: bool = True,
+    seed_batches: int = 4,
 ) -> ConformerGenerationResult:
     """Generate analogue conformers whose MCS core is aligned to ``template``.
 
@@ -282,70 +329,86 @@ def generate_constrained_conformers(
         warnings.append("add_hs_failed")
 
     work.RemoveAllConformers()
-    params = AllChem.ETKDGv3()
-    params.randomSeed = int(random_seed)
-    params.useRandomCoords = bool(use_random_coords)
-    params.clearConfs = True
-    _set_embed_timeout(params, embed_timeout_seconds)
+    coord_map = None
     try:
-        _set_coord_map(params, _make_coord_map(template, mapping))
+        coord_map = _make_coord_map(template, mapping)
     except Exception as exc:  # pragma: no cover - RDKit-version dependent
         warnings.append(f"coord_map_failed:{type(exc).__name__}")
 
-    conf_ids: list[int] = []
-    try:
-        conf_ids = _embed_multiple_confs(
-            work,
-            int(n_conformers),
-            params,
-            timeout_seconds=embed_timeout_seconds,
-        )
-    except Exception as exc:
-        warnings.append(f"constrained_embed_failed:{type(exc).__name__}")
+    embedded_batches = _embed_seed_batches(
+        work,
+        n_conformers=int(n_conformers),
+        seed_batches=seed_batches,
+        random_seed=random_seed,
+        use_random_coords=use_random_coords,
+        embed_timeout_seconds=embed_timeout_seconds,
+        coord_map=coord_map,
+        warnings=warnings,
+    )
 
     used_unconstrained_fallback = False
-    if not conf_ids:
+    if not embedded_batches:
         # Fallback: unconstrained ETKDG followed by explicit MCS alignment.  This
         # often rescues cases where coordMap overconstrains macrocycles/linkers.
-        try:
-            params = AllChem.ETKDGv3()
-            params.randomSeed = int(random_seed)
-            params.useRandomCoords = True
-            _set_embed_timeout(params, embed_timeout_seconds)
-            conf_ids = _embed_multiple_confs(
-                work,
-                max(1, int(n_conformers)),
-                params,
-                timeout_seconds=embed_timeout_seconds,
+        embedded_batches = _embed_seed_batches(
+            work,
+            n_conformers=int(n_conformers),
+            seed_batches=seed_batches,
+            random_seed=random_seed,
+            use_random_coords=True,
+            embed_timeout_seconds=embed_timeout_seconds,
+            coord_map=None,
+            warnings=warnings,
+        )
+        if not embedded_batches:
+            return ConformerGenerationResult(
+                [],
+                warnings + ["embed_fallback_failed:no_conformers"],
+                failures=1,
+                requested_conformers=int(n_conformers),
+                raw_conformers=0,
+                seed_batches=max(1, int(seed_batches)),
             )
-            warnings.append("used_unconstrained_embed_fallback")
-            used_unconstrained_fallback = True
-        except Exception as exc:  # pragma: no cover - RDKit-version dependent
-            return ConformerGenerationResult([], warnings + [f"embed_fallback_failed:{type(exc).__name__}"], failures=1)
+        warnings.append("used_unconstrained_embed_fallback")
+        used_unconstrained_fallback = True
 
     out: list[Chem.Mol] = []
-    _append_aligned_conformers(out, work, conf_ids, template, mapping, optimize=optimize)
+    for batch in embedded_batches:
+        _append_aligned_conformers(
+            out,
+            batch,
+            [conf.GetId() for conf in batch.GetConformers()],
+            template,
+            mapping,
+            optimize=optimize,
+        )
 
     if include_unconstrained_supplement and not used_unconstrained_fallback:
-        supplement = copy.deepcopy(work)
-        supplement.RemoveAllConformers()
-        try:
-            params = AllChem.ETKDGv3()
-            params.randomSeed = int(random_seed) + 104729
-            params.useRandomCoords = True
-            params.clearConfs = True
-            _set_embed_timeout(params, embed_timeout_seconds)
-            supplement_ids = _embed_multiple_confs(
-                supplement,
-                max(1, int(n_conformers)),
-                params,
-                timeout_seconds=embed_timeout_seconds,
-            )
-            _append_aligned_conformers(out, supplement, supplement_ids, template, mapping, optimize=optimize)
+        supplement_batches = _embed_seed_batches(
+            work,
+            n_conformers=int(n_conformers),
+            seed_batches=seed_batches,
+            random_seed=int(random_seed) + 104729,
+            use_random_coords=True,
+            embed_timeout_seconds=embed_timeout_seconds,
+            coord_map=None,
+            warnings=warnings,
+        )
+        if supplement_batches:
+            for supplement in supplement_batches:
+                _append_aligned_conformers(
+                    out,
+                    supplement,
+                    [conf.GetId() for conf in supplement.GetConformers()],
+                    template,
+                    mapping,
+                    optimize=optimize,
+                )
             warnings.append("used_unconstrained_embed_supplement")
-        except Exception as exc:
-            warnings.append(f"unconstrained_embed_supplement_failed:{type(exc).__name__}")
+        else:
+            warnings.append("unconstrained_embed_supplement_failed:no_conformers")
 
+    raw_conformers = len(out)
     if deduplicate:
         out = _deduplicate_by_core_and_whole_rmsd(
             out,
@@ -354,4 +417,11 @@ def generate_constrained_conformers(
             max_conformers=max(1, int(n_conformers)),
         )
 
-    return ConformerGenerationResult(out, warnings, failures=max(0, int(n_conformers) - len(out)))
+    return ConformerGenerationResult(
+        out,
+        warnings,
+        failures=max(0, int(n_conformers) - len(out)),
+        requested_conformers=int(n_conformers),
+        raw_conformers=raw_conformers,
+        seed_batches=max(1, int(seed_batches)),
+    )

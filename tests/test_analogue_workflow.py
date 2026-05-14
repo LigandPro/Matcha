@@ -115,6 +115,9 @@ def test_analogue_workflow_writes_fep_bundle(tmp_path: Path):
     assert result.summary["rbfe_pairwise_edges"] is False
     assert result.summary["embed_oversample_factor"] == 4
     assert result.summary["embed_unconstrained_supplement"] is True
+    assert result.summary["embed_seed_batches"] == 4
+    assert result.summary["conformer_request_count"] >= 4
+    assert result.summary["conformer_raw_count"] >= result.summary["conformer_after_dedup_count"] >= 1
     assert (tmp_path / "analogue_seed_transforms.npy").exists()
     assert (tmp_path / "fep_bundle_seed" / "aligned_series.sdf").exists()
     assert (tmp_path / "fep_bundle_seed" / "fep_manifest.json").exists()
