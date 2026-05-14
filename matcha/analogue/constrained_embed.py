@@ -228,13 +228,16 @@ def _embed_seed_batches(
     seed_batches: int,
     random_seed: int,
     use_random_coords: bool,
-    embed_timeout_seconds: int | None,
+    embed_timeout_seconds: int | float | None,
     coord_map: dict[int, Point3D] | None,
     warnings: list[str],
 ) -> list[Chem.Mol]:
     embedded: list[Chem.Mol] = []
     batches = max(1, int(seed_batches))
     batch_size = max(1, int(np.ceil(max(1, int(n_conformers)) / batches)))
+    batch_timeout = None
+    if embed_timeout_seconds is not None:
+        batch_timeout = max(1.0, float(embed_timeout_seconds) / batches)
     for batch_idx in range(batches):
         batch = copy.deepcopy(work)
         batch.RemoveAllConformers()
@@ -242,7 +245,7 @@ def _embed_seed_batches(
         params.randomSeed = int(random_seed) + batch_idx * 9973
         params.useRandomCoords = bool(use_random_coords)
         params.clearConfs = True
-        _set_embed_timeout(params, embed_timeout_seconds)
+        _set_embed_timeout(params, int(batch_timeout) if batch_timeout is not None else None)
         if coord_map is not None:
             try:
                 _set_coord_map(params, coord_map)
@@ -254,7 +257,7 @@ def _embed_seed_batches(
                 batch,
                 batch_size,
                 params,
-                timeout_seconds=embed_timeout_seconds,
+                timeout_seconds=batch_timeout,
             )
         except Exception as exc:
             warnings.append(f"embed_batch_{batch_idx}_failed:{type(exc).__name__}")
