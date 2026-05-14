@@ -540,6 +540,7 @@ def run_matcha(
     analogue_min_mcs_fraction: float = typer.Option(0.35, "--analogue-min-mcs-fraction", help="Minimum analogue MCS coverage fraction."),
     analogue_core_rmsd_cutoff: float = typer.Option(1.0, "--analogue-core-rmsd-cutoff", help="Core RMSD cutoff for FEP_READY classification (Å)."),
     analogue_torsion_mc_steps: int = typer.Option(0, "--analogue-torsion-mc-steps", help="Optional torsional Monte Carlo steps per seed pose."),
+    analogue_embed_timeout_seconds: Optional[int] = typer.Option(30, "--analogue-embed-timeout-seconds", help="Per-ligand RDKit constrained embedding timeout in seconds."),
     analogue_receptor_aware: bool = typer.Option(True, "--analogue-receptor-aware/--no-analogue-receptor-aware", help="Rank analogue seeds with receptor clash/contact terms when a receptor is provided."),
     run_name: str = typer.Option("matcha_cli_run", "--run-name", help="Name for this docking run."),
     n_samples: int = typer.Option(20, "--n-samples", help="Number of samples (poses) to generate per ligand."),
@@ -572,6 +573,7 @@ def run_matcha(
     analogue_min_mcs_fraction = _option_default(analogue_min_mcs_fraction, 0.35)
     analogue_core_rmsd_cutoff = _option_default(analogue_core_rmsd_cutoff, 1.0)
     analogue_torsion_mc_steps = _option_default(analogue_torsion_mc_steps, 0)
+    analogue_embed_timeout_seconds = _option_default(analogue_embed_timeout_seconds, 30)
     analogue_receptor_aware = _option_default(analogue_receptor_aware, True)
     gnina_score_type = _option_default(gnina_score_type, "Affinity")
     gnina_cnn_scoring = _option_default(gnina_cnn_scoring, "none")
@@ -654,6 +656,7 @@ def run_matcha(
                 min_mcs_fraction=analogue_min_mcs_fraction,
                 core_rmsd_cutoff=analogue_core_rmsd_cutoff,
                 torsion_mc_steps=analogue_torsion_mc_steps,
+                embed_timeout_seconds=analogue_embed_timeout_seconds,
                 receptor_aware_ranking=analogue_receptor_aware,
                 gnina_score_poses=scorer_type.startswith("gnina") and scorer_path is not None,
                 gnina_scorer_path=str(scorer_path) if scorer_path is not None else None,
@@ -968,6 +971,7 @@ def run_matcha(
                     min_mcs_fraction=analogue_min_mcs_fraction,
                     core_rmsd_cutoff=analogue_core_rmsd_cutoff,
                     torsion_mc_steps=analogue_torsion_mc_steps,
+                    embed_timeout_seconds=analogue_embed_timeout_seconds,
                     receptor_aware_ranking=analogue_receptor_aware,
                     gnina_score_poses=scorer_type.startswith("gnina") and scorer_path is not None,
                     gnina_scorer_path=str(scorer_path) if scorer_path is not None else None,
@@ -1045,6 +1049,7 @@ def run_matcha(
                     min_mcs_fraction=analogue_min_mcs_fraction,
                     core_rmsd_cutoff=analogue_core_rmsd_cutoff,
                     torsion_mc_steps=analogue_torsion_mc_steps,
+                    embed_timeout_seconds=analogue_embed_timeout_seconds,
                     receptor_aware_ranking=analogue_receptor_aware,
                     gnina_score_poses=scorer_type.startswith("gnina") and scorer_path is not None,
                     gnina_scorer_path=str(scorer_path) if scorer_path is not None else None,

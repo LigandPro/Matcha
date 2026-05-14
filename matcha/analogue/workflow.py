@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import csv
 import json
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Mapping
@@ -43,6 +44,7 @@ class AnalogueWorkflowConfig:
     gnina_cnn_scoring: str = "none"
     gnina_timeout_seconds: int | None = 300
     gnina_device: int = 0
+    embed_timeout_seconds: int | None = 30
 
 
 @dataclass
@@ -361,20 +363,30 @@ def run_analogue_workflow(
             float(mapping.fraction_ligand),
         )
 
+        embed_start = time.perf_counter()
         conformer_result = generate_constrained_conformers(
             template_std,
             ligand_std,
             mapping,
             n_conformers=cfg.n_seed_poses,
             random_seed=cfg.random_seed,
+            embed_timeout_seconds=cfg.embed_timeout_seconds,
             # Keep the seed generator deterministic and fast.  Strain is still
             # estimated during ranking; expensive QM/MM relaxation can be added
             # downstream for top-N poses.
             optimize=False,
         )
+        embed_elapsed = time.perf_counter() - embed_start
         poses = conformer_result.conformers
         warnings = ligand_warnings + list(mapping.warnings) + conformer_result.warnings
-        logger.info("Analogue ligand %s generated seed poses: %d", ligand_id, len(poses))
+        logger.info(
+            "Analogue ligand %s generated seed poses: %d elapsed_sec=%.2f warnings=%d embed_timeout_seconds=%s",
+            ligand_id,
+            len(poses),
+            embed_elapsed,
+            len(conformer_result.warnings),
+            cfg.embed_timeout_seconds,
+        )
         if cfg.torsion_mc_steps > 0 and poses:
             mc_result = torsional_mc_refine(
                 template_std,
@@ -391,7 +403,7 @@ def run_analogue_workflow(
         if not poses:
             exports[ligand_id] = LigandAnalogueExport(ligand_id, mapping, [], warnings + ["no_seed_poses"], failed=True)
             failures.append({"ligand_id": ligand_id, "reason": "no_seed_poses", "warnings": warnings})
-            logger.info("Analogue ligand %s failed: no_seed_poses", ligand_id)
+            logger.info("Analogue ligand %s failed: no_seed_poses warning_count=%d", ligand_id, len(warnings))
             continue
 
         ranked = rank_poses(
@@ -477,6 +489,7 @@ def run_analogue_workflow(
         "seed_transforms_path": str(seed_transforms_path.resolve()),
         "fep_bundle_dir": str(fep_bundle_dir.resolve()),
         "gnina_ranking": _summarize_gnina_rows(gnina_ranking_rows, cfg, gnina_ranking_summary_path),
+        "embed_timeout_seconds": cfg.embed_timeout_seconds,
         **summary,
     }
     _write_json(output_dir / "analogue_summary.json", workflow_summary)

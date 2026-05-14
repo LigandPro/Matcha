@@ -101,6 +101,12 @@ def _set_coord_map(params, coord_map: dict[int, Point3D]) -> None:
         params.coordMap = coord_map
 
 
+def _set_embed_timeout(params, timeout_seconds: int | None) -> None:
+    if timeout_seconds is None or not hasattr(params, "timeout"):
+        return
+    params.timeout = max(0, int(timeout_seconds))
+
+
 def _mmff_or_uff_optimize(mol: Chem.Mol, conf_id: int) -> float | None:
     try:
         props = AllChem.MMFFGetMoleculeProperties(mol, mmffVariant="MMFF94s")
@@ -169,6 +175,7 @@ def generate_constrained_conformers(
     use_random_coords: bool = True,
     optimize: bool = True,
     deduplicate: bool = True,
+    embed_timeout_seconds: int | None = 30,
 ) -> ConformerGenerationResult:
     """Generate analogue conformers whose MCS core is aligned to ``template``.
 
@@ -195,6 +202,7 @@ def generate_constrained_conformers(
     params.randomSeed = int(random_seed)
     params.useRandomCoords = bool(use_random_coords)
     params.clearConfs = True
+    _set_embed_timeout(params, embed_timeout_seconds)
     try:
         _set_coord_map(params, _make_coord_map(template, mapping))
     except Exception as exc:  # pragma: no cover - RDKit-version dependent
@@ -213,6 +221,7 @@ def generate_constrained_conformers(
             params = AllChem.ETKDGv3()
             params.randomSeed = int(random_seed)
             params.useRandomCoords = True
+            _set_embed_timeout(params, embed_timeout_seconds)
             conf_ids = list(AllChem.EmbedMultipleConfs(work, numConfs=max(1, int(n_conformers)), params=params))
             warnings.append("used_unconstrained_embed_fallback")
         except Exception as exc:  # pragma: no cover - RDKit-version dependent

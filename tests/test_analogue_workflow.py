@@ -7,6 +7,7 @@ from rdkit import Chem
 from rdkit.Chem import AllChem
 
 from matcha.analogue import AnalogueWorkflowConfig, run_analogue_workflow
+from matcha.analogue.constrained_embed import generate_constrained_conformers
 from matcha.analogue.workflow import _gnina_rerank_poses
 from matcha.analogue.mcs import find_robust_mcs
 from matcha.analogue.standardize import standardize_mol
@@ -33,6 +34,30 @@ def test_robust_mcs_maps_congeneric_core():
     assert mapping.ok
     assert mapping.num_atoms >= 6
     assert mapping.fraction_ligand >= 0.75
+
+
+def test_constrained_embed_sets_rdkit_timeout(monkeypatch):
+    template = standardize_mol(_mol3d("Cc1ccccc1", "template")).mol
+    analogue = standardize_mol(_mol3d("CCc1ccccc1", "analogue")).mol
+    mapping = find_robust_mcs(template, analogue, min_atoms=5, min_fraction=0.3, timeout=2)
+    timeouts = []
+
+    def fake_embed_multiple_confs(_mol, numConfs, params):
+        timeouts.append(getattr(params, "timeout", None))
+        return []
+
+    monkeypatch.setattr(AllChem, "EmbedMultipleConfs", fake_embed_multiple_confs)
+
+    result = generate_constrained_conformers(
+        template,
+        analogue,
+        mapping,
+        n_conformers=4,
+        embed_timeout_seconds=12,
+    )
+
+    assert result.conformers == []
+    assert timeouts == [12, 12]
 
 
 def test_analogue_workflow_writes_fep_bundle(tmp_path: Path):
