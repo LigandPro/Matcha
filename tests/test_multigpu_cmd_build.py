@@ -28,6 +28,7 @@ def test_build_shard_command_contains_required_gpu_flags():
         scorer_path=None,
         scorer_minimize=True,
         gnina_batch_mode="per-ligand",
+        gnina_workers=4,
     )
 
     assert cmd[:3] == ["uv", "run", "matcha"]
@@ -41,6 +42,8 @@ def test_build_shard_command_contains_required_gpu_flags():
     assert "--pin-memory" in cmd
     assert "--persistent-workers" in cmd
     assert "--gnina-batch-mode" in cmd
+    assert "--gnina-workers" in cmd
+    assert cmd[cmd.index("--gnina-workers") + 1] == "4"
 
 
 def test_materialize_shards_cleans_existing_shard_dir(tmp_path: Path):

@@ -323,6 +323,7 @@ def _print_usage_and_exit() -> None:
   --gpus TEXT              Multi-GPU ids for batch mode, e.g. 2,3
   --n-samples INT          Poses per ligand (default: 20)
   --scorer TEXT            gnina / custom / none (default: gnina)
+  --gnina-workers INT      Concurrent GNINA processes in batch mode (default: 10)
   --autobox-ligand PATH   Box center from reference ligand
   --center-x/y/z FLOAT    Manual box center (Å)
   --overwrite              Overwrite existing run
@@ -363,6 +364,7 @@ def run_matcha(
     scorer_path: Optional[Path] = typer.Option(None, "--scorer-path", help="Path to gnina binary or custom scorer script."),
     scorer_minimize: bool = typer.Option(True, "--scorer-minimize/--no-scorer-minimize", help="Minimize poses during scoring (gnina)."),
     gnina_batch_mode: str = typer.Option("per-ligand", "--gnina-batch-mode", help="GNINA scoring mode for batch runs (currently only per-ligand)."),
+    gnina_workers: int = typer.Option(10, "--gnina-workers", help="Maximum concurrent GNINA processes in batch mode (default: 4)."),
 ) -> None:
     if out is None:
         _print_usage_and_exit()
@@ -372,6 +374,9 @@ def run_matcha(
 
     if n_samples < 1:
         console.print("[bold red]Error:[/bold red] --n-samples must be >= 1")
+        raise typer.Exit(code=1)
+    if gnina_workers < 1:
+        console.print("[bold red]Error:[/bold red] --gnina-workers must be >= 1")
         raise typer.Exit(code=1)
 
     # Lazy imports — heavy libraries loaded only when actually running docking.
@@ -384,7 +389,7 @@ def run_matcha(
     from matcha.utils.esm_utils import compute_esm_embeddings, compute_sequences
     from matcha.utils.inference_utils import run_v2_inference_pipeline, compute_fast_filters_from_sdf
     from matcha.utils.multigpu import parse_gpus, run_multigpu_batch
-    from matcha.scoring import create_scorer
+    from matcha.scoring import create_scorer, get_composite_score
     from matcha.utils.device import resolve_device
     import torch
 
@@ -545,6 +550,7 @@ def run_matcha(
             scorer_path=scorer_path,
             scorer_minimize=scorer_minimize,
             gnina_batch_mode=gnina_batch_mode,
+            gnina_workers=gnina_workers,
         )
         total_sec = time.perf_counter() - run_timer_start
         _write_json(
@@ -648,27 +654,6 @@ def run_matcha(
     )
     inference_sec = time.perf_counter() - inference_start
 
-    def _read_scored_sdf_affinity(sdf_path: Path) -> List[float]:
-        """Read minimizedAffinity values from a GNINA-scored SDF file (one value per pose)."""
-        if sdf_path is None or not sdf_path.exists():
-            return []
-        scores = []
-        suppl = Chem.SDMolSupplier(str(sdf_path), removeHs=False, sanitize=False)
-        for mol in suppl:
-            if mol is None:
-                scores.append(float("inf"))
-                continue
-            for prop in ("minimizedAffinity", "Affinity"):
-                if mol.HasProp(prop):
-                    try:
-                        scores.append(float(mol.GetProp(prop)))
-                        break
-                    except (ValueError, TypeError):
-                        continue
-            else:
-                scores.append(float("inf"))
-        return scores
-
     preds_root = Path(conf.inference_results_folder) / run_name
     dataset_name = 'any_conf'
 
@@ -683,10 +668,14 @@ def run_matcha(
                                    minimize=scorer_minimize)
             sdf_input = preds_root / dataset_name / "sdf_predictions"
             filters_path = preds_root / dataset_name / "filters_results_minimized.json"
+            score_kwargs = {}
             if scorer_type.startswith("gnina") and batch_mode:
                 if gnina_batch_mode != "per-ligand":
                     raise typer.BadParameter("--gnina-batch-mode currently supports only 'per-ligand'")
-            scorer.score_poses(str(receptor), str(sdf_input), str(sdf_scored), device=cuda_device_idx)
+                score_kwargs["workers"] = gnina_workers
+            scorer.score_poses(
+                str(receptor), str(sdf_input), str(sdf_scored), device=cuda_device_idx, **score_kwargs
+            )
             compute_fast_filters_from_sdf(conf, run_name, sdf_type='minimized', n_preds_to_use=n_samples)
             scorer.select_top_poses(str(sdf_scored), str(best_scored_dir),
                                     filters_path=str(filters_path), n_samples=n_samples)
@@ -729,6 +718,12 @@ def run_matcha(
             suppl = Chem.SDMolSupplier(str(scored_sdf), removeHs=False, sanitize=False)
             for i, mol in enumerate(suppl):
                 if mol is None or i >= len(uid_data.get('sample_metrics', [])):
+                    continue
+                if scorer_type.startswith("gnina"):
+                    try:
+                        uid_data['sample_metrics'][i]['gnina_score'] = get_composite_score(mol)
+                    except (KeyError, ValueError, TypeError):
+                        pass
                     continue
                 for prop in ['minimizedAffinity', 'Affinity', 'minimizedCNNscore', 'CNNscore']:
                     if mol.HasProp(prop):
@@ -808,7 +803,7 @@ def run_matcha(
     def _format_pose_ranking_lines(ranked_samples, has_gnina):
         lines = []
         if has_gnina:
-            lines.append("  rank  affinity  pb  checks  buried_frac")
+            lines.append("  rank  score     pb  checks  buried_frac")
             lines.append("  -----------------------------------------")
         else:
             lines.append("  rank  pb  checks  buried_frac")
@@ -828,8 +823,8 @@ def run_matcha(
             except Exception:
                 buried_frac = " n/a"
             if has_gnina:
-                aff = f"{sample.get('gnina_score', float('inf')):>8.2f}"
-                lines.append(f"  {rank:<4}  {aff}  {pb_count}/4  {checks}   {buried_frac:>6}")
+                score = f"{sample.get('gnina_score', float('inf')):>8.2f}"
+                lines.append(f"  {rank:<4}  {score}  {pb_count}/4  {checks}   {buried_frac:>6}")
             else:
                 lines.append(f"  {rank:<4}  {pb_count}/4  {checks}   {buried_frac:>6}")
         lines.extend([
@@ -864,11 +859,11 @@ def run_matcha(
             f"  Scorer                 : {scorer_type}" + (f" ({scorer_name})" if scorer_used else ""),
         ]
         if has_gnina:
-            lines.append(f"  GNINA Affinity (kcal/mol): min={min(gnina_scores):.2f}, mean={float(np.mean(gnina_scores)):.2f}, max={max(gnina_scores):.2f}")
-        affinity_str = f", affinity={gnina_scores[best_idx]:.2f}" if has_gnina else ""
+            lines.append(f"  Scorer score           : min={min(gnina_scores):.2f}, mean={float(np.mean(gnina_scores)):.2f}, max={max(gnina_scores):.2f}")
+        score_str = f", score={gnina_scores[best_idx]:.2f}" if has_gnina else ""
         lines.extend([
             f"  PoseBusters checks     : min={min(pb_counts)}/4, max={max(pb_counts)}/4",
-            f"  Best sample            : rank={best_idx+1}, pb={pb_counts[best_idx]}/4{affinity_str}",
+            f"  Best sample            : rank={best_idx+1}, pb={pb_counts[best_idx]}/4{score_str}",
             f"  Saved poses            : {saved_poses}/{total_samples}",
             "", "",
             "  PoseBusters checks (4 boolean tests):",
@@ -1118,7 +1113,7 @@ def run_matcha(
         pb_counts, gnina_scores, has_gnina, best_idx = _get_sample_stats(mdata["sample_metrics"])
         line = f"  {mol_uid}: pb={pb_counts[best_idx]}/4"
         if has_gnina:
-            line += f", affinity={gnina_scores[best_idx]:.2f}"
+            line += f", score={gnina_scores[best_idx]:.2f}"
         log_lines.append(line)
 
     log_lines.extend([

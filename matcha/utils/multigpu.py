@@ -149,6 +149,7 @@ def build_shard_command(
     scorer_path: Optional[Path],
     scorer_minimize: bool,
     gnina_batch_mode: str,
+    gnina_workers: int,
 ) -> list[str]:
     cmd: list[str] = [
         "uv",
@@ -174,6 +175,8 @@ def build_shard_command(
         scorer_type,
         "--gnina-batch-mode",
         gnina_batch_mode,
+        "--gnina-workers",
+        str(gnina_workers),
         "--overwrite",
         "--keep-workdir",
     ]
@@ -227,6 +230,7 @@ def _make_shard_specs(
     scorer_path: Optional[Path],
     scorer_minimize: bool,
     gnina_batch_mode: str,
+    gnina_workers: int,
 ) -> list[ShardSpec]:
     specs: list[ShardSpec] = []
     for gpu_id, shard_dir, ligand_count in zip(gpu_ids, shard_dirs, shard_counts):
@@ -260,6 +264,7 @@ def _make_shard_specs(
             scorer_path=scorer_path,
             scorer_minimize=scorer_minimize,
             gnina_batch_mode=gnina_batch_mode,
+            gnina_workers=gnina_workers,
         )
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
@@ -554,6 +559,7 @@ def run_multigpu_batch(
     scorer_path: Optional[Path],
     scorer_minimize: bool,
     gnina_batch_mode: str,
+    gnina_workers: int,
 ) -> dict:
     ligand_files = find_ligand_files(ligand_dir, recursive=recursive)
     sharded = shard_ligand_files(ligand_files, n_shards=len(gpu_ids))
@@ -586,6 +592,7 @@ def run_multigpu_batch(
         scorer_path=scorer_path,
         scorer_minimize=scorer_minimize,
         gnina_batch_mode=gnina_batch_mode,
+        gnina_workers=gnina_workers,
     )
 
     repo_root = Path(__file__).resolve().parents[2]
