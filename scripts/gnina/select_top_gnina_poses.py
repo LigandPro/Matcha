@@ -21,10 +21,9 @@ Output structure:
 Usage:
     python select_top_gnina_poses.py \
         -p configs/paths/paths.yaml \
-        -n my_experiment \
-        --score-type Affinity \
-        --use-minimized \
-        --use-filters
+        -n my_experiment
+
+Use --no-filters to disable filter-based selection.
 """
 
 import argparse
@@ -43,61 +42,14 @@ RDLogger.DisableLog('rdApp.warning')
 from rdkit import Chem
 from rdkit.Chem import SDWriter
 
+from matcha.scoring import get_composite_score
 from matcha.utils.log import get_logger
 
 logger = get_logger(__name__)
 
 
-def extract_gnina_score(mol: Chem.Mol, score_type: str = "CNNscore", use_minimized: bool = True) -> Optional[float]:
-    """
-    Extract gnina score from molecule properties.
-    
-    Args:
-        mol: RDKit molecule object
-        score_type: Type of score to extract ("CNNscore", "CNNaffinity", or "Affinity")
-        use_minimized: Whether to look for minimized property names
-    
-    Returns:
-        Score value or None if not found
-    """
-    # Try different possible property names
-    if use_minimized:
-        possible_names = [
-            f"minimized{score_type}" if score_type != "Affinity" else "minimizedAffinity",
-            f"minimizedCNNscore" if score_type == "CNNscore" else None,
-            f"minimizedCNNaffinity" if score_type == "CNNaffinity" else None,
-            score_type,
-        ]
-    else:
-        possible_names = [
-            score_type,
-            f"minimized{score_type}" if score_type != "Affinity" else "minimizedAffinity",
-        ]
-    
-    for prop_name in possible_names:
-        if prop_name is None:
-            continue
-        if mol.HasProp(prop_name):
-            try:
-                return float(mol.GetProp(prop_name))
-            except (ValueError, TypeError):
-                continue
-    
-    # Try to get all properties and search for score-like names
-    props = mol.GetPropsAsDict(includePrivate=True, includeComputed=True)
-    for key, value in props.items():
-        if score_type.lower() in key.lower():
-            try:
-                return float(value)
-            except (ValueError, TypeError):
-                continue
-    
-    return None
-
-
 def find_top_scored_molecule(
     sdf_path: Path, 
-    score_type: str = "CNNscore",
     use_minimized: bool = True,
     filters_data: Optional[Dict[str, Any]] = None,
     uid: Optional[str] = None,
@@ -108,7 +60,6 @@ def find_top_scored_molecule(
     
     Args:
         sdf_path: Path to SDF file containing multiple poses
-        score_type: Type of score to use for ranking ("CNNscore", "CNNaffinity", or "Affinity")
         use_minimized: Whether to look for minimized property names
         filters_data: Optional dict with filter results {uid: {filter_field: [values]}}
         uid: UID for this molecule (required if using filters)
@@ -122,32 +73,6 @@ def find_top_scored_molecule(
     mols = []
     scores = []
     
-    # Try direct property access first (most common case for minimized files)
-    if use_minimized:
-        prop_name = f"minimized{score_type}" if score_type != "Affinity" else "minimizedAffinity"
-    else:
-        prop_name = score_type
-
-    # logger.warning('POCKET_AWARE SETUP')
-    # keep_mask = np.concatenate([np.arange(n_samples), 
-    #                             np.arange(40, 40 + n_samples), 
-    #                             # np.arange(80, 80 + n_samples)
-    #                             ])
-
-    # keep_mask = np.concatenate([
-    #                             np.arange(n_samples), 
-    #                             np.arange(40, 40 + n_samples), 
-    #                             # np.arange(80, 80 + n_samples)
-    #                             ])
-    # logger.warning(f"stage3 {uid}, {keep_mask}")
-
-    # keep_mask = np.concatenate([
-    #                             np.arange(n_samples), 
-    #                             np.arange(40, 40 + n_samples), 
-    #                             np.arange(80, 80 + n_samples)
-    #                             ])
-
-    # keep_mask = np.arange(2 * n_samples)
     keep_mask = np.arange(3 * n_samples)
     
     for i, mol in enumerate(supplier):
@@ -157,22 +82,9 @@ def find_top_scored_molecule(
         if i not in keep_mask:
             # logger.info(f'Skip {uid} {i}')
             continue
-        
-        # Try direct property access first (faster)
-        if mol.HasProp(prop_name):
-            try:
-                score = float(mol.GetProp(prop_name))
-                mols.append(mol)
-                scores.append(score)
-                continue
-            except (ValueError, TypeError):
-                pass
-        
-        # Fall back to search if direct access fails
-        score = extract_gnina_score(mol, score_type, use_minimized)
-        if score is not None:
-            mols.append(mol)
-            scores.append(score)
+
+        mols.append(mol)
+        scores.append(get_composite_score(mol))
     
     if len(mols) == 0:
         return None
@@ -204,14 +116,8 @@ def find_top_scored_molecule(
     # Select best among valid indices
     valid_scores = scores[valid_indices]
     
-    # For CNNscore and CNNaffinity, higher is better
-    # For Affinity, lower is better (more negative = better binding)
-    if score_type == "Affinity" or score_type == "minimizedAffinity":
-        # Lower (more negative) affinity is better - use argmin
-        best_valid_idx = np.argmin(valid_scores)
-    else:
-        # Higher score is better for CNNscore and CNNaffinity - use argmax
-        best_valid_idx = np.argmax(valid_scores)
+    # Lower is better for the composite score.
+    best_valid_idx = np.argmin(valid_scores)
     
     best_idx = valid_indices[best_valid_idx]
     best_mol = mols[best_idx]
@@ -246,10 +152,10 @@ def process_sdf_folder(
     inference_results_folder: Path,
     inference_run_name: str,
     dataset_name: str,
-    score_type: str = "CNNscore",
     use_minimized: bool = True,
-    use_filters: bool = False,
+    use_filters: bool = True,
     n_samples: int = 20,
+    output_folder_name: Optional[str] = None,
 ):
     """
     Process all SDF files in input folder and save top-scored poses.
@@ -258,9 +164,8 @@ def process_sdf_folder(
         inference_results_folder: Base inference results folder from config
         inference_run_name: Name of the inference run
         dataset_name: Name of the dataset (used in folder structure, e.g., 'pdbbind', 'astex')
-        score_type: Type of gnina score to use for ranking
         use_minimized: Whether to process minimized predictions (default: True)
-        use_filters: Whether to use filter-based selection (default: False)
+        use_filters: Whether to use filter-based selection (default: True)
     """
     inference_results_folder = Path(inference_results_folder)
     exp_folder = inference_results_folder / inference_run_name
@@ -270,21 +175,18 @@ def process_sdf_folder(
     # Determine input/output paths based on use_minimized
     if use_minimized:
         input_folder = exp_folder / dataset_name / "minimized_sdf_predictions"
-        if n_samples != 40:
-            output_folder_name = f"best_minimized_predictions_{n_samples}"
-        else:
-            output_folder_name = "best_minimized_predictions"
+        default_output_folder_name = f"best_minimized_predictions_{n_samples}"
         filters_path = exp_folder / dataset_name / "filters_results_minimized.json"
     else:
         input_folder = exp_folder / dataset_name / "base_sdf_predictions"
-        output_folder_name = "best_base_predictions"
+        default_output_folder_name = "best_base_predictions"
         filters_path = exp_folder / dataset_name / "filters_results.json"
 
+    if output_folder_name is None:
+        output_folder_name = default_output_folder_name
     if use_filters:
         output_folder_name = f"{output_folder_name}_filtered"
 
-    # logger.warning(f"Stage 3")
-    # output_folder_name = f"{output_folder_name}_stage3"
 
     logger.info(f"output_folder_name: {output_folder_name}")
     output_folder = exp_folder / dataset_name / output_folder_name
@@ -325,7 +227,6 @@ def process_sdf_folder(
             # Find top-scored molecule
             result = find_top_scored_molecule(
                 sdf_file, 
-                score_type, 
                 use_minimized,
                 filters_data,
                 uid,
@@ -333,7 +234,7 @@ def process_sdf_folder(
             )
             
             if result is None:
-                print(f"Warning: No valid molecules with {score_type} found in {sdf_file.name}")
+                print(f"Warning: No valid molecules found in {sdf_file.name}")
                 failed += 1
                 continue
             
@@ -377,18 +278,11 @@ def main():
         help="Inference run name (folder name under inference_results_folder)"
     )
     parser.add_argument(
-        "--score-type",
-        type=str,
-        dest="score_type",
-        default="Affinity",
-        choices=["CNNscore", "CNNaffinity", "Affinity"],
-        help="Type of gnina score to use for ranking (default: Affinity)"
-    )
-    parser.add_argument(
-        "--use-filters",
+        "--no-filters",
         dest="use_filters",
-        action="store_true",
-        help="Use filter-based selection (filters JSON auto-detected from run folder)"
+        action="store_false",
+        default=True,
+        help="Disable filter-based selection"
     )
     parser.add_argument(
         "--n-samples",
@@ -396,6 +290,13 @@ def main():
         type=int,
         help="Number of samples to use for filtering",
         default=40,
+    )
+    parser.add_argument(
+        "--output-folder-name",
+        dest="output_folder_name",
+        type=str,
+        help="Exact name of the output folder",
+        default=None,
     )
     
     args = parser.parse_args()
@@ -413,26 +314,16 @@ def main():
         logger.info(f"Processing dataset: {dataset_name}")
         logger.info(f"{'='*60}")
 
-        # use_filters = args.use_filters
-        use_filters = True
-        
-        # process_sdf_folder(
-        #     inference_results_folder=Path(conf.inference_results_folder),
-        #     inference_run_name=args.inference_run_name,
-        #     dataset_name=dataset_name,
-        #     score_type=args.score_type,
-        #     use_minimized=False,
-        #     use_filters=use_filters,
-        # )
+        use_filters = args.use_filters
 
         process_sdf_folder(
             inference_results_folder=Path(conf.inference_results_folder),
             inference_run_name=args.inference_run_name,
             dataset_name=dataset_name,
-            score_type=args.score_type,
             use_minimized=True,
             use_filters=use_filters,
             n_samples=args.n_samples,
+            output_folder_name=args.output_folder_name,
         )
 
 

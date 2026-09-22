@@ -218,45 +218,17 @@ def ensure_gnina() -> str:
     return str(cached)
 
 
-def _extract_gnina_score(mol, score_type="CNNscore", use_minimized=True):
-    """Extract gnina score from molecule properties.
-
-    Args:
-        mol: RDKit molecule object.
-        score_type: Type of score ("CNNscore", "CNNaffinity", or "Affinity").
-        use_minimized: Whether to look for minimized property names first.
-
-    Returns:
-        Score value or None if not found.
-    """
-    if use_minimized:
-        possible_names = [
-            f"minimized{score_type}" if score_type != "Affinity" else "minimizedAffinity",
-            score_type,
-        ]
-    else:
-        possible_names = [
-            score_type,
-            f"minimized{score_type}" if score_type != "Affinity" else "minimizedAffinity",
-        ]
-
-    for prop_name in possible_names:
-        if mol.HasProp(prop_name):
-            try:
-                return float(mol.GetProp(prop_name))
-            except (ValueError, TypeError):
-                continue
-
-    # Fallback: search all properties for score-like names
-    props = mol.GetPropsAsDict(includePrivate=True, includeComputed=True)
-    for key, value in props.items():
-        if score_type.lower() in key.lower():
-            try:
-                return float(value)
-            except (ValueError, TypeError):
-                continue
-
-    return None
+def get_composite_score(mol) -> float:
+    """Return the lower-is-better composite GNINA pose score."""
+    score = (
+        float(mol.GetProp("minimizedAffinity"))
+        - float(mol.GetProp("CNN_VS"))
+        - 0.5 * float(mol.GetProp("CNNaffinity"))
+        - 5 * float(mol.GetProp("CNNscore"))
+    )
+    if mol.HasProp("minimizedRMSD"):
+        score += float(mol.GetProp("minimizedRMSD"))
+    return score
 
 
 def _normalize_uid(uid: str) -> str:
@@ -300,14 +272,14 @@ def _decode_matcha_name(name: str) -> tuple[str, int, str]:
     raise ValueError(f"Missing expected _Name markers in: {name!r}")
 
 
-def _find_top_scored_molecule(sdf_path, score_type="CNNscore", use_minimized=True,
-                              filters_data=None, uid=None, n_samples=40):
+def _find_top_scored_molecule(
+    sdf_path, use_minimized=True, filters_data=None, uid=None, n_samples=20
+):
     """Read SDF file and find the molecule with the best gnina score.
 
     Args:
         sdf_path: Path to SDF file containing multiple poses.
-        score_type: Type of score to use for ranking.
-        use_minimized: Whether to look for minimized property names.
+        use_minimized: Whether the scored poses were minimized.
         filters_data: Optional dict with filter results {uid: {filter_field: [values]}}.
         uid: UID for this molecule (required if using filters).
         n_samples: Number of samples per stage.
@@ -320,11 +292,6 @@ def _find_top_scored_molecule(sdf_path, score_type="CNNscore", use_minimized=Tru
     except OSError:
         return None
 
-    if use_minimized:
-        prop_name = f"minimized{score_type}"
-    else:
-        prop_name = score_type
-
     keep_limit = 3 * int(n_samples)
 
     mols = []
@@ -335,21 +302,12 @@ def _find_top_scored_molecule(sdf_path, score_type="CNNscore", use_minimized=Tru
         if i >= keep_limit:
             break
 
-        # Try direct property access first
-        if mol.HasProp(prop_name):
-            try:
-                score = float(mol.GetProp(prop_name))
-                mols.append(mol)
-                scores.append(score)
-                continue
-            except (ValueError, TypeError):
-                pass
-
-        # Fall back to search
-        score = _extract_gnina_score(mol, score_type, use_minimized)
-        if score is not None:
-            mols.append(mol)
-            scores.append(score)
+        try:
+            score = get_composite_score(mol)
+        except (KeyError, ValueError, TypeError):
+            continue
+        mols.append(mol)
+        scores.append(score)
 
     if len(mols) == 0:
         return None
@@ -382,11 +340,7 @@ def _find_top_scored_molecule(sdf_path, score_type="CNNscore", use_minimized=Tru
 
     valid_scores = scores[valid_indices]
 
-    # For Affinity, lower is better; for CNNscore/CNNaffinity, higher is better
-    if score_type in ("Affinity", "minimizedAffinity"):
-        best_valid_idx = np.argmin(valid_scores)
-    else:
-        best_valid_idx = np.argmax(valid_scores)
+    best_valid_idx = np.argmin(valid_scores)
 
     best_idx = valid_indices[best_valid_idx]
     return mols[best_idx], float(scores[best_idx]), best_idx
@@ -395,11 +349,9 @@ def _find_top_scored_molecule(sdf_path, score_type="CNNscore", use_minimized=Tru
 class GninaScorer(PoseScorer):
     """Scorer using the GNINA molecular docking program."""
 
-    def __init__(self, gnina_path=None, minimize=True, score_type="Affinity",
-                 cnn_scoring="none"):
+    def __init__(self, gnina_path=None, minimize=True, cnn_scoring="rescore"):
         self._gnina_path = str(gnina_path) if gnina_path is not None else ensure_gnina()
         self.minimize = minimize
-        self.score_type = score_type
         self.cnn_scoring = cnn_scoring
 
     @property
@@ -470,7 +422,6 @@ class GninaScorer(PoseScorer):
             else:
                 logger.warning(f"Filters file not found: {filters_path}")
 
-        use_minimized = self.minimize
         successful = 0
         failed = 0
 
@@ -479,8 +430,7 @@ class GninaScorer(PoseScorer):
 
             result = _find_top_scored_molecule(
                 sdf_file,
-                score_type=self.score_type,
-                use_minimized=use_minimized,
+                use_minimized=self.minimize,
                 filters_data=filters_data,
                 uid=uid,
                 n_samples=n_samples,
@@ -565,7 +515,6 @@ class CustomScriptScorer(PoseScorer):
 
             result = _find_top_scored_molecule(
                 sdf_file,
-                score_type="CNNscore",
                 use_minimized=False,
                 filters_data=filters_data,
                 uid=uid,

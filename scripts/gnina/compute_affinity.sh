@@ -253,10 +253,10 @@ for ligand in "$LIGANDS_DIR"/*.sdf; do
             if [ "$minimize" = "minimize" ]; then
                 # Create output path for minimized ligand
                 minimized_output="${MINIMIZED_LIGANDS_DIR}/${ligand_filename}"
-                result=$("$gnina_script" --receptor "$receptor_path" --ligand "$ligand" --device "$device_id" --cnn_scoring none --minimize -o "$minimized_output" 2>/dev/null)
+                result=$("$gnina_script" --receptor "$receptor_path" --ligand "$ligand" --device "$device_id" --minimize -o "$minimized_output" 2>/dev/null)
             else
                 scored_output="${OUTPUT_LIGANDS_DIR}/${ligand_filename}"
-                result=$("$gnina_script" --receptor "$receptor_path" --ligand "$ligand" --device "$device_id" --cnn_scoring none --score_only -o "$scored_output" 2>/dev/null)
+                result=$("$gnina_script" --receptor "$receptor_path" --ligand "$ligand" --device "$device_id" --score_only -o "$scored_output" 2>/dev/null)
             fi
 
         else

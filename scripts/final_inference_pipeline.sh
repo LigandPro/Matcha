@@ -124,7 +124,7 @@ gnina_cmd="bash scripts/gnina/compute_affinity_batch.sh $exp_name --config $exp_
 if [ -n "$gnina_script" ]; then
     gnina_cmd="$gnina_cmd --gnina-script $gnina_script"
 fi
-gnina_cmd="$gnina_cmd --minimize --device $device_id $datasets"
+gnina_cmd="CUDA_VISIBLE_DEVICES=$device_id $gnina_cmd --minimize --device 0 $datasets"
 eval $gnina_cmd
 
 # Step 3: Compute fast filters from SDF
@@ -133,12 +133,12 @@ CUDA_VISIBLE_DEVICES=$device_id python scripts/fast_filters_from_sdf.py -c $exp_
 
 # Step 4: Select top GNINA poses
 echo "Step 4: Selecting top GNINA poses..."
-python scripts/gnina/select_top_gnina_poses.py -p $paths_config -n $exp_name --n-samples $n_samples
+python scripts/gnina/select_top_gnina_poses.py -p $paths_config -n $exp_name --n-samples $n_samples --output-folder-name best_minimized_predictions_${n_samples}_CNNagg
 
 # Step 5: Compute metrics from best SDF predictions (only if --compute_final_metrics)
 if [ "$compute_final_metrics" = "true" ]; then
     echo "Step 5: Computing metrics from best SDF predictions..."
-    python scripts/compute_metrics_from_sdf.py -p $paths_config -n $exp_name --prediction-type best_minimized_predictions_${n_samples}_filtered
+    python scripts/compute_metrics_from_sdf.py -p $paths_config -n $exp_name --prediction-type best_minimized_predictions_${n_samples}_filtered_CNNagg
 else
     echo "Step 5: Skipped (use --compute_final_metrics to run)"
 fi
