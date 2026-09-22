@@ -29,7 +29,6 @@ def test_build_shard_command_contains_required_gpu_flags():
         scorer_minimize=True,
         gnina_batch_mode="per-ligand",
         gnina_workers=4,
-        physical_only=False,
     )
 
     assert cmd[:3] == ["uv", "run", "matcha"]
