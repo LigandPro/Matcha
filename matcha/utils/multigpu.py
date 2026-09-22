@@ -149,6 +149,7 @@ def build_shard_command(
     scorer_path: Optional[Path],
     scorer_minimize: bool,
     gnina_batch_mode: str,
+    gnina_workers: int,
     physical_only: bool,
 ) -> list[str]:
     cmd: list[str] = [
@@ -175,6 +176,8 @@ def build_shard_command(
         scorer_type,
         "--gnina-batch-mode",
         gnina_batch_mode,
+        "--gnina-workers",
+        str(gnina_workers),
         "--overwrite",
         "--keep-workdir",
     ]
@@ -229,6 +232,7 @@ def _make_shard_specs(
     scorer_path: Optional[Path],
     scorer_minimize: bool,
     gnina_batch_mode: str,
+    gnina_workers: int,
     physical_only: bool,
 ) -> list[ShardSpec]:
     specs: list[ShardSpec] = []
@@ -263,6 +267,7 @@ def _make_shard_specs(
             scorer_path=scorer_path,
             scorer_minimize=scorer_minimize,
             gnina_batch_mode=gnina_batch_mode,
+            gnina_workers=gnina_workers,
             physical_only=physical_only,
         )
         env = os.environ.copy()
@@ -558,6 +563,7 @@ def run_multigpu_batch(
     scorer_path: Optional[Path],
     scorer_minimize: bool,
     gnina_batch_mode: str,
+    gnina_workers: int,
     physical_only: bool,
 ) -> dict:
     ligand_files = find_ligand_files(ligand_dir, recursive=recursive)
@@ -591,6 +597,7 @@ def run_multigpu_batch(
         scorer_path=scorer_path,
         scorer_minimize=scorer_minimize,
         gnina_batch_mode=gnina_batch_mode,
+        gnina_workers=gnina_workers,
         physical_only=physical_only,
     )
 

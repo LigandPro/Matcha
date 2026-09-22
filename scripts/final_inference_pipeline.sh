@@ -1,12 +1,13 @@
 #!/bin/bash
 
-# Usage: ./final_inference_pipeline.sh -n <exp_name> -c <exp_config> -p <paths_config> [-d <device_id>] [-s <n_samples>] [-g <gnina_script>] [--compute_final_metrics]
+# Usage: ./final_inference_pipeline.sh -n <exp_name> -c <exp_config> -p <paths_config> [-d <device_id>] [-s <n_samples>] [-g <gnina_script>] [--gnina-workers <n>] [--compute_final_metrics]
 #   -n: Experiment name (required)
 #   -c: Experiment config file (required)
 #   -p: Paths config file (required)
 #   -d: GPU device ID (optional, default: 0)
 #   -s: Number of samples (optional, default: 40)
 #   -g: Path to GNINA script (required for GNINA affinity steps; no default)
+#   --gnina-workers <n>: Maximum concurrent GNINA processes (optional, default: 4)
 #   --compute_final_metrics: If set, run step 5 (compute metrics from best SDF predictions). Default: false
 #
 # Example:
@@ -16,16 +17,30 @@
 device_id="0"
 n_samples="40"
 gnina_script=""
+gnina_workers="10"
 compute_final_metrics="false"
 
-# Preprocess args to support --compute_final_metrics (getopts only handles single-letter options)
+# Preprocess args: long-only flags and options with values (getopts only handles single-letter options)
 args=()
-for arg in "$@"; do
-  if [ "$arg" = "--compute_final_metrics" ]; then
-    compute_final_metrics="true"
-  else
-    args+=("$arg")
-  fi
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --compute_final_metrics)
+      compute_final_metrics="true"
+      shift
+      ;;
+    --gnina-workers)
+      if [ $# -lt 2 ]; then
+        echo "Error: --gnina-workers requires a value" >&2
+        exit 1
+      fi
+      gnina_workers="$2"
+      shift 2
+      ;;
+    *)
+      args+=("$1")
+      shift
+      ;;
+  esac
 done
 set -- "${args[@]}"
 
@@ -51,7 +66,7 @@ while getopts "n:c:p:d:s:g:h" opt; do
       gnina_script="$OPTARG"
       ;;
     h)
-      echo "Usage: $0 -n <exp_name> -c <exp_config> -p <paths_config> [-d <device_id>] [-s <n_samples>] [-g <gnina_script>] [--compute_final_metrics]"
+      echo "Usage: $0 -n <exp_name> -c <exp_config> -p <paths_config> [-d <device_id>] [-s <n_samples>] [-g <gnina_script>] [--gnina-workers <n>] [--compute_final_metrics]"
       echo ""
       echo "Options:"
       echo "  -n  Experiment name (required)"
@@ -60,6 +75,7 @@ while getopts "n:c:p:d:s:g:h" opt; do
       echo "  -d  GPU device ID (optional, default: 0)"
       echo "  -s  Number of samples (optional, default: 40)"
       echo "  -g  Path to GNINA script (required for GNINA steps)"
+      echo "  --gnina-workers <n>  Maximum concurrent GNINA processes (default: 4)"
       echo "  --compute_final_metrics  Run step 5: compute metrics from best SDF predictions (default: false)"
       echo "  -h  Show this help message"
       echo ""
@@ -84,7 +100,7 @@ done
 # Check required arguments
 if [ -z "$exp_name" ] || [ -z "$exp_config" ] || [ -z "$paths_config" ]; then
     echo "Error: Missing required arguments"
-    echo "Usage: $0 -n <exp_name> -c <exp_config> -p <paths_config> [-d <device_id>] [-s <n_samples>] [-g <gnina_script>] [--compute_final_metrics]"
+    echo "Usage: $0 -n <exp_name> -c <exp_config> -p <paths_config> [-d <device_id>] [-s <n_samples>] [-g <gnina_script>] [--gnina-workers <n>] [--compute_final_metrics]"
     echo "Use -h for help"
     exit 1
 fi
@@ -97,6 +113,7 @@ echo "Experiment config: $exp_config"
 echo "Paths config: $paths_config"
 echo "Device ID: $device_id"
 echo "Number of samples: $n_samples"
+echo "GNINA workers: $gnina_workers"
 if [ -n "$gnina_script" ]; then
     echo "GNINA script: $gnina_script"
 fi
@@ -110,22 +127,11 @@ CUDA_VISIBLE_DEVICES=$device_id python scripts/full_inference.py -c $exp_config 
 
 # Step 2: Compute GNINA affinity with minimization
 echo "Step 2: Computing GNINA affinity with minimization..."
-# Extract dataset names from config and trim _conf suffix
-datasets=$(python -c "
-from omegaconf import OmegaConf
-conf = OmegaConf.load('$exp_config')
-paths_conf = OmegaConf.load('$paths_config')
-conf = OmegaConf.merge(conf, paths_conf)
-dataset_names = [name.replace('_conf', '') for name in conf.test_dataset_types]
-print(' '.join(dataset_names))
-")
-# Build gnina command
-gnina_cmd="bash scripts/gnina/compute_affinity_batch.sh $exp_name --config $exp_config --paths-config $paths_config"
+gnina_cmd=(python scripts/gnina/run_gnina_scoring.py -n "$exp_name" -c "$exp_config" -p "$paths_config" --minimize --device 0 --workers "$gnina_workers")
 if [ -n "$gnina_script" ]; then
-    gnina_cmd="$gnina_cmd --gnina-script $gnina_script"
+  gnina_cmd+=(--gnina-script "$gnina_script")
 fi
-gnina_cmd="CUDA_VISIBLE_DEVICES=$device_id $gnina_cmd --minimize --device 0 $datasets"
-eval $gnina_cmd
+CUDA_VISIBLE_DEVICES=$device_id "${gnina_cmd[@]}" || exit 1
 
 # Step 3: Compute fast filters from SDF
 echo "Step 3: Computing fast filters from SDF..."
@@ -138,7 +144,7 @@ python scripts/gnina/select_top_gnina_poses.py -p $paths_config -n $exp_name --n
 # Step 5: Compute metrics from best SDF predictions (only if --compute_final_metrics)
 if [ "$compute_final_metrics" = "true" ]; then
     echo "Step 5: Computing metrics from best SDF predictions..."
-    python scripts/compute_metrics_from_sdf.py -p $paths_config -n $exp_name --prediction-type best_minimized_predictions_${n_samples}_filtered_CNNagg
+    python scripts/compute_metrics_from_sdf.py -p $paths_config -n $exp_name --prediction-type best_minimized_predictions_${n_samples}_CNNagg_filtered
 else
     echo "Step 5: Skipped (use --compute_final_metrics to run)"
 fi

@@ -6,6 +6,7 @@ import subprocess
 import sys
 import urllib.request
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -362,7 +363,7 @@ class GninaScorer(PoseScorer):
     def gnina_path(self) -> str:
         return self._gnina_path
 
-    def score_poses(self, receptor_path, sdf_input_dir, sdf_output_dir, device=0):
+    def score_poses(self, receptor_path, sdf_input_dir, sdf_output_dir, device=0, workers=4):
         sdf_input_dir = Path(sdf_input_dir)
         sdf_output_dir = Path(sdf_output_dir)
         sdf_output_dir.mkdir(parents=True, exist_ok=True)
@@ -372,10 +373,11 @@ class GninaScorer(PoseScorer):
             logger.warning(f"No SDF files found in {sdf_input_dir}")
             return
 
+        workers = max(1, int(workers))
         logger.info(f"Scoring {len(sdf_files)} SDF files with gnina "
-                     f"(minimize={self.minimize})")
+                     f"(minimize={self.minimize}, workers={workers})")
 
-        for sdf_file in tqdm(sdf_files, desc="GNINA scoring"):
+        def score_ligand(sdf_file):
             output_sdf = sdf_output_dir / sdf_file.name
             cmd = [
                 self.gnina_path,
@@ -400,7 +402,13 @@ class GninaScorer(PoseScorer):
                     f"gnina binary not found at {self.gnina_path}. "
                     "Please install gnina or use --scorer none."
                 )
-            
+            return sdf_file.name
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(score_ligand, sdf_file) for sdf_file in sdf_files]
+            for future in tqdm(as_completed(futures), total=len(sdf_files), desc="GNINA scoring"):
+                future.result()
+
     def select_top_poses(self, sdf_dir, output_dir, filters_path=None, n_samples=20):
         sdf_dir = Path(sdf_dir)
         output_dir = Path(output_dir)

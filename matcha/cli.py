@@ -324,6 +324,7 @@ def _print_usage_and_exit() -> None:
   --gpus TEXT              Multi-GPU ids for batch mode, e.g. 2,3
   --n-samples INT          Poses per ligand (default: 20)
   --scorer TEXT            gnina / custom / none (default: gnina)
+  --gnina-workers INT      Concurrent GNINA processes in batch mode (default: 10)
   --autobox-ligand PATH   Box center from reference ligand
   --center-x/y/z FLOAT    Manual box center (Å)
   --overwrite              Overwrite existing run
@@ -364,6 +365,7 @@ def run_matcha(
     scorer_path: Optional[Path] = typer.Option(None, "--scorer-path", help="Path to gnina binary or custom scorer script."),
     scorer_minimize: bool = typer.Option(True, "--scorer-minimize/--no-scorer-minimize", help="Minimize poses during scoring (gnina)."),
     gnina_batch_mode: str = typer.Option("per-ligand", "--gnina-batch-mode", help="GNINA scoring mode for batch runs (currently only per-ligand)."),
+    gnina_workers: int = typer.Option(10, "--gnina-workers", help="Maximum concurrent GNINA processes in batch mode (default: 4)."),
     physical_only: bool = typer.Option(False, "--physical-only/--keep-all-poses", help="Keep only PoseBusters-passing poses in outputs (default: False)."),
 ) -> None:
     if out is None:
@@ -374,6 +376,9 @@ def run_matcha(
 
     if n_samples < 1:
         console.print("[bold red]Error:[/bold red] --n-samples must be >= 1")
+        raise typer.Exit(code=1)
+    if gnina_workers < 1:
+        console.print("[bold red]Error:[/bold red] --gnina-workers must be >= 1")
         raise typer.Exit(code=1)
 
     # Lazy imports — heavy libraries loaded only when actually running docking.
@@ -547,6 +552,7 @@ def run_matcha(
             scorer_path=scorer_path,
             scorer_minimize=scorer_minimize,
             gnina_batch_mode=gnina_batch_mode,
+            gnina_workers=gnina_workers,
             physical_only=physical_only,
         )
         total_sec = time.perf_counter() - run_timer_start
@@ -665,10 +671,14 @@ def run_matcha(
                                    minimize=scorer_minimize)
             sdf_input = preds_root / dataset_name / "sdf_predictions"
             filters_path = preds_root / dataset_name / "filters_results_minimized.json"
+            score_kwargs = {}
             if scorer_type.startswith("gnina") and batch_mode:
                 if gnina_batch_mode != "per-ligand":
                     raise typer.BadParameter("--gnina-batch-mode currently supports only 'per-ligand'")
-            scorer.score_poses(str(receptor), str(sdf_input), str(sdf_scored), device=cuda_device_idx)
+                score_kwargs["workers"] = gnina_workers
+            scorer.score_poses(
+                str(receptor), str(sdf_input), str(sdf_scored), device=cuda_device_idx, **score_kwargs
+            )
             compute_fast_filters_from_sdf(conf, run_name, sdf_type='minimized', n_preds_to_use=n_samples)
             scorer.select_top_poses(str(sdf_scored), str(best_scored_dir),
                                     filters_path=str(filters_path), n_samples=n_samples)
