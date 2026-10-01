@@ -1,0 +1,19 @@
+[project]
+name = "matcha-nvmolkit-worker"
+version = "0.1.0"
+description = "Isolated nvMolKit worker process for Matcha conformer generation"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "rdkit>=2025.9.1",
+]
+
+[project.scripts]
+matcha-nvmolkit-worker = "matcha_nvmolkit_worker.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.9.18,<0.10.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = "src"
