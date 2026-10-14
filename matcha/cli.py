@@ -733,7 +733,7 @@ def run_matcha(
                         except (ValueError, TypeError):
                             continue
 
-    def _rank_samples(sample_metrics: List[dict]) -> List[Tuple[int, dict]]:
+    def _rank_samples(sample_metrics: List[dict]) -> List[Tuple[int, dict, int]]:
         has_gnina = any('gnina_score' in s for s in sample_metrics)
         ranked_indices = sorted(
             range(len(sample_metrics)),
@@ -742,22 +742,46 @@ def run_matcha(
                 float(sample_metrics[i].get("gnina_score", float("inf"))) if has_gnina else 0,
             ),
         )
-        return [(rank, sample_metrics[i]) for rank, i in enumerate(ranked_indices, start=1)]
+        return [(rank, sample_metrics[i], i) for rank, i in enumerate(ranked_indices, start=1)]
 
-    def _save_all_poses_for_uid(metrics_data, uid, out_path):
+    def _save_all_poses_for_uid(metrics_data, uid, out_path, best_path):
         if uid not in metrics_data:
             return [], 0, 0
-        sample_data = metrics_data[uid]
-        ranked = _rank_samples(sample_data["sample_metrics"])
+        sample_metrics = metrics_data[uid]["sample_metrics"]
+        ranked = _rank_samples(sample_metrics)
+        has_gnina = any('gnina_score' in s for s in sample_metrics)
         uid_real = uid.split("_mol")[0] if "_mol" in uid else uid
         poses_source = sdf_scored / f"{uid_real}.sdf"
         if not poses_source.exists():
             poses_source = preds_root / dataset_name / "sdf_predictions" / f"{uid_real}.sdf"
 
+        mols = []
         if poses_source.exists():
-            shutil.copyfile(poses_source, out_path)
+            supplier = Chem.SDMolSupplier(str(poses_source), removeHs=False, sanitize=False)
+            mols = [Chem.Mol(mol) if mol is not None else None for mol in supplier]
         else:
             logger.warning(f"Failed to locate poses SDF for {uid_real} under {preds_root / dataset_name}")
+
+        ordered = []
+        for _rank, sample, idx in ranked:
+            if idx >= len(mols) or mols[idx] is None:
+                continue
+            mol = mols[idx]
+            n_passed = int(sample.get("posebusters_filters_passed_count_fast", 0))
+            score = float(sample.get("gnina_score", float("inf"))) if has_gnina else 0.0
+            mol.SetProp("posebusters_filters_passed_count", str(n_passed))
+            mol.SetProp("matcha_ranking_score", format(score, ".16g"))
+            ordered.append(mol)
+
+        for path, to_write in ((out_path, ordered), (best_path, ordered[:1])):
+            writer = Chem.SDWriter(str(path))
+            writer.SetKekulize(False)
+            for mol in to_write:
+                try:
+                    writer.write(mol)
+                except Exception as exc:
+                    logger.warning(f"Failed to write {path}: {exc}")
+            writer.close()
         return ranked, len(ranked), len(ranked)
 
     def _get_best_sample_idx(pb_counts, gnina_scores=None):
@@ -779,27 +803,6 @@ def run_matcha(
         best_idx = _get_best_sample_idx(pb_counts, gnina_scores)
         return pb_counts, gnina_scores, has_gnina, best_idx
 
-    def _write_best_pose_sdf(mdata, best_idx, uid_label, dest_path, scored_path=None):
-        if scored_path is not None and scored_path.exists():
-            shutil.copyfile(scored_path, dest_path)
-        else:
-            best_sample = mdata["sample_metrics"][best_idx]
-            orig_mol = mdata["orig_mol"]
-            writer = Chem.SDWriter(str(dest_path))
-            writer.SetKekulize(False)
-            mol = copy.deepcopy(orig_mol)
-            conf = Chem.Conformer(orig_mol.GetNumAtoms())
-            for idx, (x, y, z) in enumerate(best_sample["pred_pos"]):
-                conf.SetAtomPosition(idx, (float(x), float(y), float(z)))
-            mol.RemoveAllConformers()
-            mol.AddConformer(conf, assignId=True)
-            mol.SetProp("_Name", f"{uid_label}_best")
-            try:
-                writer.write(mol)
-            except Exception as exc:
-                logger.warning(f"Failed to write best pose SDF for {uid_label}: {exc}")
-            writer.close()
-
     def _format_pose_ranking_lines(ranked_samples, has_gnina):
         lines = []
         if has_gnina:
@@ -808,7 +811,7 @@ def run_matcha(
         else:
             lines.append("  rank  pb  checks  buried_frac")
             lines.append("  ------------------------------")
-        for rank, sample in ranked_samples:
+        for rank, sample, _orig_idx in ranked_samples:
             pb_count = int(sample.get("posebusters_filters_passed_count_fast", 0))
             pb_flags = sample.get("posebusters_filters_fast", [])
             checks = "".join(
@@ -887,10 +890,8 @@ def run_matcha(
         uid, mdata = next(iter(metrics.items()))
         pb_counts, gnina_scores, has_gnina, best_idx = _get_sample_stats(mdata["sample_metrics"])
 
-        scored_path = best_scored_dir / f"{run_name}.sdf" if scorer_used else None
-        _write_best_pose_sdf(mdata, best_idx, uid, resolved_out, scored_path=scored_path)
-
-        ranked_samples, saved_poses, total_samples = _save_all_poses_for_uid(metrics, uid, all_poses_dest)
+        ranked_samples, saved_poses, total_samples = _save_all_poses_for_uid(
+            metrics, uid, all_poses_dest, resolved_out)
 
         end_time = datetime.now(timezone.utc)
         runtime = (end_time - start_time).total_seconds()
@@ -1005,10 +1006,8 @@ def run_matcha(
         best_dest = best_dir / f"{mol_uid}.sdf"
         all_dest = all_dir / f"{mol_uid}_poses.sdf"
 
-        scored_path = best_scored_dir / f"{mol_uid}.sdf" if scorer_used else None
-        _write_best_pose_sdf(mdata, best_idx, mol_uid, best_dest, scored_path=scored_path)
-
-        ranked_samples, saved_poses, total_samples = _save_all_poses_for_uid(metrics, metrics_key, all_dest)
+        ranked_samples, saved_poses, total_samples = _save_all_poses_for_uid(
+            metrics, metrics_key, all_dest, best_dest)
 
         ligand_input = (run_workdir / "work" / "datasets" / "any_conf" / mol_uid / f"{mol_uid}_ligand.sdf").resolve()
         per_log_path = per_log_dir / f"{mol_uid}.log"
