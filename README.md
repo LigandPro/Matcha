@@ -15,7 +15,7 @@ Matcha is a molecular docking pipeline that combines multi-stage flow matching w
 ![pipeline](data/img/matcha_pipeline.png)
 ![architecture](data/img/matcha_architecture.png)
 
-Compared to various approaches, Matcha demonstrates superior performance on Astex and PDBBind test sets in terms of docking success rate and physical plausibility. Moreover, our method works approximately 31× faster than modern large-scale co-folding models.
+Compared to various approaches, Matcha demonstrates superior performance on Astex and PDBBind test sets in terms of docking success rate and physical plausibility. Moreover, our method works approximately 28× faster than modern large-scale co-folding models.
 
 <img src="data/img/time.png" alt="results" width="500"/>
 
