@@ -230,21 +230,36 @@ def test_cli_matches_committed_baseline_for_scores_and_filters(
     _assert_snapshot_matches_baseline(snapshot, baseline)
 
 
-def test_all_poses_output_copies_minimized_predictions(
+def test_output_sdfs_are_ranked_and_annotated(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
     run_name = "copied_poses"
     _run_local_cli_repro_case(tmp_path, monkeypatch, run_name)
 
     run_dir = tmp_path / "out" / run_name
-    copied_all_poses = run_dir / f"{run_name}_poses.sdf"
-    minimized_predictions = (
-        run_dir / "work" / "runs" / run_name / "any_conf" / "minimized_sdf_predictions" / f"{run_name}.sdf"
-    )
+    poses_path = run_dir / f"{run_name}_poses.sdf"
+    best_path = run_dir / f"{run_name}_best.sdf"
 
-    assert copied_all_poses.exists()
-    assert minimized_predictions.exists()
-    assert copied_all_poses.read_text(encoding="utf-8") == minimized_predictions.read_text(encoding="utf-8")
+    def _read(path: Path):
+        supplier = Chem.SDMolSupplier(str(path), removeHs=False, sanitize=False)
+        return [mol for mol in supplier if mol is not None]
+
+    poses = _read(poses_path)
+    # filters [4, 3, 4, 3] and scores [100, 99, 98, 97] → order 2, 0, 3, 1
+    assert [mol.GetProp("_Name") for mol in poses] == [
+        f"{run_name}_pose_2",
+        f"{run_name}_pose_0",
+        f"{run_name}_pose_3",
+        f"{run_name}_pose_1",
+    ]
+    assert [mol.GetProp("posebusters_filters_passed_count") for mol in poses] == ["4", "4", "3", "3"]
+    assert [float(mol.GetProp("matcha_ranking_score")) for mol in poses] == [98.0, 100.0, 97.0, 99.0]
+
+    best = _read(best_path)
+    assert len(best) == 1
+    assert best[0].GetProp("_Name") == f"{run_name}_pose_2"
+    assert best[0].GetProp("posebusters_filters_passed_count") == "4"
+    assert float(best[0].GetProp("matcha_ranking_score")) == 98.0
 
 
 def test_prepare_batch_dataset_cleans_existing_sample_dir(tmp_path: Path):

@@ -1,10 +1,12 @@
-# Matcha: Multi-Stage Riemannian Flow Matching for Accurate and Physically Valid Molecular Docking
+# <img src="data/img/Matcha.png" alt="Matcha" width="48"> Matcha: Multi-Stage Riemannian Flow Matching for Accurate and Physically Valid Molecular Docking
 
 This is an official implementation of the paper [Matcha: Multi-Stage Riemannian Flow Matching for Accurate and Physically Valid Molecular Docking](https://arxiv.org/abs/2510.14586).
 
 ## News
 
-We have updated the repository and the [Hugging Face checkpoints](https://huggingface.co/LigandPro/Matcha): the current code and weights correspond to the improved pipeline and **much better results**! The previous version, however, remains available as tag `v1` (`git checkout v1`).
+[22.09.2026] Matcha has become even better! Meet the **new Matcha scoring** which improves docking success rate and physical plausibility on all datasets.
+
+[29.04.2026] We have updated the repository and the [Hugging Face checkpoints](https://huggingface.co/LigandPro/Matcha): the current code and weights correspond to the improved pipeline and **much better results**! The previous version, however, remains available as tag `v1` (`git checkout v1`).
 
 ## Overview
 
@@ -13,7 +15,7 @@ Matcha is a molecular docking pipeline that combines multi-stage flow matching w
 ![pipeline](data/img/matcha_pipeline.png)
 ![architecture](data/img/matcha_architecture.png)
 
-Compared to various approaches, Matcha demonstrates superior performance on Astex and PDBBind test sets in terms of docking success rate and physical plausibility. Moreover, our method works approximately 31× faster than modern large-scale co-folding models.
+Compared to various approaches, Matcha demonstrates superior performance on Astex and PDBBind test sets in terms of docking success rate and physical plausibility. Moreover, our method works approximately 28× faster than modern large-scale co-folding models.
 
 <img src="data/img/time.png" alt="results" width="500"/>
 
