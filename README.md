@@ -1,4 +1,13 @@
-# <img src="data/img/Matcha.png" alt="Matcha" width="48"> Matcha: Multi-Stage Riemannian Flow Matching for Accurate and Physically Valid Molecular Docking
+<table>
+  <tr>
+    <td>
+      <img src="data/img/Matcha.png" alt="Matcha" width="72">
+    </td>
+    <td>
+      <h1>Matcha: Multi-Stage Riemannian Flow Matching for Accurate and Physically Valid Molecular Docking</h1>
+    </td>
+  </tr>
+</table>
 
 This is an official implementation of the paper [Matcha: Multi-Stage Riemannian Flow Matching for Accurate and Physically Valid Molecular Docking](https://arxiv.org/abs/2510.14586).
 
