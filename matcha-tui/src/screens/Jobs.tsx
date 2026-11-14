@@ -90,9 +90,10 @@ export function JobsScreen(): React.ReactElement {
       {/* Table header */}
       <Box>
         <Text color="gray" dimColor>  Status  </Text>
-        <Text color="gray" dimColor>Job ID           </Text>
+        <Text color="gray" dimColor>Run Name              </Text>
         <Text color="gray" dimColor>Progress  </Text>
-        <Text color="gray" dimColor>Details</Text>
+        <Text color="gray" dimColor>Stage         </Text>
+        <Text color="gray" dimColor>Mode</Text>
       </Box>
 
       {/* Jobs list */}
@@ -103,6 +104,10 @@ export function JobsScreen(): React.ReactElement {
         const progress = job.progress?.percent ?? 0;
         const stage = job.progress?.stage ?? 'init';
 
+        // Extract meaningful info from config
+        const runName = job.config.params?.runName || job.id.substring(0, 16);
+        const mode = job.config.mode === 'batch' ? 'batch' : 'single';
+
         return (
           <Box key={job.id}>
             <Text color={isSelected ? 'cyan' : 'gray'}>
@@ -110,9 +115,10 @@ export function JobsScreen(): React.ReactElement {
             </Text>
             <Text color={statusColor}>{statusIcon}</Text>
             <Text> {job.status.padEnd(8)}</Text>
-            <Text> {job.id.substring(0, 16).padEnd(17)}</Text>
+            <Text> {runName.substring(0, 20).padEnd(21)}</Text>
             <Text color="white"> {progress.toString().padStart(3)}%</Text>
-            <Text color="gray" dimColor> {stage}</Text>
+            <Text color="gray" dimColor> {stage.padEnd(12)}</Text>
+            <Text color="magenta" dimColor> {mode}</Text>
           </Box>
         );
       })}

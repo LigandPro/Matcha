@@ -10,7 +10,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import { useStore } from '../store/index.js';
 import { icons, getStatusColor } from '../utils/colors.js';
-import { formatDuration, truncatePath } from '../utils/format.js';
+import { formatDuration, truncatePath, makeClickableLink, shortenPath } from '../utils/format.js';
 import { generateMolstarViewer } from '../utils/molstar-viewer.js';
 import { isKey } from '../utils/keyboard.js';
 import { getBridge } from '../services/python-bridge.js';
@@ -19,22 +19,9 @@ import { DataRow, Section, TopPosesTable } from '../components/index.js';
 import type { BatchLigandStatus, PoseResult } from '../types/index.js';
 import { BatchDetailView } from './Results/BatchDetailView.js';
 import { SingleModeView } from './Results/SingleModeView.js';
+import { TABLE_COLUMN_WIDTHS, TEXT_LIMITS, UI_DIMENSIONS } from '../constants/ui.js';
 
 type MenuAction = 'new' | 'view3d' | 'toggle' | 'back' | 'home';
-
-// Helper to make clickable links in terminal (OSC 8 escape codes)
-function makeClickableLink(url: string, text: string): string {
-  return `\x1b]8;;file://${url}\x1b\\${text}\x1b]8;;\x1b\\`;
-}
-
-// Helper to shorten path with ~ for home directory
-function shortenPath(fullPath: string): string {
-  const homeDir = os.homedir();
-  if (fullPath.startsWith(homeDir)) {
-    return fullPath.replace(homeDir, '~');
-  }
-  return fullPath;
-}
 
 export function ResultsScreen(): React.ReactElement {
   const setScreen = useStore((s) => s.setScreen);
@@ -488,7 +475,7 @@ export function ResultsScreen(): React.ReactElement {
               <Text bold color="white" underline>Top Ligands by Error Estimate</Text>
               <Box flexDirection="column" marginTop={1}>
                 <Box>
-                  <Text color="gray" bold>{'  '}{'Name'.padEnd(28)}{'Error'.padEnd(10)}{'PB'.padEnd(6)}Checks</Text>
+                  <Text color="gray" bold>{'  '}{'Name'.padEnd(TABLE_COLUMN_WIDTHS.NAME)}{'Error'.padEnd(TABLE_COLUMN_WIDTHS.ERROR)}{'PB'.padEnd(TABLE_COLUMN_WIDTHS.PB)}Checks</Text>
                 </Box>
                 {topLigands.map((item, idx) => (
                   <LigandResultRow
@@ -505,9 +492,9 @@ export function ResultsScreen(): React.ReactElement {
           {viewMode === 'ligands' && results.ligandStatuses && (
             <Box flexDirection="column" marginTop={1}>
               <Text bold color="white" underline>All Ligands</Text>
-              <Box flexDirection="column" marginTop={1} height={15}>
+              <Box flexDirection="column" marginTop={1} height={UI_DIMENSIONS.LIGAND_LIST_HEIGHT}>
                 <Box>
-                  <Text color="gray" bold>{'  '}{'Name'.padEnd(28)}{'Error'.padEnd(10)}{'PB'.padEnd(6)}Checks</Text>
+                  <Text color="gray" bold>{'  '}{'Name'.padEnd(TABLE_COLUMN_WIDTHS.NAME)}{'Error'.padEnd(TABLE_COLUMN_WIDTHS.ERROR)}{'PB'.padEnd(TABLE_COLUMN_WIDTHS.PB)}Checks</Text>
                 </Box>
                 {results.ligandStatuses.map((lig, idx) => (
                   <LigandResultRow key={idx} ligand={lig} selected={idx === selectedLigandIndex} />
@@ -545,8 +532,8 @@ function LigandResultRow({
   const statusColor = getStatusColor(ligand.status);
 
   const pbChecks = ligand.pb_count !== undefined
-    ? `${ligand.pb_count}/4`.padEnd(6)
-    : '-'.padEnd(6);
+    ? `${ligand.pb_count}/4`.padEnd(TABLE_COLUMN_WIDTHS.PB)
+    : '-'.padEnd(TABLE_COLUMN_WIDTHS.PB);
   const pbIcons =
     ligand.pb_count !== undefined
       ? Array.from({ length: 4 }, (_, i) => (i < ligand.pb_count! ? icons.check : icons.cross)).join('')
@@ -556,15 +543,15 @@ function LigandResultRow({
     <Box>
       <Text color={selected ? 'cyan' : 'gray'}>{selected ? '▸ ' : '  '}</Text>
       <Text color={selected ? 'cyan' : 'white'} bold={selected}>
-        {ligand.name.substring(0, 27).padEnd(28)}
+        {ligand.name.substring(0, TABLE_COLUMN_WIDTHS.NAME - 1).padEnd(TABLE_COLUMN_WIDTHS.NAME)}
       </Text>
       <Text color="cyan" dimColor={!selected}>
-        {ligand.error_estimate !== undefined ? ligand.error_estimate.toFixed(3).padEnd(10) : '-'.padEnd(10)}
+        {ligand.error_estimate !== undefined ? ligand.error_estimate.toFixed(3).padEnd(TABLE_COLUMN_WIDTHS.ERROR) : '-'.padEnd(TABLE_COLUMN_WIDTHS.ERROR)}
       </Text>
       <Text color={ligand.pb_count === 4 ? 'green' : 'yellow'} dimColor={!selected}>{pbChecks}</Text>
       <Text color={statusColor} dimColor={!selected}>{pbIcons}</Text>
       {ligand.status === 'failed' && ligand.error_message && (
-        <Text color="red"> {ligand.error_message.substring(0, 20)}</Text>
+        <Text color="red"> {ligand.error_message.substring(0, TEXT_LIMITS.ERROR_MESSAGE)}</Text>
       )}
     </Box>
   );

@@ -126,9 +126,8 @@ export function App(): React.ReactElement {
       }
     }
 
-    // Help on '?'
+    // Help on '?' - keyboard shortcuts are shown at bottom of each screen
     if (input === '?') {
-      // TODO: Show help overlay
       return;
     }
 

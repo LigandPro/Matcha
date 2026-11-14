@@ -40,6 +40,10 @@ interface AppState {
   setJobConfig: (config: Partial<JobConfig>) => void;
   resetJobConfig: () => void;
 
+  // Pending job config (snapshot taken when starting a job, used after backend returns job_id)
+  pendingJobConfig: JobConfig | null;
+  setPendingJobConfig: (config: JobConfig | null) => void;
+
   // Running job state (legacy - kept for backward compatibility)
   isRunning: boolean;
   progress: ProgressInfo | null;
@@ -130,6 +134,10 @@ export const useStore = create<AppState>((set, get) => ({
       jobConfig: { ...state.jobConfig, ...config },
     })),
   resetJobConfig: () => set({ jobConfig: { ...initialJobConfig } }),
+
+  // Pending job config
+  pendingJobConfig: null,
+  setPendingJobConfig: (config) => set({ pendingJobConfig: config }),
 
   // Running state
   isRunning: false,

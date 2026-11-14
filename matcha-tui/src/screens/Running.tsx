@@ -9,10 +9,11 @@ import { useStore } from '../store/index.js';
 import { getBridge, initBridge, closeBridge, type ProgressEvent } from '../services/index.js';
 import { ProgressBar } from '../components/ProgressBar.js';
 import { icons, getStageColor, getStatusColor } from '../utils/colors.js';
-import { PIPELINE_STAGES, type PipelineStage, type PoseResult } from '../types/index.js';
+import { PIPELINE_STAGES, type PipelineStage, type PoseResult, type ProgressInfo } from '../types/index.js';
 import { formatDuration, generateRunName } from '../utils/format.js';
 import { isKey } from '../utils/keyboard.js';
-import { logger } from '../utils/logger.js';
+import { logger, type LogLevel } from '../utils/logger.js';
+import { TABLE_COLUMN_WIDTHS, TEXT_LIMITS, UI_DIMENSIONS } from '../constants/ui.js';
 
 interface StageStatus {
   status: 'pending' | 'running' | 'done' | 'error';
@@ -28,6 +29,13 @@ interface LigandStatus {
   error_estimate?: number;
   pb_count?: number;
   error_message?: string;
+}
+
+interface DebugEventData {
+  level: LogLevel;
+  component: string;
+  message: string;
+  data?: Record<string, unknown>;
 }
 
 interface BatchState {
@@ -104,7 +112,11 @@ export function RunningScreen(): React.ReactElement {
   const currentJobId = useStore((s) => s.currentJobId);
   const setCurrentJob = useStore((s) => s.setCurrentJob);
   const activeJobs = useStore((s) => s.activeJobs);
+  const addJob = useStore((s) => s.addJob);
   const updateJobProgress = useStore((s) => s.updateJobProgress);
+  const updateJobStatus = useStore((s) => s.updateJobStatus);
+  const pendingJobConfig = useStore((s) => s.pendingJobConfig);
+  const setPendingJobConfig = useStore((s) => s.setPendingJobConfig);
 
   // Initialize all stages with pending status to avoid race conditions
   const [stages, setStages] = useState<Record<string, StageStatus>>(() => {
@@ -171,11 +183,37 @@ export function RunningScreen(): React.ReactElement {
     }
   }, [isBatch, stages]);
 
+  // Restore state when resuming a job
+  useEffect(() => {
+    if (currentJobId && activeJobs.has(currentJobId)) {
+      const job = activeJobs.get(currentJobId)!;
+
+      // Restore running state
+      if (job.status === 'running') {
+        setRunning(true);
+      }
+
+      // Restore progress if available
+      if (job.progress) {
+        // Note: stages are local to this component and will be updated by incoming events
+        // We could restore them from somewhere else if needed
+        addLog(`Restored job ${currentJobId}, status: ${job.status}`);
+      }
+    }
+  }, []); // Run once on mount
+
   // Start docking job on mount
   useEffect(() => {
+    // If there's already a currentJobId in store, we're resuming an existing job
+    // Don't start a new one, just re-subscribe to events
+    const isResumingJob = !!currentJobId;
+
     if (jobStartedRef.current) return;
     jobStartedRef.current = true;
-    setRunning(true);
+
+    if (!isResumingJob) {
+      setRunning(true);
+    }
 
     // Build config from jobConfig
     const config = {
@@ -199,22 +237,31 @@ export function RunningScreen(): React.ReactElement {
     addLog(`Starting docking with config: ${JSON.stringify(config)}`);
 
     // Initialize bridge first, then start docking
-    const startJob = async () => {
+    const startOrResumeJob = async () => {
       try {
-        // Initialize Python backend
-        addLog('Initializing Python backend...');
-        // TUI is in matcha-tui/ subdirectory, but Python package is in parent directory
-        // Use parent directory as project root so 'uv run python -m matcha.tui.backend' can find the package
-        const projectRoot = process.env.MATCHA_ROOT || path.join(process.cwd(), '..');
-        addLog(`Project root: ${projectRoot}`);
+        // Get existing bridge or initialize if needed
+        let bridge;
+        let stderrBuffer = ''; // Capture all stderr
 
-        // Capture all stderr before bridge starts
-        let stderrBuffer = '';
+        try {
+          bridge = getBridge();
+          if (!bridge.isReady()) {
+            throw new Error('Bridge not ready');
+          }
+          addLog('Resuming existing job...');
+        } catch {
+          // Initialize Python backend
+          addLog('Initializing Python backend...');
+          // TUI is in matcha-tui/ subdirectory, but Python package is in parent directory
+          // Use parent directory as project root so 'uv run python -m matcha.tui.backend' can find the package
+          const projectRoot = process.env.MATCHA_ROOT || path.join(process.cwd(), '..');
+          addLog(`Project root: ${projectRoot}`);
 
-        const bridge = await initBridge({
-          projectRoot,
-          useUv: true,
-        });
+          bridge = await initBridge({
+            projectRoot,
+            useUv: true,
+          });
+        }
 
         // Listen for stderr to help with debugging
         bridge.on('stderr', (data: string) => {
@@ -223,7 +270,7 @@ export function RunningScreen(): React.ReactElement {
         });
 
         // Listen for debug events from backend
-        bridge.on('debug', (event: any) => {
+        bridge.on('debug', (event: DebugEventData) => {
           if (debugMode) {
             // Add to store for UI display
             addDebugLog({
@@ -297,6 +344,17 @@ export function RunningScreen(): React.ReactElement {
               ...prev,
               [event.stage!]: { ...prev[event.stage!], progress: event.progress ?? 0, message: event.message },
             }));
+
+            // Update progress in activeJobs
+            if (event.job_id && event.stage && event.progress !== undefined) {
+              const progressInfo: ProgressInfo = {
+                job_id: event.job_id,
+                stage: event.stage as PipelineStage,
+                percent: event.progress,
+                currentLigand: event.current_ligand,
+              };
+              updateJobProgress(event.job_id, progressInfo);
+            }
           } else if (event.type === 'stage_done' && event.stage) {
             setStages((prev) => ({
               ...prev,
@@ -308,6 +366,11 @@ export function RunningScreen(): React.ReactElement {
             setRunning(false);
             if (isBatch) {
               setBatchProgress(100);
+            }
+
+            // Update job status in activeJobs
+            if (event.job_id) {
+              updateJobStatus(event.job_id, 'completed');
             }
             // Use event.poses from backend (aggregated data for all ligands)
             // Local 'poses' state is only for displaying current ligand during execution
@@ -355,23 +418,57 @@ export function RunningScreen(): React.ReactElement {
               setNotification('✓ Docking completed! View results in History.');
             }
           } else if (event.type === 'error') {
+            // Update job status
+            if (event.job_id) {
+              updateJobStatus(event.job_id, 'failed');
+            }
+
             setError(event.message ?? 'Unknown error');
             setRunning(false);
           } else if (event.type === 'cancelled') {
+            // Update job status
+            if (event.job_id) {
+              updateJobStatus(event.job_id, 'cancelled');
+            }
+
             setRunning(false);
             setScreen('welcome');
           }
         });
 
-        addLog('Backend initialized, starting docking...');
+        addLog('Backend initialized...');
         setBridgeReady(true);
 
-        // Start docking
-        const { job_id } = await bridge.startDocking(config);
+        // Only start new docking job if not resuming
+        if (!isResumingJob) {
+          addLog('Starting new docking job...');
+          const { job_id } = await bridge.startDocking(config);
+          addLog(`Received job_id: ${job_id}`);
 
-        // Save job_id for tracking
-        setCurrentJob(job_id);
-        addLog(`Job started with ID: ${job_id}`);
+          // Add job to activeJobs Map with snapshot config
+          if (pendingJobConfig) {
+            addLog(`Adding job to activeJobs with config: ${JSON.stringify(pendingJobConfig)}`);
+            addJob({
+              id: job_id,
+              config: pendingJobConfig,
+              status: 'running',
+              startTime: new Date().toISOString(),
+            });
+            addLog(`Job added to activeJobs, total jobs: ${activeJobs.size + 1}`);
+
+            // Clear pending config
+            setPendingJobConfig(null);
+          } else {
+            addLog(`WARNING: pendingJobConfig is null, job NOT added to activeJobs!`);
+          }
+
+          // Save job_id for tracking
+          setCurrentJob(job_id);
+          addLog(`Job started with ID: ${job_id}`);
+        } else {
+          addLog(`Resuming job ${currentJobId}, not starting new docking job`);
+          setRunning(true);
+        }
       } catch (err) {
         const error = err as Error;
         addLog(`Error: ${error.message}`);
@@ -381,7 +478,7 @@ export function RunningScreen(): React.ReactElement {
       }
     };
 
-    startJob();
+    startOrResumeJob();
 
     // No cleanup on unmount - allow background job to continue
     // Backend will be cleaned up when app exits
@@ -426,7 +523,7 @@ export function RunningScreen(): React.ReactElement {
         <Box flexDirection="column" marginTop={1}>
           <Text bold color="white">Batch Progress</Text>
           <Box marginTop={1}>
-            <ProgressBar percent={batchProgress} width={40} showPercent />
+            <ProgressBar percent={batchProgress} width={UI_DIMENSIONS.PROGRESS_BAR_WIDTH} showPercent />
           </Box>
         </Box>
       )}
@@ -456,8 +553,8 @@ export function RunningScreen(): React.ReactElement {
           <Box flexDirection="column" marginTop={1}>
             {poses.slice(0, 5).map((pose) => (
               <Box key={pose.rank}>
-                <Text color="white">{String(pose.rank).padEnd(6)}</Text>
-                <Text color="magenta">{(pose.error_estimate ?? 0).toFixed(3).padEnd(12)}</Text>
+                <Text color="white">{String(pose.rank).padEnd(TABLE_COLUMN_WIDTHS.RANK)}</Text>
+                <Text color="magenta">{(pose.error_estimate ?? 0).toFixed(3).padEnd(TABLE_COLUMN_WIDTHS.ERROR_ESTIMATE)}</Text>
                 <Text color={pose.pb_count === 4 ? 'green' : 'yellow'}>{pose.pb_count ?? 0}/4</Text>
               </Box>
             ))}
@@ -469,12 +566,12 @@ export function RunningScreen(): React.ReactElement {
       {isBatch && ligandStatuses.length > 0 && (
         <Box flexDirection="column" marginTop={1}>
           <Text bold color="white">Ligand Status</Text>
-          <Box flexDirection="column" marginTop={1} height={Math.min(8, ligandStatuses.length)}>
-            {ligandStatuses.slice(0, 8).map((lig, idx) => (
+          <Box flexDirection="column" marginTop={1} height={Math.min(UI_DIMENSIONS.MAX_VISIBLE_LIGANDS, ligandStatuses.length)}>
+            {ligandStatuses.slice(0, UI_DIMENSIONS.MAX_VISIBLE_LIGANDS).map((lig, idx) => (
               <LigandRow key={idx} ligand={lig} isCurrent={idx === currentLigandIndex} />
             ))}
-            {ligandStatuses.length > 8 && (
-              <Text color="gray">... and {ligandStatuses.length - 8} more</Text>
+            {ligandStatuses.length > UI_DIMENSIONS.MAX_VISIBLE_LIGANDS && (
+              <Text color="gray">... and {ligandStatuses.length - UI_DIMENSIONS.MAX_VISIBLE_LIGANDS} more</Text>
             )}
           </Box>
         </Box>
@@ -491,10 +588,10 @@ function StageRow({ stage, status }: { stage: { id: PipelineStage; name: string 
   return (
     <Box>
       <Text color={color}>{icon} </Text>
-      <Text color={color} bold={status?.status === 'running'}>{stage.name.padEnd(20)}</Text>
+      <Text color={color} bold={status?.status === 'running'}>{stage.name.padEnd(TABLE_COLUMN_WIDTHS.STAGE_NAME)}</Text>
       {status?.status === 'running' && (
-        <Box marginLeft={1} width={30}>
-          <ProgressBar percent={status.progress} width={20} showPercent />
+        <Box marginLeft={1} width={UI_DIMENSIONS.PROGRESS_BOX_WIDTH}>
+          <ProgressBar percent={status.progress} width={UI_DIMENSIONS.PROGRESS_BAR_COMPACT_WIDTH} showPercent />
         </Box>
       )}
       {status?.status === 'done' && status.elapsed !== undefined && (
@@ -518,7 +615,7 @@ function LigandRow({ ligand, isCurrent }: { ligand: LigandStatus; isCurrent: boo
     <Box>
       <Text color={statusColor}>{statusIcon} </Text>
       <Text color={isCurrent ? 'magenta' : 'white'} bold={isCurrent}>
-        {ligand.name.substring(0, 25).padEnd(25)}
+        {ligand.name.substring(0, TEXT_LIMITS.LIGAND_NAME).padEnd(TEXT_LIMITS.LIGAND_NAME)}
       </Text>
       {ligand.status === 'completed' && ligand.error_estimate !== undefined && (
         <>
@@ -529,7 +626,7 @@ function LigandRow({ ligand, isCurrent }: { ligand: LigandStatus; isCurrent: boo
         </>
       )}
       {ligand.status === 'failed' && ligand.error_message && (
-        <Text color="red"> {ligand.error_message.substring(0, 30)}</Text>
+        <Text color="red"> {ligand.error_message.substring(0, TEXT_LIMITS.ERROR_MESSAGE_RUNNING)}</Text>
       )}
     </Box>
   );

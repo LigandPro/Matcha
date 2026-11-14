@@ -10,6 +10,7 @@ import { getBridge, initBridge } from '../services/index.js';
 import type { FileInfo } from '../services/python-bridge.js';
 import { logger } from '../utils/logger.js';
 import { useStore } from '../store/index.js';
+import { truncatePath } from '../utils/format.js';
 
 interface FileBrowserProps {
   /** Type of field for validation (receptor or ligand) */
@@ -44,19 +45,22 @@ export function FileBrowser({
   onSelect,
   onCancel,
 }: FileBrowserProps): React.ReactElement {
+  type LoadingState =
+    | { status: 'idle' }
+    | { status: 'initializing' }
+    | { status: 'loading' }
+    | { status: 'error'; message: string };
+
   const [currentDirectory, setCurrentDirectory] = useState(path.resolve(initialPath));
   const [items, setItems] = useState<FileItem[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
-  const [isLoading, setIsLoading] = useState(true);
-  const [isInitializing, setIsInitializing] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [loadingState, setLoadingState] = useState<LoadingState>({ status: 'loading' });
 
   const debugMode = useStore((s) => s.debugMode);
 
   // Load directory contents
   const loadDirectory = async (dirPath: string) => {
-    setIsLoading(true);
-    setError(null);
+    setLoadingState({ status: 'loading' });
 
     try {
       if (debugMode) {
@@ -69,7 +73,7 @@ export function FileBrowser({
         if (debugMode) {
           logger.info('FileBrowser', 'Backend not ready, initializing...');
         }
-        setIsInitializing(true);
+        setLoadingState({ status: 'initializing' });
         const projectRoot = process.env.MATCHA_ROOT || path.join(process.cwd(), '..');
         try {
           bridge = await initBridge({ projectRoot, useUv: true });
@@ -82,9 +86,8 @@ export function FileBrowser({
             logger.error('FileBrowser', errMsg);
           }
           throw new Error(errMsg);
-        } finally {
-          setIsInitializing(false);
         }
+        setLoadingState({ status: 'loading' });
       }
 
       // Load files from backend
@@ -121,15 +124,14 @@ export function FileBrowser({
       setItems(withParent);
       setCurrentDirectory(resolvedPath);
       setSelectedIndex(0); // Reset selection when directory changes
+      setLoadingState({ status: 'idle' });
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Failed to load directory';
       if (debugMode) {
         logger.error('FileBrowser', 'Error loading directory', { error: errorMsg, dirPath });
       }
-      setError(errorMsg);
+      setLoadingState({ status: 'error', message: errorMsg });
       setItems([]);
-    } finally {
-      setIsLoading(false);
     }
   };
 
@@ -157,7 +159,7 @@ export function FileBrowser({
 
   // Handle keyboard input for navigation
   useInput((input, key) => {
-    if (isLoading || isInitializing) return; // Disable navigation while loading
+    if (loadingState.status === 'loading' || loadingState.status === 'initializing') return; // Disable navigation while loading
 
     if (key.upArrow) {
       setSelectedIndex((i) => Math.max(0, i - 1));
@@ -172,14 +174,6 @@ export function FileBrowser({
     }
   });
 
-  // Truncate path for display
-  const truncatePath = (pathStr: string, maxLength: number): string => {
-    if (pathStr.length <= maxLength) return pathStr;
-    const parts = pathStr.split(path.sep);
-    if (parts.length <= 3) return `...${pathStr.slice(-maxLength)}`;
-    return `${parts[0]}${path.sep}...${path.sep}${parts[parts.length - 1]}`;
-  };
-
   // Calculate visible items for virtualization (show 20 items at a time)
   const VISIBLE_ITEMS = 20;
   const visibleItems = useMemo(() => {
@@ -191,11 +185,11 @@ export function FileBrowser({
     }));
   }, [items, selectedIndex]);
 
-  if (isLoading || isInitializing) {
+  if (loadingState.status === 'loading' || loadingState.status === 'initializing') {
     return (
       <Box flexDirection="column" paddingX={1}>
         <Text color="yellow">
-          {isInitializing ? 'Initializing backend...' : 'Loading directory...'}
+          {loadingState.status === 'initializing' ? 'Initializing backend...' : 'Loading directory...'}
         </Text>
         <Box marginTop={1}>
           <Text color="gray">[Esc] Cancel</Text>
@@ -204,10 +198,10 @@ export function FileBrowser({
     );
   }
 
-  if (error) {
+  if (loadingState.status === 'error') {
     return (
       <Box flexDirection="column" paddingX={1}>
-        <Text color="red">Error: {error}</Text>
+        <Text color="red">Error: {loadingState.message}</Text>
         <Box marginTop={1}>
           <Text color="gray">ESC Cancel</Text>
         </Box>

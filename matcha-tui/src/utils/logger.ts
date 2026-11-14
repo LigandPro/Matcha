@@ -9,7 +9,7 @@ export interface LogEntry {
   level: LogLevel;
   component: string;
   message: string;
-  data?: any;
+  data?: Record<string, unknown>;
 }
 
 const MAX_LOG_SIZE = 10 * 1024 * 1024; // 10MB
@@ -90,7 +90,7 @@ export class Logger {
     }
   }
 
-  private log(level: LogLevel, component: string, message: string, data?: any): void {
+  private log(level: LogLevel, component: string, message: string, data?: Record<string, unknown>): void {
     if (!this.debugMode && level === 'debug') {
       return; // Skip debug logs if not in debug mode
     }
@@ -122,19 +122,19 @@ export class Logger {
     }
   }
 
-  debug(component: string, message: string, data?: any): void {
+  debug(component: string, message: string, data?: Record<string, unknown>): void {
     this.log('debug', component, message, data);
   }
 
-  info(component: string, message: string, data?: any): void {
+  info(component: string, message: string, data?: Record<string, unknown>): void {
     this.log('info', component, message, data);
   }
 
-  warn(component: string, message: string, data?: any): void {
+  warn(component: string, message: string, data?: Record<string, unknown>): void {
     this.log('warn', component, message, data);
   }
 
-  error(component: string, message: string, data?: any): void {
+  error(component: string, message: string, data?: Record<string, unknown>): void {
     this.log('error', component, message, data);
   }
 

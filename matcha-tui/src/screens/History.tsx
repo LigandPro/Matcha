@@ -14,6 +14,18 @@ import { isKey } from '../utils/keyboard.js';
 import { parseRuntimeFromLog } from '../utils/runtime.js';
 import type { BatchLigandStatus, JobResults, PoseResult } from '../types/index.js';
 import { LoadingState, EmptyState } from '../components/index.js';
+import { TABLE_COLUMN_WIDTHS, TEXT_LIMITS } from '../constants/ui.js';
+
+interface ApiError {
+  message: string;
+  code?: string;
+}
+
+type DeleteState =
+  | { status: 'idle' }
+  | { status: 'confirming' }
+  | { status: 'deleting' }
+  | { status: 'error'; message: string };
 
 interface RunInfo {
   name: string;
@@ -48,18 +60,14 @@ export function HistoryScreen(): React.ReactElement {
   const [selectedDetails, setSelectedDetails] = useState<RunDetails | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingResults, setLoadingResults] = useState(false);
-  const [confirmDelete, setConfirmDelete] = useState(false);
-  const [deleting, setDeleting] = useState(false);
-  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [deleteState, setDeleteState] = useState<DeleteState>({ status: 'idle' });
 
-  // Update modal state when confirmDelete changes
+  // Update modal state when deleteState changes
   useEffect(() => {
-    setModalOpen(confirmDelete);
-    if (confirmDelete) {
-      setDeleteError(null);
-    }
+    const isConfirming = deleteState.status === 'confirming' || deleteState.status === 'deleting' || deleteState.status === 'error';
+    setModalOpen(isConfirming);
     return () => setModalOpen(false); // Clean up on unmount
-  }, [confirmDelete, setModalOpen]);
+  }, [deleteState, setModalOpen]);
 
   useEffect(() => {
     const loadHistory = async () => {
@@ -81,8 +89,9 @@ export function HistoryScreen(): React.ReactElement {
 
         // Backend already sorts by date (newest first), no need to sort again
         setRuns(result);
-      } catch (err: any) {
-        setError(`Failed to load history: ${err.message}`);
+      } catch (err: unknown) {
+        const error = err as ApiError;
+        setError(`Failed to load history: ${error.message}`);
       } finally {
         setLoading(false);
       }
@@ -138,30 +147,30 @@ export function HistoryScreen(): React.ReactElement {
         Boolean(details.files?.best_poses) ||
         Boolean(details.files?.all_poses_dir);
 
-      let poses: any[] = [];
+      let poses: unknown[] = [];
       if (!isBatchRun) {
         poses = await getBridge().getPoses(selectedRun.path);
       }
 
       if (debugMode) {
         logger.debug('History', 'Loaded poses', { count: poses.length });
-        logger.debug('History', 'Run details', details);
+        logger.debug('History', 'Run details', { details });
       }
 
       // Transform poses to match expected format with validation
       const transformedPoses: PoseResult[] = poses
-        .filter((p: any) => p != null && typeof p.error_estimate === 'number')
-        .map((p: any) => ({
-          rank: p.rank ?? 0,
-          error_estimate: p.error_estimate ?? 0,
-          pb_count: p.pb_count ?? 0,
+        .filter((p: unknown): p is Record<string, unknown> => p != null && typeof (p as Record<string, unknown>).error_estimate === 'number')
+        .map((p: Record<string, unknown>) => ({
+          rank: (p.rank as number) ?? 0,
+          error_estimate: (p.error_estimate as number) ?? 0,
+          pb_count: (p.pb_count as number) ?? 0,
           checks: {
-            not_too_far_away: p.not_too_far_away ?? false,
-            no_internal_clash: p.no_internal_clash ?? false,
-            no_clashes: p.no_clashes ?? false,
-            no_volume_clash: p.no_volume_clash ?? false,
+            not_too_far_away: (p.not_too_far_away as boolean) ?? false,
+            no_internal_clash: (p.no_internal_clash as boolean) ?? false,
+            no_clashes: (p.no_clashes as boolean) ?? false,
+            no_volume_clash: (p.no_volume_clash as boolean) ?? false,
           },
-          buried_fraction: p.buried_fraction ?? 0,
+          buried_fraction: (p.buried_fraction as number) ?? 0,
         }));
 
       // Calculate statistics
@@ -268,9 +277,10 @@ export function HistoryScreen(): React.ReactElement {
       setResults(results);
       setPreviousScreen('history');
       setScreen('results');
-    } catch (err: any) {
-      logger.error('History', 'Failed to load results', { error: err });
-      setError(`Failed to load results: ${err.message}`);
+    } catch (err: unknown) {
+      const error = err as ApiError;
+      logger.error('History', 'Failed to load results', { error: error.message });
+      setError(`Failed to load results: ${error.message}`);
     } finally {
       setLoadingResults(false);
     }
@@ -278,13 +288,13 @@ export function HistoryScreen(): React.ReactElement {
 
   // Delete selected run
   const deleteRun = async () => {
-    if (deleting || runs.length === 0) return;
+    if (deleteState.status === 'deleting' || runs.length === 0) return;
 
     const selectedRun = runs[selectedIndex];
     if (!selectedRun) return;
 
     try {
-      setDeleting(true);
+      setDeleteState({ status: 'deleting' });
 
       // Call backend to delete run
       const result = await getBridge().deleteRun(selectedRun.path);
@@ -299,27 +309,25 @@ export function HistoryScreen(): React.ReactElement {
           setHistorySelectedIndex(newRuns.length - 1);
         }
 
-        setConfirmDelete(false);
-        setDeleteError(null);
+        setDeleteState({ status: 'idle' });
       } else {
-        setDeleteError(result.error || 'Failed to delete run');
+        setDeleteState({ status: 'error', message: result.error || 'Failed to delete run' });
       }
-    } catch (err: any) {
-      setDeleteError(`Failed to delete run: ${err.message}`);
-    } finally {
-      setDeleting(false);
+    } catch (err: unknown) {
+      const error = err as ApiError;
+      setDeleteState({ status: 'error', message: `Failed to delete run: ${error.message}` });
     }
   };
 
   useInput((input, key) => {
-    if (loadingResults || deleting) return; // Disable navigation while loading
+    if (loadingResults || deleteState.status === 'deleting') return; // Disable navigation while loading
 
     // Confirmation mode
-    if (confirmDelete) {
+    if (deleteState.status === 'confirming' || deleteState.status === 'error') {
       if (isKey(input, 'y')) {
         deleteRun();
       } else if (isKey(input, 'n') || key.escape) {
-        setConfirmDelete(false);
+        setDeleteState({ status: 'idle' });
       }
       return;
     }
@@ -328,7 +336,7 @@ export function HistoryScreen(): React.ReactElement {
     if (key.upArrow) setHistorySelectedIndex(Math.max(0, selectedIndex - 1));
     else if (key.downArrow) setHistorySelectedIndex(Math.min(runs.length - 1, selectedIndex + 1));
     else if (key.return) viewResults();
-    else if (isKey(input, 'd') && runs.length > 0) setConfirmDelete(true);
+    else if (isKey(input, 'd') && runs.length > 0) setDeleteState({ status: 'confirming' });
     else if (key.escape || key.leftArrow) setScreen('welcome');
   });
 
@@ -345,7 +353,7 @@ export function HistoryScreen(): React.ReactElement {
     );
   }
 
-  if (deleting) {
+  if (deleteState.status === 'deleting') {
     return (
       <Box flexDirection="column" gap={1}>
         <Text color="yellow">Deleting {runs[selectedIndex]?.name}...</Text>
@@ -355,7 +363,7 @@ export function HistoryScreen(): React.ReactElement {
   }
 
   // Confirmation dialog
-  if (confirmDelete && runs[selectedIndex]) {
+  if ((deleteState.status === 'confirming' || deleteState.status === 'error') && runs[selectedIndex]) {
     return (
       <Box flexDirection="column" gap={1}>
         <Box borderStyle="round" borderColor="gray" paddingX={1}>
@@ -363,8 +371,8 @@ export function HistoryScreen(): React.ReactElement {
             <Text bold color="white">Delete run?</Text>
             <Text color="gray" dimColor>This action cannot be undone.</Text>
             <Text color="yellow">{runs[selectedIndex].name}</Text>
-            {deleteError && (
-              <Text color="red" dimColor>Error: {deleteError}</Text>
+            {deleteState.status === 'error' && (
+              <Text color="red" dimColor>Error: {deleteState.message}</Text>
             )}
           </Box>
         </Box>
@@ -397,7 +405,7 @@ export function HistoryScreen(): React.ReactElement {
       <Text bold color="white">Previous Runs ({runs.length})</Text>
 
       <Box marginTop={1}>
-        <Text color="gray" bold>{'  '}{'Name'.padEnd(25)}{'Date'.padEnd(20)}Status</Text>
+        <Text color="gray" bold>{'  '}{'Name'.padEnd(TABLE_COLUMN_WIDTHS.HISTORY_NAME)}{'Date'.padEnd(TABLE_COLUMN_WIDTHS.DATE)}Status</Text>
       </Box>
 
       <Box flexDirection="column">
@@ -409,8 +417,8 @@ export function HistoryScreen(): React.ReactElement {
           return (
             <Box key={run.path}>
               <Text color={isSelected ? 'cyan' : 'white'}>{isSelected ? '▶ ' : '  '}</Text>
-              <Text color={isSelected ? 'cyan' : 'white'} bold={isSelected}>{run.name.slice(0, 23).padEnd(25)}</Text>
-              <Text color="gray">{formatDate(run.date).padEnd(20)}</Text>
+              <Text color={isSelected ? 'cyan' : 'white'} bold={isSelected}>{run.name.slice(0, TEXT_LIMITS.RUN_NAME).padEnd(TABLE_COLUMN_WIDTHS.HISTORY_NAME)}</Text>
+              <Text color="gray">{formatDate(run.date).padEnd(TABLE_COLUMN_WIDTHS.DATE)}</Text>
               <Text color={statusColor}>{statusIcon} {run.status}</Text>
             </Box>
           );
@@ -453,6 +461,6 @@ function formatDate(isoDate: string): string {
     const date = new Date(isoDate);
     return date.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   } catch {
-    return isoDate.slice(0, 16);
+    return isoDate.slice(0, TABLE_COLUMN_WIDTHS.DATE_TRUNCATE);
   }
 }

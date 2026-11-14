@@ -346,6 +346,12 @@ class RPCHandler:
         if not p.is_dir():
             raise ValueError(f"Not a directory: {path}")
 
+        # Normalize extensions (add dot if missing)
+        normalized_extensions = [
+            e if e.startswith('.') else f'.{e}'
+            for e in extensions
+        ] if extensions else []
+
         files: list[FileInfo] = []
         try:
             for item in sorted(p.iterdir()):
@@ -353,8 +359,8 @@ class RPCHandler:
                     continue
 
                 ext = item.suffix.lower()
-                if item.is_file() and extensions:
-                    if ext not in extensions and ext.lstrip(".") not in extensions:
+                if item.is_file() and normalized_extensions:
+                    if ext not in normalized_extensions:
                         continue
 
                 files.append(

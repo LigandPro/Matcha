@@ -4,9 +4,10 @@ import { useStore } from '../store/index.js';
 import { truncatePath } from '../utils/format.js';
 import { isKey } from '../utils/keyboard.js';
 import * as path from 'path';
+import type { JobConfig } from '../types/index.js';
 
 export function SetupReview(): React.ReactElement {
-  const { setScreen, jobConfig } = useStore();
+  const { setScreen, jobConfig, setPendingJobConfig } = useStore();
 
   const mode = jobConfig.mode === 'batch' ? 'Batch (multiple ligands)' : 'Single ligand';
   const receptor = jobConfig.receptor ? path.basename(jobConfig.receptor) : '—';
@@ -29,6 +30,22 @@ export function SetupReview(): React.ReactElement {
   const { nSamples, gpu, physicalOnly, runName, outputDir } = jobConfig.params || {};
 
   const startDocking = () => {
+    // Create immutable snapshot of current jobConfig
+    // Only snapshot if we have required fields
+    if (jobConfig.mode && jobConfig.receptor && jobConfig.box && jobConfig.params) {
+      const configSnapshot: JobConfig = {
+        mode: jobConfig.mode,
+        receptor: jobConfig.receptor,
+        ligand: jobConfig.ligand,
+        ligandDir: jobConfig.ligandDir,
+        box: { ...jobConfig.box },
+        params: { ...jobConfig.params },
+      };
+
+      // Save snapshot for Running screen to use
+      setPendingJobConfig(configSnapshot);
+    }
+
     setScreen('running');
   };
 

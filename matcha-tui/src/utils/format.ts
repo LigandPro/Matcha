@@ -1,4 +1,23 @@
 import { formatDistanceToNow, format } from 'date-fns';
+import * as os from 'os';
+
+/**
+ * Make clickable links in terminal using OSC 8 escape codes
+ */
+export function makeClickableLink(url: string, text: string): string {
+  return `\x1b]8;;file://${url}\x1b\\${text}\x1b]8;;\x1b\\`;
+}
+
+/**
+ * Shorten path with ~ for home directory
+ */
+export function shortenPath(fullPath: string): string {
+  const homeDir = os.homedir();
+  if (fullPath.startsWith(homeDir)) {
+    return fullPath.replace(homeDir, '~');
+  }
+  return fullPath;
+}
 
 /**
  * Format runtime in seconds to human-readable string
